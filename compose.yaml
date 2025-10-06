@@ -1,0 +1,69 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: haven
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant:1.7.3
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  catalog:
+    build:
+      context: .
+    command: uvicorn services.catalog_api.app:app --host 0.0.0.0 --port 8081
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/haven
+      CATALOG_TOKEN: ${CATALOG_TOKEN:-}
+      EMBEDDING_MODEL: BAAI/bge-m3
+    depends_on:
+      - postgres
+    ports:
+      - "127.0.0.1:8081:8081"
+
+  embedding:
+    build:
+      context: .
+    command: python services/embedding_worker/worker.py
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/haven
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: imessage_chunks
+      EMBEDDING_MODEL: BAAI/bge-m3
+    depends_on:
+      - postgres
+      - qdrant
+
+  gateway:
+    build:
+      context: .
+    command: uvicorn services.gateway_api.app:app --host 0.0.0.0 --port 8080
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/haven
+      AUTH_TOKEN: ${AUTH_TOKEN:-changeme}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: imessage_chunks
+      EMBEDDING_MODEL: BAAI/bge-m3
+    depends_on:
+      - postgres
+      - qdrant
+      - catalog
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  pg_data:
+  qdrant_data:
