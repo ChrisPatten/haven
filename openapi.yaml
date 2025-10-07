@@ -101,6 +101,29 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ContextGeneral'
+  /v1/catalog/events:
+    post:
+      tags:
+        - catalog
+      summary: Enqueue catalog ingestion events
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CatalogEventsRequest'
+      responses:
+        '202':
+          description: Ingestion accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ingested:
+                    type: integer
 components:
   securitySchemes:
     bearerAuth:
@@ -209,6 +232,10 @@ components:
           type: integer
         total_messages:
           type: integer
+        last_message_ts:
+          type: string
+          format: date-time
+          nullable: true
         top_threads:
           type: array
           items:
@@ -217,3 +244,98 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ContextHighlight'
+    CatalogEventsRequest:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogEventItem'
+      required:
+        - items
+    CatalogEventItem:
+      type: object
+      properties:
+        source:
+          type: string
+        doc_id:
+          type: string
+        thread:
+          $ref: '#/components/schemas/CatalogThread'
+        message:
+          $ref: '#/components/schemas/CatalogMessage'
+        chunks:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogChunk'
+      required:
+        - source
+        - doc_id
+        - thread
+        - message
+        - chunks
+    CatalogThread:
+      type: object
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        participants:
+          type: array
+          items:
+            type: string
+        title:
+          type: string
+          nullable: true
+      required:
+        - id
+        - kind
+        - participants
+    CatalogMessage:
+      type: object
+      properties:
+        row_id:
+          type: integer
+          nullable: true
+        guid:
+          type: string
+        thread_id:
+          type: string
+        ts:
+          type: string
+          format: date-time
+          nullable: true
+        sender:
+          type: string
+        sender_service:
+          type: string
+          nullable: true
+        is_from_me:
+          type: boolean
+        text:
+          type: string
+        attrs:
+          type: object
+      required:
+        - guid
+        - thread_id
+        - sender
+        - is_from_me
+        - text
+        - attrs
+    CatalogChunk:
+      type: object
+      properties:
+        id:
+          type: string
+        chunk_index:
+          type: integer
+        text:
+          type: string
+        meta:
+          type: object
+      required:
+        - id
+        - chunk_index
+        - text

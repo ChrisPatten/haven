@@ -10,6 +10,7 @@ from psycopg.types.json import Json
 
 from shared.db import get_connection
 from shared.logging import get_logger, setup_logging
+from shared.context import fetch_context_overview
 
 logger = get_logger("catalog.api")
 
@@ -101,6 +102,7 @@ class ContextHighlight(BaseModel):
 class ContextGeneralResponse(BaseModel):
     total_threads: int
     total_messages: int
+    last_message_ts: Optional[datetime] = None
     top_threads: List[ContextThread]
     recent_highlights: List[ContextHighlight]
 
@@ -242,50 +244,20 @@ def get_document(doc_id: str) -> DocResponse:
 @app.get("/v1/context/general", response_model=ContextGeneralResponse)
 def get_context_general() -> ContextGeneralResponse:
     with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM threads")
-            total_threads = cur.fetchone()[0]
+        overview = fetch_context_overview(conn)
 
-            cur.execute("SELECT COUNT(*) FROM messages")
-            total_messages = cur.fetchone()[0]
-
-            cur.execute(
-                """
-                SELECT m.thread_id, t.title, COUNT(*) AS message_count
-                FROM messages m
-                JOIN threads t ON t.id = m.thread_id
-                GROUP BY m.thread_id, t.title
-                ORDER BY message_count DESC
-                LIMIT 5
-                """
-            )
-            top_threads = [
-                ContextThread(thread_id=row[0], title=row[1], message_count=row[2])
-                for row in cur.fetchall()
-            ]
-
-            cur.execute(
-                """
-                SELECT doc_id, thread_id, ts, sender, text
-                FROM messages
-                ORDER BY ts DESC
-                LIMIT 5
-                """
-            )
-            recent_highlights = [
-                ContextHighlight(
-                    doc_id=row[0],
-                    thread_id=row[1],
-                    ts=row[2],
-                    sender=row[3],
-                    text=row[4],
-                )
-                for row in cur.fetchall()
-            ]
+    top_threads = [
+        ContextThread(thread_id=t["thread_id"], title=t["title"], message_count=t["message_count"])
+        for t in overview["top_threads"]
+    ]
+    recent_highlights = [
+        ContextHighlight(**h) for h in overview["recent_highlights"]
+    ]
 
     return ContextGeneralResponse(
-        total_threads=total_threads,
-        total_messages=total_messages,
+        total_threads=overview["total_threads"],
+        total_messages=overview["total_messages"],
+        last_message_ts=overview.get("last_message_ts"),
         top_threads=top_threads,
         recent_highlights=recent_highlights,
     )
@@ -294,4 +266,3 @@ def get_context_general() -> ContextGeneralResponse:
 @app.get("/v1/healthz")
 def healthcheck() -> Dict[str, str]:
     return {"status": "ok"}
-

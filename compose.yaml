@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:15
@@ -12,9 +10,10 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+      - ./schema/catalog_mvp.sql:/docker-entrypoint-initdb.d/catalog_mvp.sql:ro
 
   qdrant:
-    image: qdrant/qdrant:1.7.3
+    image: qdrant/qdrant:v1.7.3
     restart: unless-stopped
     ports:
       - "127.0.0.1:6333:6333"
@@ -31,8 +30,6 @@ services:
       EMBEDDING_MODEL: BAAI/bge-m3
     depends_on:
       - postgres
-    ports:
-      - "127.0.0.1:8081:8081"
 
   embedding:
     build:
@@ -54,6 +51,8 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/haven
       AUTH_TOKEN: ${AUTH_TOKEN:-changeme}
+      CATALOG_BASE_URL: http://catalog:8081
+      CATALOG_TOKEN: ${CATALOG_TOKEN:-}
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: imessage_chunks
       EMBEDDING_MODEL: BAAI/bge-m3

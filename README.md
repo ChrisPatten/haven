@@ -4,10 +4,10 @@ This repository implements the Haven Personal Data Plane (PDP) minimum viable pr
 
 ## Components
 
-- **Collector (host process)** – copies `~/Library/Messages/chat.db` using the SQLite backup API, normalizes new messages, and posts them to the catalog service.
-- **Catalog API (`:8081`)** – FastAPI service that stores threads/messages/chunks in Postgres, maintains FTS indexes, and tracks embedding status.
+- **Collector (host process)** – copies `~/Library/Messages/chat.db` using the SQLite backup API, normalizes new messages, and posts them to the gateway for ingestion.
+- **Catalog API (internal)** – FastAPI service that stores threads/messages/chunks in Postgres, maintains FTS indexes, and tracks embedding status. It is reachable only on the Docker network.
 - **Embedding Worker** – polls for chunks marked `pending`, generates `BAAI/bge-m3` embeddings, and upserts them into Qdrant.
-- **Gateway API (`:8080`)** – FastAPI service that performs hybrid lexical/vector search, extractive summarization, document retrieval, and context insights.
+- **Gateway API (`:8080`)** – FastAPI service that performs hybrid lexical/vector search, extractive summarization, document retrieval, context insights, and proxies ingestion/context calls to the catalog.
 - **OpenAPI Spec** – `openapi.yaml` describes the public endpoints for Custom GPT integration.
 
 ## Prerequisites
@@ -35,7 +35,8 @@ python services/collector/collector_imessage.py
 Environment variables (with sensible defaults):
 
 - `AUTH_TOKEN` – bearer token required by the gateway.
-- `CATALOG_TOKEN` – optional shared secret for collector → catalog ingestion.
+- `CATALOG_TOKEN` – optional shared secret for collector → gateway → catalog ingestion.
+- `CATALOG_BASE_URL` – internal URL the gateway uses to reach the catalog service (defaults to `http://catalog:8081`).
 - `DATABASE_URL` – Postgres connection string (each service overrides for Docker networking).
 - `EMBEDDING_MODEL` – embedding model identifier (`BAAI/bge-m3`).
 - `QDRANT_URL`, `QDRANT_COLLECTION` – vector store configuration.
@@ -60,7 +61,7 @@ curl -s "http://localhost:8080/v1/search?q=MMED" -H "Authorization: Bearer $AUTH
 
 ## Security
 
-- All network services bind to `localhost` only via Docker port publishing.
+- Only the gateway service publishes a host port; other services remain on the internal Docker network.
 - Bearer token authentication enforced on ingestion (optional) and all gateway routes.
 - Collector maintains local state in `~/.haven/imessage_collector_state.json` and never uploads raw attachments.
 

@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Sequence
 
+import httpx
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
@@ -25,6 +26,8 @@ class GatewaySettings(BaseModel):
     embedding_dim: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "1024")))
     qdrant_url: str = Field(default_factory=lambda: os.getenv("QDRANT_URL", "http://qdrant:6333"))
     qdrant_collection: str = Field(default_factory=lambda: os.getenv("QDRANT_COLLECTION", "imessage_chunks"))
+    catalog_base_url: str = Field(default_factory=lambda: os.getenv("CATALOG_BASE_URL", "http://catalog:8081"))
+    catalog_token: str | None = Field(default_factory=lambda: os.getenv("CATALOG_TOKEN"))
 
 
 settings = GatewaySettings()
@@ -102,6 +105,18 @@ def require_token(request: Request) -> None:
     token = header.split(" ", 1)[1]
     if token != settings.api_token:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
+
+
+def require_catalog_token(request: Request) -> None:
+    catalog_token = settings.catalog_token
+    if not catalog_token:
+        return
+    header = request.headers.get("Authorization")
+    if not header or not header.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing catalog token")
+    token = header.split(" ", 1)[1]
+    if token != catalog_token:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid catalog token")
 
 
 def fetch_messages_by_doc_ids(conn: psycopg.Connection, doc_ids: Sequence[str]) -> Dict[str, MessageDoc]:
@@ -279,54 +294,42 @@ async def doc_endpoint(doc_id: str, _: None = Depends(require_token)) -> Dict[st
 
 @app.get("/v1/context/general")
 async def context_general(_: None = Depends(require_token)) -> Dict[str, Any]:
-    with psycopg.connect(settings.database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM threads")
-            total_threads = cur.fetchone()[0]
+    headers: Dict[str, str] = {}
+    if settings.catalog_token:
+        headers["Authorization"] = f"Bearer {settings.catalog_token}"
 
-            cur.execute("SELECT COUNT(*) FROM messages")
-            total_messages = cur.fetchone()[0]
+    async with httpx.AsyncClient(base_url=settings.catalog_base_url, timeout=10.0) as client:
+        response = await client.get("/v1/context/general", headers=headers)
 
-            cur.execute(
-                """
-                SELECT m.thread_id, t.title, COUNT(*) AS message_count
-                FROM messages m
-                JOIN threads t ON t.id = m.thread_id
-                GROUP BY m.thread_id, t.title
-                ORDER BY message_count DESC
-                LIMIT 5
-                """
-            )
-            top_threads = [
-                {"thread_id": row[0], "title": row[1], "message_count": row[2]}
-                for row in cur.fetchall()
-            ]
+    if response.status_code >= 400:
+        try:
+            detail: Any = response.json()
+        except ValueError:
+            detail = response.text
+        raise HTTPException(status_code=response.status_code, detail=detail)
 
-            cur.execute(
-                """
-                SELECT doc_id, thread_id, ts, sender, text
-                FROM messages
-                ORDER BY ts DESC
-                LIMIT 5
-                """
-            )
-            recent_highlights = [
-                {
-                    "doc_id": row[0],
-                    "thread_id": row[1],
-                    "ts": row[2],
-                    "sender": row[3],
-                    "text": row[4],
-                }
-                for row in cur.fetchall()
-            ]
+    return response.json()
 
-    return {
-        "total_threads": total_threads,
-        "total_messages": total_messages,
-        "top_threads": top_threads,
-        "recent_highlights": recent_highlights,
-    }
+
+@app.post("/v1/catalog/events", status_code=status.HTTP_202_ACCEPTED)
+async def proxy_catalog_events(
+    request: Request,
+    _: None = Depends(require_catalog_token),
+) -> Response:
+    payload = await request.body()
+
+    headers: Dict[str, str] = {"Content-Type": request.headers.get("content-type", "application/json")}
+    if settings.catalog_token:
+        headers["Authorization"] = f"Bearer {settings.catalog_token}"
+
+    async with httpx.AsyncClient(base_url=settings.catalog_base_url, timeout=10.0) as client:
+        response = await client.post("/v1/catalog/events", content=payload, headers=headers)
+
+    return Response(
+        content=response.content,
+        status_code=response.status_code,
+        media_type=response.headers.get("content-type", "application/json"),
+    )
 
 
 @app.get("/v1/healthz")
