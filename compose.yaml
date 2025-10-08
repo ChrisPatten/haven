@@ -22,7 +22,6 @@ services:
       args:
         SERVICE: "search"
     environment:
-      - VECTOR_BACKEND=qdrant
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_COLLECTION=haven_chunks
       - DB_DSN=postgresql://postgres:postgres@postgres:5432/haven
@@ -60,14 +59,14 @@ services:
     depends_on:
       - postgres
 
-  collector_web:
+  collector:
     profiles: ["collector"]
     build:
       context: .
       args:
         SERVICE: "collector"
     environment:
-      - INGEST_URL=http://search:8080/v1/ingest/documents:batchUpsert
+      - CATALOG_ENDPOINT=http://gateway:8080/v1/catalog/events
       - AUTH_TOKEN=${AUTH_TOKEN:-changeme}
     depends_on:
       - search

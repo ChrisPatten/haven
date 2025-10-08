@@ -2,13 +2,26 @@
 
 This repository implements the Haven Personal Data Plane (PDP) minimum viable product focused on the macOS iMessage → OpenAPI vertical slice. It ingests local iMessage history, catalogs the normalized messages, indexes semantic embeddings in Qdrant, and exposes hybrid search and summarization endpoints over an authenticated FastAPI gateway.
 
+See the detailed documentation under `artifacts/documentation/`:
+- [`technical_reference.md`](artifacts/documentation/technical_reference.md) — architecture, service internals, data stores, deployment topology, and configuration.
+- [`functional_guide.md`](artifacts/documentation/functional_guide.md) — user workflows, API behavior, authentication model, runbooks, and troubleshooting tips.
+
 ## Components
 
-- **Collector (host process)** – copies `~/Library/Messages/chat.db` using the SQLite backup API, normalizes new messages, and posts them to the gateway for ingestion.
+- **Collector (host process/optional compose profile)** – copies `~/Library/Messages/chat.db` using the SQLite backup API, normalizes new messages, and posts them to the gateway for ingestion.
 - **Catalog API (internal)** – FastAPI service that stores threads/messages/chunks in Postgres, maintains FTS indexes, and tracks embedding status. It is reachable only on the Docker network.
 - **Embedding Worker** – polls for chunks marked `pending`, generates `BAAI/bge-m3` embeddings, and upserts them into Qdrant.
 - **Gateway API (`:8085`)** – FastAPI service that performs hybrid lexical/vector search, extractive summarization, document retrieval, context insights, and proxies ingestion/context calls to the catalog.
+- **Search Service** – Hybrid lexical/vector search backend with ingestion routes and Typer CLI entrypoint.
 - **OpenAPI Spec** – `openapi.yaml` describes the public endpoints for Custom GPT integration.
+
+## Repository Layout
+
+- `services/` – Deployable FastAPI apps and workers (gateway, catalog, embedding worker) plus the iMessage collector CLI.
+- `src/haven/` – Installable Python package with search pipelines, SDK, and shared domain logic consumed by services.
+- `shared/` – Cross-service helpers (logging, Postgres utilities, dependency guards).
+- `schema/` – SQL migrations / initialization scripts.
+- `artifacts/` – Generated architecture maps, findings, and documentation.
 
 ## Prerequisites
 
@@ -22,6 +35,8 @@ This repository implements the Haven Personal Data Plane (PDP) minimum viable pr
 # 1. Start infrastructure and APIs
 export AUTH_TOKEN="changeme"
 docker compose up --build
+# (optional) run the collector container
+# COMPOSE_PROFILES=collector docker compose up --build collector
 
 # 2. Initialize Postgres schema
 psql postgresql://postgres:postgres@localhost:5432/haven -f schema/catalog_mvp.sql
@@ -64,4 +79,3 @@ curl -s "http://localhost:8085/v1/search?q=MMED" -H "Authorization: Bearer $AUTH
 - Only the gateway service publishes a host port; other services remain on the internal Docker network.
 - Bearer token authentication enforced on ingestion (optional) and all gateway routes.
 - Collector maintains local state in `~/.haven/imessage_collector_state.json` and never uploads raw attachments.
-

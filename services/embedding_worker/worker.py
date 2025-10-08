@@ -20,7 +20,7 @@ logger = get_logger("embedding.worker")
 class WorkerSettings(BaseModel):
     database_url: str = Field(default_factory=get_conn_str)
     qdrant_url: str = Field(default_factory=lambda: os.getenv("QDRANT_URL", "http://qdrant:6333"))
-    qdrant_collection: str = Field(default_factory=lambda: os.getenv("QDRANT_COLLECTION", "imessage_chunks"))
+    qdrant_collection: str = Field(default_factory=lambda: os.getenv("QDRANT_COLLECTION", "haven_chunks"))
     embedding_model: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"))
     embedding_dim: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "1024")))
     poll_interval: float = Field(default_factory=lambda: float(os.getenv("WORKER_POLL_INTERVAL", "2.0")))
@@ -154,4 +154,3 @@ def run_worker() -> None:
 
 if __name__ == "__main__":
     run_worker()
-

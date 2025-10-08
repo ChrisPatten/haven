@@ -19,7 +19,7 @@ from shared.deps import assert_missing_dependencies
 from shared.logging import get_logger, setup_logging
 
 
-assert_missing_dependencies(["qdrant-client", "sentence-transformers"], "Gateway API")
+assert_missing_dependencies(["authlib", "redis", "jinja2"], "Gateway API")
 
 logger = get_logger("gateway.api")
 
@@ -27,7 +27,7 @@ logger = get_logger("gateway.api")
 class GatewaySettings(BaseModel):
     database_url: str = Field(default_factory=get_conn_str)
     api_token: str = Field(default_factory=lambda: os.getenv("AUTH_TOKEN", ""))
-    catalog_base_url: str = Field(default_factory=lambda: os.getenv("CATALOG_BASE_URL", "http://catalog:8082"))
+    catalog_base_url: str = Field(default_factory=lambda: os.getenv("CATALOG_BASE_URL", "http://catalog:8081"))
     catalog_token: str | None = Field(default_factory=lambda: os.getenv("CATALOG_TOKEN"))
     search_url: str = Field(default_factory=lambda: os.getenv("SEARCH_URL", "http://search:8080"))
     search_token: str | None = Field(default_factory=lambda: os.getenv("SEARCH_TOKEN"))

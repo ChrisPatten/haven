@@ -1,8 +1,8 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- Core services live under `services/`: `catalog_api`, `gateway_api`, `embedding_worker`, and `collector` each expose a FastAPI app or worker entrypoint.
-- Shared helpers such as database sessions and logging live in `shared/`.
+- Core services live under `services/`: `catalog_api`, `gateway_api`, `embedding_worker`, and the `collector` CLI each expose a FastAPI app or worker entrypoint.
+- Shared helpers such as database sessions and logging live in `shared/`; reusable domain code (search pipelines, SDK) is packaged in `src/haven/` for import.
 - Integration assets sit in `compose.yaml`, `Dockerfile`, and `openapi.yaml`; SQL migrations live in `schema/`.
 - Python tests reside in `tests/` and mirror service names (e.g., `test_gateway_summary.py`).
 
@@ -13,12 +13,12 @@ docker compose up --build          # start Postgres, Qdrant, and API stack
 psql postgresql://postgres:postgres@localhost:5432/haven -f schema/catalog_mvp.sql
 python services/collector/collector_imessage.py [--simulate "Hi"]
 ```
-Use `requirements.txt` with a Python 3.11 virtualenv when running services outside Docker.
+Use `requirements.txt` with a Python 3.11 virtualenv when running services outside Docker. To run the collector via Docker, enable the optional profile: `COMPOSE_PROFILES=collector docker compose up --build collector`.
 
 ## Coding Style & Naming Conventions
 - Python 3.11, 4-space indentation, and type hints are expected across services.
 - Keep modules small and align new files with existing package layout under `services/` or `shared/`.
-- Run `ruff check .` and `black .` before committing; configure editors to save in UTF-8 without trailing whitespace.
+- Run `ruff check .` and `black .` before committing; configure editors to save in UTF-8 without trailing whitespace. Fix existing lint debt opportunistically.
 - Prefer `snake_case` for modules/functions, `PascalCase` for classes, and descriptive FastAPI route names.
 
 ## Testing Guidelines

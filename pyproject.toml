@@ -45,5 +45,4 @@ include = ["haven*", "services*", "shared*"]
 
 [project.scripts]
 search-service = "haven.search.main:cli"
-gateway-api = "services.gateway_api.app:app"
 collector-run = "services.collector.collector_imessage:main"
