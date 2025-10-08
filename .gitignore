@@ -208,3 +208,6 @@ __marimo__/
 
 # macOS
 .DS_Store
+
+# Ignore local helper scripts that assemble developer context
+scripts/collect_context.sh
