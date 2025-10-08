@@ -8,7 +8,7 @@ See the detailed documentation under `artifacts/documentation/`:
 
 ## Components
 
-- **Collector (host process/optional compose profile)** – copies `~/Library/Messages/chat.db` using the SQLite backup API, normalizes new messages, and posts them to the gateway for ingestion.
+- **Collector (host process/optional compose profile)** – copies `~/Library/Messages/chat.db` using the SQLite backup API, normalizes new messages, and posts them to the gateway for ingestion. A separate contacts collector reads macOS Contacts via pyobjc and syncs them to the catalog.
 - **Catalog API (internal)** – FastAPI service that stores threads/messages/chunks in Postgres, maintains FTS indexes, and tracks embedding status. It is reachable only on the Docker network.
 - **Embedding Worker** – polls for chunks marked `pending`, generates `BAAI/bge-m3` embeddings, and upserts them into Qdrant.
 - **Gateway API (`:8085`)** – FastAPI service that performs hybrid lexical/vector search, extractive summarization, document retrieval, context insights, and proxies ingestion/context calls to the catalog.
@@ -41,9 +41,58 @@ docker compose up --build
 # 2. Initialize Postgres schema
 psql postgresql://postgres:postgres@localhost:5432/haven -f schema/catalog_mvp.sql
 
-# 3. Run the collector locally
+# 3. Run the iMessage collector locally
 python services/collector/collector_imessage.py
 ```
+
+### Running the Contacts Collector (macOS)
+
+The contacts collector reads your local macOS Contacts and syncs them to the catalog via the gateway. It requires pyobjc and must run as the logged-in user with Contacts permission granted in System Settings.
+
+```bash
+# 1. Install local requirements (pyobjc + dependencies)
+pip install -r local_requirements.txt
+
+# 2. Run the collector once to sync all contacts
+export CATALOG_TOKEN="changeme"
+python services/collector/collector_contacts.py
+
+# The collector will:
+# - Request Contacts access (macOS prompt on first run)
+# - Fetch all contacts from the Contacts store
+# - POST batches to the gateway ingest endpoint
+# - Log progress and completion
+```
+
+**Important notes:**
+- The collector accesses macOS Contacts via the Contacts.framework (pyobjc). You must grant permission in System Settings > Privacy & Security > Contacts.
+- The collector stores no local state; it syncs all contacts on each run. Run it periodically (manually or via cron/launchd) to keep the catalog up-to-date.
+- Never commit `~/.haven/*` files; they are marked sensitive in `.gitignore`.
+```
+
+### Running the Contacts Collector (macOS)
+
+The contacts collector reads your local macOS Contacts and syncs them to the catalog via the gateway. It requires pyobjc and must run as the logged-in user with Contacts permission granted in System Settings.
+
+```bash
+# 1. Install local requirements (pyobjc + dependencies)
+pip install -r local_requirements.txt
+
+# 2. Run the collector once to sync all contacts
+export CATALOG_TOKEN="changeme"
+python services/collector/collector_contacts.py
+
+# The collector will:
+# - Request Contacts access (macOS prompt on first run)
+# - Fetch all contacts from the Contacts store
+# - POST batches to the gateway ingest endpoint
+# - Log progress and completion
+```
+
+**Important notes:**
+- The collector accesses macOS Contacts via the Contacts.framework (pyobjc). You must grant permission in System Settings > Privacy & Security > Contacts.
+- The collector stores no local state; it syncs all contacts on each run. Run it periodically (manually or via cron/launchd) to keep the catalog up-to-date.
+- Never commit `~/.haven/*` files; they are marked sensitive in `.gitignore`.
 
 ## Configuration
 

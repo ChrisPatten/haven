@@ -39,6 +39,7 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/haven
       - AUTH_TOKEN=${AUTH_TOKEN:-changeme}
       - CATALOG_BASE_URL=http://catalog:8081
+      - CONTACTS_HELPER_URL=http://catalog:8081
       - CATALOG_TOKEN=${CATALOG_TOKEN:-}
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_COLLECTION=haven_chunks
@@ -68,6 +69,8 @@ services:
     environment:
       - CATALOG_ENDPOINT=http://gateway:8080/v1/catalog/events
       - AUTH_TOKEN=${AUTH_TOKEN:-changeme}
+      - CONTACTS_GATEWAY_URL=http://gateway:8080
+      - CONTACTS_GATEWAY_ENDPOINT=http://gateway:8080/catalog/contacts/ingest
     depends_on:
       - search
 

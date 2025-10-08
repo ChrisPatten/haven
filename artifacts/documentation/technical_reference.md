@@ -42,6 +42,9 @@ All services share the default Docker network (`haven_default`). Gateway maps po
   - `GET /v1/context/general`: Proxies to catalog context endpoint, forwarding catalog token.
   - `POST /v1/catalog/events`: Streams ingestion payloads to catalog API.
   - `GET /v1/healthz`: Health status.
+    - Contact export/ingest: the gateway now exposes a proxy and ingest surface for contact data:
+      - `GET /catalog/contacts/export` — proxies an NDJSON contacts export (streaming NDJSON) from the catalog helper service.
+      - `POST /catalog/contacts/ingest` — ingest a batch of normalized people records (used by the macOS Contacts collector).
 - **Environment**:
   - `AUTH_TOKEN`: Bearer token required for gateway endpoints (optional).
   - `CATALOG_BASE_URL`: Default `http://catalog:8081`.
@@ -82,6 +85,7 @@ All services share the default Docker network (`haven_default`). Gateway maps po
   4. Generate deterministic chunk IDs, truncate message text, and export payload via `requests.post` to `CATALOG_ENDPOINT`.
   5. Persist collector state.
 - **CLI**: `collector-run` entrypoint exposes `main()`; CLI options defined with `argparse` allow simulation mode (`--simulate`).
+ - **Contacts Collector (macOS)**: A new optional collector `services/collector/collector_contacts.py` uses pyobjc to read the system Contacts store and POST batched Person ingest records to the gateway `POST /catalog/contacts/ingest`. It's optional and gated by the `collector` compose profile or run directly on macOS with `pip install -r local_requirements.txt`.
 
 ### 3.5 Embedding Worker
 - **Workflow**:
@@ -98,6 +102,13 @@ Defined in `schema/catalog_mvp.sql`:
 - `embed_index_state` tracks embedding workflow state.
 - `search_documents`, `search_chunks`, `search_ingest_log`, `search_deletes` support search ingestion and cleanup.
 - Triggers maintain updated timestamps and tsvector columns for full-text search.
+
+### 4.2 Contacts schema additions
+
+The staged changes add `schema/contacts.sql`, which creates tables to store ingested people and identifiers used by contact resolution and the PeopleRepository:
+- `people`, `people_source_map`, `person_identifiers`, `person_addresses`, `person_urls`, `source_change_tokens`, and `people_conflict_log`.
+
+Apply this migration (after `catalog_mvp.sql`) to enable contact ingestion and the gateway `/search/people` endpoints used by the UI and tests.
 
 ### 4.2 Vector Store
 - Qdrant collection defaults to `haven_chunks` with cosine distance.

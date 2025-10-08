@@ -1,0 +1,32 @@
+# Packages required to run the local (host) collector scripts on macOS
+# These are separate from container/service dependencies in requirements.txt
+# Install: pip install -r local_requirements.txt
+
+# macOS Contacts bindings for collector_contacts.py
+pyobjc-framework-Contacts
+
+# HTTP clients
+httpx  # used by collector_contacts.py
+requests  # used by collector_imessage.py
+
+# JSON serialization
+orjson
+
+# Retry/backoff logic
+backoff
+
+# Database access (used by collector_imessage.py for --nuke-db and shared modules)
+psycopg[binary]
+
+# Phone number normalization (used by shared.people_normalization)
+phonenumbers
+
+# Email domain validation (used by shared.people_normalization)
+idna
+
+# Testing utilities (optional, for local development)
+pytest
+
+# Note: Standard library modules used by collectors (no install needed):
+# - sqlite3, argparse, json, plistlib, hashlib, platform, pathlib, dataclasses, typing, uuid, datetime, time, tempfile, os, sys, re
+

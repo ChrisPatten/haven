@@ -4,13 +4,18 @@ import os
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
+from typing import Iterator
+import orjson
 from psycopg.types.json import Json
 
 from shared.db import get_connection
 from shared.logging import get_logger, setup_logging
 from shared.context import fetch_context_overview
+from shared.people_repository import PeopleResolver
+from shared.people_normalization import IdentifierKind, normalize_identifier
 
 logger = get_logger("catalog.api")
 
@@ -23,6 +28,7 @@ class CatalogSettings(BaseModel):
     )
     ingest_token: Optional[str] = Field(default_factory=lambda: os.getenv("CATALOG_TOKEN"))
     embedding_model: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"))
+    contacts_default_region: str | None = Field(default_factory=lambda: os.getenv("CONTACTS_DEFAULT_REGION", "US"))
 
 
 settings = CatalogSettings()
@@ -128,6 +134,151 @@ def on_startup() -> None:
     logger.info("catalog_api_startup")
 
 
+def _row_to_dict(cur, row) -> dict:
+    # Build a dict for a cursor row using description
+    cols = [d[0] for d in cur.description]
+    return {k: v for k, v in zip(cols, row)}
+
+
+@app.get("/contacts/export")
+def export_contacts(
+    request: Request,
+    since_token: Optional[str] = Query(default=None),
+    full: Optional[bool] = Query(default=False),
+) -> StreamingResponse:
+    """Stream contacts as NDJSON. Each line is a JSON object with fields:
+    {"change_token": "...", "contact": {...}}
+
+    since_token may be an ISO timestamp produced by this endpoint previously; when provided
+    only contacts with updated_at > since_token will be emitted. If `full` is true, all
+    contacts are emitted regardless of since_token.
+    """
+
+    def iter_contacts() -> Iterator[bytes]:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Fetch people, optionally filtering by since_token (which we expect to be an ISO ts)
+                if since_token and not full:
+                    try:
+                        parsed = datetime.fromisoformat(since_token.replace("Z", "+00:00"))
+                    except Exception:
+                        parsed = None
+                    if parsed:
+                        cur.execute(
+                            """
+                            SELECT person_id, display_name, given_name, family_name, organization,
+                                   nicknames, notes, photo_hash, version, deleted, updated_at
+                            FROM people
+                            WHERE updated_at > %s
+                            ORDER BY updated_at ASC
+                            """,
+                            (parsed,)
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT person_id, display_name, given_name, family_name, organization,
+                                   nicknames, notes, photo_hash, version, deleted, updated_at
+                            FROM people
+                            ORDER BY updated_at ASC
+                            """,
+                        )
+                else:
+                    cur.execute(
+                        """
+                        SELECT person_id, display_name, given_name, family_name, organization,
+                               nicknames, notes, photo_hash, version, deleted, updated_at
+                        FROM people
+                        ORDER BY updated_at ASC
+                        """,
+                    )
+
+                for row in cur.fetchall():
+                    p = _row_to_dict(cur, row)
+                    person_id = p["person_id"]
+
+                    # identifiers
+                    with conn.cursor() as cur_ids:
+                        cur_ids.execute(
+                            """
+                            SELECT kind, value_raw, value_canonical, label, priority, verified
+                            FROM person_identifiers
+                            WHERE person_id = %s
+                            """,
+                            (person_id,)
+                        )
+                        ids = [ _row_to_dict(cur_ids, r) for r in cur_ids.fetchall() ]
+
+                    phones = [
+                        {"value": i["value_canonical"], "value_raw": i.get("value_raw"), "label": i.get("label"), "priority": i.get("priority"), "verified": i.get("verified")}
+                        for i in ids if i.get("kind") == "phone"
+                    ]
+                    emails = [
+                        {"value": i["value_canonical"], "value_raw": i.get("value_raw"), "label": i.get("label"), "priority": i.get("priority"), "verified": i.get("verified")}
+                        for i in ids if i.get("kind") == "email"
+                    ]
+
+                    # addresses
+                    with conn.cursor() as cur_addr:
+                        cur_addr.execute(
+                            """
+                            SELECT label, street, city, region, postal_code, country
+                            FROM person_addresses
+                            WHERE person_id = %s
+                            """,
+                            (person_id,)
+                        )
+                        addrs = [ _row_to_dict(cur_addr, r) for r in cur_addr.fetchall() ]
+
+                    addresses = [
+                        {"label": a.get("label"), "street": a.get("street"), "city": a.get("city"), "region": a.get("region"), "postal_code": a.get("postal_code"), "country": a.get("country")}
+                        for a in addrs
+                    ]
+
+                    # urls
+                    with conn.cursor() as cur_urls:
+                        cur_urls.execute(
+                            """
+                            SELECT label, url
+                            FROM person_urls
+                            WHERE person_id = %s
+                            """,
+                            (person_id,)
+                        )
+                        urls_r = [ _row_to_dict(cur_urls, r) for r in cur_urls.fetchall() ]
+
+                    urls = [{"label": u.get("label"), "url": u.get("url")} for u in urls_r]
+
+                    contact = {
+                        "external_id": str(person_id),
+                        "display_name": p.get("display_name"),
+                        "given_name": p.get("given_name"),
+                        "family_name": p.get("family_name"),
+                        "organization": p.get("organization"),
+                        "nicknames": p.get("nicknames") or [],
+                        "notes": p.get("notes"),
+                        "photo_hash": p.get("photo_hash"),
+                        "emails": emails,
+                        "phones": phones,
+                        "addresses": addresses,
+                        "urls": urls,
+                        "version": int(p.get("version") or 1),
+                        "deleted": bool(p.get("deleted")),
+                    }
+
+                    change_token = None
+                    if p.get("updated_at"):
+                        try:
+                            change_token = p["updated_at"].isoformat()
+                        except Exception:
+                            change_token = None
+
+                    out = {"change_token": change_token, "contact": contact}
+                    yield orjson.dumps(out) + b"\n"
+
+    return StreamingResponse(iter_contacts(), media_type="application/x-ndjson")
+
+
 @app.post("/v1/catalog/events", status_code=status.HTTP_202_ACCEPTED)
 def ingest_events(payload: CatalogEventsRequest, _: None = Depends(verify_token)) -> Dict[str, Any]:
     if not payload.items:
@@ -231,11 +382,25 @@ def get_document(doc_id: str) -> DocResponse:
             row = cur.fetchone()
             if not row:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+            sender_value = row[3] or ""
+            # Try to resolve sender to an ingested contact (skip 'me' and empty)
+            if sender_value and sender_value != "me":
+                try:
+                    kind = IdentifierKind.EMAIL if "@" in sender_value else IdentifierKind.PHONE
+                    ident = normalize_identifier(kind, sender_value, default_region=None)
+                    resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
+                    person = resolver.resolve(kind, sender_value)
+                    if person and person.get("display_name"):
+                        sender_value = person.get("display_name")
+                except Exception:
+                    # If normalization/resolution fails, fall back to raw sender
+                    pass
+
             return DocResponse(
                 doc_id=row[0],
                 thread_id=row[1],
                 ts=row[2],
-                sender=row[3],
+                sender=str(sender_value),
                 text=row[4],
                 attrs=row[5],
             )

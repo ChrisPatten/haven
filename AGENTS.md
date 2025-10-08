@@ -10,8 +10,35 @@
 ```bash
 export AUTH_TOKEN="changeme"      # required by gateway endpoints
 docker compose up --build          # start Postgres, Qdrant, and API stack
-psql postgresql://postgres:postgres@localhost:5432/haven -f schema/catalog_mvp.sql
+# Apply the Postgres schema from within the running Postgres container so the host doesn't need a local psql client.
+# Start the compose stack first (this will create the `postgres` service):
+#
+#   docker compose up -d postgres
+#
+# Then apply the SQL from the host by streaming it into the container. Examples:
+#
+# Using docker compose exec (preferred when the service is healthy):
+#
+#   docker compose exec -T postgres psql -U postgres -d haven -f - < schema/catalog_mvp.sql
+#
+# Using docker exec (when you know the container id/name):
+#
+#   docker exec -i <container_name_or_id> psql -U postgres -d haven -f - < schema/catalog_mvp.sql
+#
+# Alternatively, copy the file into the container and run psql there:
+#
+#   docker cp schema/catalog_mvp.sql $(docker compose ps -q postgres):/tmp/catalog_mvp.sql
+#   docker compose exec postgres psql -U postgres -d haven -f /tmp/catalog_mvp.sql
+
+# If using contacts support, apply the contacts schema additions as well (inside the container):
+docker compose exec -T postgres psql -U postgres -d haven -f - < schema/contacts.sql
+# If using contacts support, apply the contacts schema additions as well:
+psql postgresql://postgres:postgres@localhost:5432/haven -f schema/contacts.sql
 python services/collector/collector_imessage.py [--simulate "Hi"]
+
+# On macOS you can also run the Contacts collector (requires pyobjc):
+pip install -r local_requirements.txt
+python services/collector/collector_contacts.py
 ```
 Use `requirements.txt` with a Python 3.11 virtualenv when running services outside Docker. To run the collector via Docker, enable the optional profile: `COMPOSE_PROFILES=collector docker compose up --build collector`.
 
