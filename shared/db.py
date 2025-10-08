@@ -4,7 +4,10 @@ import contextlib
 import os
 from typing import Iterator
 
-import psycopg
+try:
+    import psycopg
+except ImportError:  # pragma: no cover - optional guard for tests
+    psycopg = None  # type: ignore[assignment]
 
 
 DEFAULT_CONN_STR = "postgresql://postgres:postgres@localhost:5432/haven"
@@ -16,6 +19,8 @@ def get_conn_str() -> str:
 
 @contextlib.contextmanager
 def get_connection(autocommit: bool = True) -> Iterator[psycopg.Connection]:
+    if psycopg is None:  # pragma: no cover
+        raise RuntimeError("psycopg is not installed; install haven-platform[common]")
     conn = psycopg.connect(get_conn_str())
     conn.autocommit = autocommit
     try:
@@ -26,6 +31,8 @@ def get_connection(autocommit: bool = True) -> Iterator[psycopg.Connection]:
 
 @contextlib.contextmanager
 def get_cursor(autocommit: bool = True) -> Iterator[psycopg.Cursor]:
+    if psycopg is None:  # pragma: no cover
+        raise RuntimeError("psycopg is not installed; install haven-platform[common]")
     with get_connection(autocommit=autocommit) as conn:
         with conn.cursor() as cur:
             yield cur

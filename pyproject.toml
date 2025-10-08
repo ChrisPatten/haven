@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "haven-platform"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110,<0.116",
+  "uvicorn[standard]>=0.27,<0.31",
+  "httpx>=0.26,<0.28",
+  "psycopg[binary]>=3.1",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "structlog>=23",
+  "orjson>=3.9",
+]
+
+[project.optional-dependencies]
+common = [
+  "python-json-logger",
+  "tenacity",
+  "typer>=0.12",
+  "opentelemetry-sdk",
+  "opentelemetry-instrumentation-fastapi",
+]
+search = [
+  "qdrant-client>=1.7",
+  "rank-bm25>=0.2",
+  "numpy>=1.26",
+  "scikit-learn>=1.4",
+  "sentence-transformers>=2.3",
+]
+gateway = ["authlib", "redis", "jinja2"]
+collector = ["beautifulsoup4", "pypdf", "tika", "pytesseract"]
+workers = ["celery", "kombu"]
+
+[tool.setuptools]
+package-dir = {"haven" = "src/haven"}
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["haven*", "services*", "shared*"]
+
+[project.scripts]
+search-service = "haven.search.main:cli"
+gateway-api = "services.gateway_api.app:app"
+collector-run = "services.collector.collector_imessage:main"

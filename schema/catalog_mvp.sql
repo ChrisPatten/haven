@@ -92,3 +92,75 @@ BEFORE INSERT OR UPDATE ON messages
 FOR EACH ROW
 EXECUTE FUNCTION update_message_tsv();
 
+
+CREATE TABLE IF NOT EXISTS search_documents (
+    document_id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    title TEXT,
+    url TEXT,
+    mime_type TEXT,
+    author TEXT,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    facets JSONB NOT NULL DEFAULT '[]'::jsonb,
+    tags TEXT[] NOT NULL DEFAULT '{}',
+    acl JSONB NOT NULL,
+    raw_text BYTEA,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    embedding_model TEXT,
+    created_at_system TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at_system TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS search_chunks (
+    chunk_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES search_documents(document_id) ON DELETE CASCADE,
+    org_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    facets JSONB NOT NULL DEFAULT '[]'::jsonb,
+    embedding_status TEXT NOT NULL DEFAULT 'pending',
+    embedding_error TEXT,
+    tsv tsvector,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_search_chunks_doc_ord ON search_chunks(document_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_search_chunks_org ON search_chunks(org_id);
+CREATE INDEX IF NOT EXISTS idx_search_chunks_tsv ON search_chunks USING GIN (tsv);
+CREATE INDEX IF NOT EXISTS idx_search_docs_org ON search_documents(org_id);
+
+CREATE TABLE IF NOT EXISTS search_ingest_log (
+    id SERIAL PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (org_id, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS search_deletes (
+    id SERIAL PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    selector JSONB NOT NULL,
+    deleted_count INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE OR REPLACE FUNCTION update_search_chunk_tsv()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.tsv = to_tsvector('english', coalesce(unaccent(NEW.text), ''));
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_search_chunks_update_tsv ON search_chunks;
+CREATE TRIGGER trg_search_chunks_update_tsv
+BEFORE INSERT OR UPDATE ON search_chunks
+FOR EACH ROW
+EXECUTE FUNCTION update_search_chunk_tsv();

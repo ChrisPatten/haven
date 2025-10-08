@@ -7,7 +7,7 @@ This repository implements the Haven Personal Data Plane (PDP) minimum viable pr
 - **Collector (host process)** – copies `~/Library/Messages/chat.db` using the SQLite backup API, normalizes new messages, and posts them to the gateway for ingestion.
 - **Catalog API (internal)** – FastAPI service that stores threads/messages/chunks in Postgres, maintains FTS indexes, and tracks embedding status. It is reachable only on the Docker network.
 - **Embedding Worker** – polls for chunks marked `pending`, generates `BAAI/bge-m3` embeddings, and upserts them into Qdrant.
-- **Gateway API (`:8080`)** – FastAPI service that performs hybrid lexical/vector search, extractive summarization, document retrieval, context insights, and proxies ingestion/context calls to the catalog.
+- **Gateway API (`:8085`)** – FastAPI service that performs hybrid lexical/vector search, extractive summarization, document retrieval, context insights, and proxies ingestion/context calls to the catalog.
 - **OpenAPI Spec** – `openapi.yaml` describes the public endpoints for Custom GPT integration.
 
 ## Prerequisites
@@ -56,7 +56,7 @@ For end-to-end verification a simulated message can be posted:
 ```bash
 python services/collector/collector_imessage.py --simulate "Hey can you pay MMED today?"
 
-curl -s "http://localhost:8080/v1/search?q=MMED" -H "Authorization: Bearer $AUTH_TOKEN"
+curl -s "http://localhost:8085/v1/search?q=MMED" -H "Authorization: Bearer $AUTH_TOKEN"
 ```
 
 ## Security

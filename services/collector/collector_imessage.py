@@ -27,7 +27,7 @@ DEFAULT_CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
 STATE_DIR = Path.home() / ".haven"
 STATE_FILE = STATE_DIR / "imessage_collector_state.json"
 CATALOG_ENDPOINT = os.getenv(
-    "CATALOG_ENDPOINT", "http://localhost:8080/v1/catalog/events"
+    "CATALOG_ENDPOINT", "http://localhost:8085/v1/catalog/events"
 )
 COLLECTOR_AUTH_TOKEN = os.getenv("CATALOG_TOKEN")
 POLL_INTERVAL_SECONDS = float(os.getenv("COLLECTOR_POLL_INTERVAL", "5"))
@@ -38,6 +38,14 @@ logger = get_logger("collector.imessage")
 
 def deterministic_chunk_id(doc_id: str, chunk_index: int) -> str:
     return str(uuid5(NAMESPACE_URL, f"{doc_id}:{chunk_index}"))
+
+
+def _truncate_text(value: Optional[str], limit: int = 512) -> str:
+    if not value:
+        return ""
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "\u2026"
 
 
 @dataclass
@@ -365,9 +373,9 @@ def compute_batch_max_timestamp(events: Iterable[SourceEvent]) -> Optional[str]:
     return latest.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def post_events(events: List[SourceEvent]) -> None:
+def post_events(events: List[SourceEvent]) -> bool:
     if not events:
-        return
+        return True
 
     payload = {"items": []}
     for event in events:
@@ -382,12 +390,70 @@ def post_events(events: List[SourceEvent]) -> None:
             CATALOG_ENDPOINT, json=payload, headers=headers, timeout=10
         )
         response.raise_for_status()
+    except requests.HTTPError as exc:
+        resp = exc.response
+        logger.error(
+            "catalog_post_failed",
+            endpoint=CATALOG_ENDPOINT,
+            status_code=getattr(resp, "status_code", None),
+            response_text=_truncate_text(getattr(resp, "text", None)),
+            error=str(exc),
+        )
+        return False
     except requests.RequestException as exc:
         logger.error(
             "catalog_post_failed",
             endpoint=CATALOG_ENDPOINT,
             error=str(exc),
         )
+        return False
+
+    return True
+
+
+def process_events(
+    state: CollectorState,
+    events: List[SourceEvent],
+    *,
+    success_event: str = "dispatched_events",
+    failure_event: str = "dispatch_failed",
+) -> bool:
+    if not events:
+        return False
+
+    batch_max_ts = compute_batch_max_timestamp(events)
+
+    if not post_events(events):
+        logger.warning(
+            failure_event,
+            count=len(events),
+            last_seen_rowid=state.last_seen_rowid,
+            batch_max_ts=batch_max_ts,
+        )
+        return False
+
+    row_ids: List[int] = []
+    for event in events:
+        row_id = event.message.get("row_id")
+        if isinstance(row_id, int):
+            row_ids.append(row_id)
+        elif row_id is not None:
+            try:
+                row_ids.append(int(row_id))
+            except (TypeError, ValueError):
+                logger.debug("invalid_row_id", value=row_id)
+
+    if row_ids:
+        state.last_seen_rowid = max(state.last_seen_rowid, max(row_ids))
+    state.save()
+
+    logger.info(
+        success_event,
+        count=len(events),
+        last_seen_rowid=state.last_seen_rowid,
+        batch_max_ts=batch_max_ts,
+    )
+    return True
 
 
 def run_poll_loop(args: argparse.Namespace) -> None:
@@ -407,19 +473,7 @@ def run_poll_loop(args: argparse.Namespace) -> None:
                 if not events:
                     logger.debug("no_new_messages")
                 else:
-                    batch_max_ts = compute_batch_max_timestamp(events)
-                    post_events(events)
-                    state.last_seen_rowid = max(
-                        state.last_seen_rowid,
-                        max(event.message["row_id"] for event in events),
-                    )
-                    state.save()
-                    logger.info(
-                        "dispatched_events",
-                        count=len(events),
-                        last_seen_rowid=state.last_seen_rowid,
-                        batch_max_ts=batch_max_ts,
-                    )
+                    process_events(state, events)
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.error("collector_error", error=str(exc))
 
@@ -457,8 +511,10 @@ def simulate_message(text: str, sender: str = "me") -> None:
             }
         ],
     )
-    post_events([event])
-    logger.info("simulated_message_sent", text=text)
+    if post_events([event]):
+        logger.info("simulated_message_sent", text=text)
+    else:
+        logger.error("simulated_message_failed", text=text)
 
 
 def parse_args() -> argparse.Namespace:
@@ -496,13 +552,12 @@ def main() -> None:
         with sqlite3.connect(backup_path) as conn:
             events = list(fetch_new_messages(conn, state.last_seen_rowid, BATCH_SIZE))
         if events:
-            post_events(events)
-            state.last_seen_rowid = max(
-                state.last_seen_rowid,
-                max(event.message["row_id"] for event in events),
+            process_events(
+                state,
+                events,
+                success_event="dispatched_events_once",
+                failure_event="dispatch_failed_once",
             )
-            state.save()
-            logger.info("dispatched_events_once", count=len(events))
         else:
             logger.info("no_new_messages_once")
         return

@@ -13,33 +13,25 @@ services:
       - ./schema/catalog_mvp.sql:/docker-entrypoint-initdb.d/catalog_mvp.sql:ro
 
   qdrant:
-    image: qdrant/qdrant:v1.7.3
+    image: qdrant/qdrant:latest
     restart: unless-stopped
     ports:
       - "127.0.0.1:6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
 
-  catalog:
+  search:
     build:
       context: .
-    command: uvicorn services.catalog_api.app:app --host 0.0.0.0 --port 8081
+      args:
+        SERVICE: "search"
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/haven
-      CATALOG_TOKEN: ${CATALOG_TOKEN:-}
-      EMBEDDING_MODEL: BAAI/bge-m3
-    depends_on:
-      - postgres
-
-  embedding:
-    build:
-      context: .
-    command: python services/embedding_worker/worker.py
-    environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/haven
-      QDRANT_URL: http://qdrant:6333
-      QDRANT_COLLECTION: imessage_chunks
-      EMBEDDING_MODEL: BAAI/bge-m3
+      - VECTOR_BACKEND=qdrant
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=haven_chunks
+      - DB_DSN=postgresql://postgres:postgres@postgres:5432/haven
+    ports:
+      - "127.0.0.1:8081:8080"
     depends_on:
       - postgres
       - qdrant
@@ -47,21 +39,45 @@ services:
   gateway:
     build:
       context: .
-    command: uvicorn services.gateway_api.app:app --host 0.0.0.0 --port 8080
+      args:
+        SERVICE: "gateway"
+    environment:
+      - SEARCH_URL=http://search:8080
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/haven
+      - AUTH_TOKEN=${AUTH_TOKEN:-changeme}
+      - CATALOG_BASE_URL=http://catalog:8081
+      - CATALOG_TOKEN=${CATALOG_TOKEN:-}
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=haven_chunks
+      - EMBEDDING_MODEL=BAAI/bge-m3
+    depends_on:
+      - search
+    ports:
+      - "127.0.0.1:8085:8080"
+
+  catalog:
+    build:
+      context: .
+      args:
+        SERVICE: "catalog"
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/haven
-      AUTH_TOKEN: ${AUTH_TOKEN:-changeme}
-      CATALOG_BASE_URL: http://catalog:8081
       CATALOG_TOKEN: ${CATALOG_TOKEN:-}
-      QDRANT_URL: http://qdrant:6333
-      QDRANT_COLLECTION: imessage_chunks
-      EMBEDDING_MODEL: BAAI/bge-m3
     depends_on:
       - postgres
-      - qdrant
-      - catalog
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8082:8081"
+
+  collector_web:
+    build:
+      context: .
+      args:
+        SERVICE: "collector"
+    environment:
+      - INGEST_URL=http://search:8080/v1/ingest/documents:batchUpsert
+      - AUTH_TOKEN=${AUTH_TOKEN:-changeme}
+    depends_on:
+      - search
 
 volumes:
   pg_data:

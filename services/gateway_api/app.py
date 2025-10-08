@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import os
-from collections import defaultdict
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List
 
 import httpx
-import psycopg
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Dict, List, Sequence, Union
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
-from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
+
+from haven.search.models import PageCursor, SearchHit as SearchServiceHit, SearchRequest
+from haven.search.sdk import SearchServiceClient
 
 from shared.db import get_conn_str
+from shared.deps import assert_missing_dependencies
 from shared.logging import get_logger, setup_logging
+
+
+assert_missing_dependencies(["qdrant-client", "sentence-transformers"], "Gateway API")
 
 logger = get_logger("gateway.api")
 
@@ -22,62 +27,42 @@ logger = get_logger("gateway.api")
 class GatewaySettings(BaseModel):
     database_url: str = Field(default_factory=get_conn_str)
     api_token: str = Field(default_factory=lambda: os.getenv("AUTH_TOKEN", ""))
-    embedding_model: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"))
-    embedding_dim: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "1024")))
-    qdrant_url: str = Field(default_factory=lambda: os.getenv("QDRANT_URL", "http://qdrant:6333"))
-    qdrant_collection: str = Field(default_factory=lambda: os.getenv("QDRANT_COLLECTION", "imessage_chunks"))
-    catalog_base_url: str = Field(default_factory=lambda: os.getenv("CATALOG_BASE_URL", "http://catalog:8081"))
+    catalog_base_url: str = Field(default_factory=lambda: os.getenv("CATALOG_BASE_URL", "http://catalog:8082"))
     catalog_token: str | None = Field(default_factory=lambda: os.getenv("CATALOG_TOKEN"))
+    search_url: str = Field(default_factory=lambda: os.getenv("SEARCH_URL", "http://search:8080"))
+    search_token: str | None = Field(default_factory=lambda: os.getenv("SEARCH_TOKEN"))
 
 
 settings = GatewaySettings()
-app = FastAPI(title="Haven Gateway API", version="0.1.0")
+app = FastAPI(title="Haven Gateway API", version="0.2.0")
 
-_model: SentenceTransformer | None = None
-_client: QdrantClient | None = None
+_search_client: SearchServiceClient | None = None
 
 
 @app.on_event("startup")
 def on_startup() -> None:
     setup_logging()
     os.environ.setdefault("DATABASE_URL", settings.database_url)
-    global _model, _client
-    if _model is None:
-        _model = SentenceTransformer(settings.embedding_model)
-    if _client is None:
-        _client = QdrantClient(url=settings.qdrant_url)
-    logger.info("gateway_api_ready", collection=settings.qdrant_collection)
+    global _search_client
+    _search_client = SearchServiceClient(base_url=settings.search_url, auth_token=settings.search_token)
+    logger.info("gateway_api_ready", search_url=settings.search_url)
 
 
-def get_model() -> SentenceTransformer:
-    if _model is None:
-        raise RuntimeError("model not initialized")
-    return _model
-
-
-def get_client() -> QdrantClient:
-    if _client is None:
-        raise RuntimeError("qdrant client not initialized")
-    return _client
-
-
-@dataclass
-class MessageDoc:
-    doc_id: str
-    thread_id: str
-    ts: datetime
-    sender: str
-    text: str
+def get_search_client() -> SearchServiceClient:
+    if _search_client is None:
+        raise RuntimeError("search client not initialized")
+    return _search_client
 
 
 class SearchHit(BaseModel):
-    doc_id: str
-    thread_id: str
-    ts: datetime
-    sender: str
-    text: str
+    document_id: str
+    chunk_id: str | None
+    title: str | None
+    url: str | None
+    snippet: str | None
     score: float
     sources: List[str]
+    metadata: Dict[str, Any]
 
 
 class SearchResponse(BaseModel):
@@ -94,6 +79,15 @@ class AskResponse(BaseModel):
     query: str
     answer: str
     citations: List[Dict[str, Any]]
+
+
+@dataclass
+class MessageDoc:
+    doc_id: str
+    thread_id: str
+    ts: datetime
+    sender: str
+    text: str
 
 
 def require_token(request: Request) -> None:
@@ -119,176 +113,96 @@ def require_catalog_token(request: Request) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid catalog token")
 
 
-def fetch_messages_by_doc_ids(conn: psycopg.Connection, doc_ids: Sequence[str]) -> Dict[str, MessageDoc]:
-    if not doc_ids:
-        return {}
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT doc_id, thread_id, ts, sender, text
-            FROM messages
-            WHERE doc_id = ANY(%s)
-            """,
-            (list(doc_ids),),
-        )
-        records = {
-            row[0]: MessageDoc(
-                doc_id=row[0],
-                thread_id=row[1],
-                ts=row[2],
-                sender=row[3],
-                text=row[4],
-            )
-            for row in cur.fetchall()
-        }
-    return records
-
-
-def lexical_search(conn: psycopg.Connection, query_text: str, limit: int) -> Dict[str, float]:
-    if not query_text:
-        return {}
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT doc_id,
-                   ts_rank_cd(tsv, plainto_tsquery('english', %s)) AS rank
-            FROM messages
-            WHERE tsv @@ plainto_tsquery('english', %s)
-            ORDER BY rank DESC
-            LIMIT %s
-            """,
-            (query_text, query_text, limit),
-        )
-        scores: Dict[str, float] = {}
-        for idx, row in enumerate(cur.fetchall()):
-            rank = row[1] or 0.0
-            score = 1.0 / (60 + idx) + rank
-            scores[row[0]] = score
-        return scores
-
-
-def vector_search(query_text: str, limit: int) -> Dict[str, float]:
-    if not query_text:
-        return {}
-    model = get_model()
-    client = get_client()
-    query_vector = model.encode([query_text], normalize_embeddings=True)[0]
-    search_result = client.search(
-        collection_name=settings.qdrant_collection,
-        query_vector=query_vector.tolist(),
-        limit=limit,
-        with_payload=True,
-    )
-    scores: Dict[str, float] = {}
-    for idx, point in enumerate(search_result):
-        payload = point.payload or {}
-        doc_id = payload.get("doc_id")
-        if not doc_id:
-            continue
-        similarity = point.score or 0.0
-        score = 1.0 / (60 + idx) + similarity
-        if doc_id in scores:
-            scores[doc_id] = max(scores[doc_id], score)
-        else:
-            scores[doc_id] = score
-    return scores
-
-
-def fuse_scores(lexical: Dict[str, float], semantic: Dict[str, float]) -> Dict[str, Dict[str, Any]]:
-    fused: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"score": 0.0, "sources": []})
-    for doc_id, score in lexical.items():
-        fused[doc_id]["score"] += score
-        fused[doc_id]["sources"].append("lexical")
-    for doc_id, score in semantic.items():
-        fused[doc_id]["score"] += score
-        fused[doc_id]["sources"].append("semantic")
-    return fused
-
-
 @app.get("/v1/search", response_model=SearchResponse)
 async def search_endpoint(
     q: str = Query(..., min_length=1),
     k: int = Query(20, ge=1, le=50),
     _: None = Depends(require_token),
+    client: SearchServiceClient = Depends(get_search_client),
 ) -> SearchResponse:
-    with psycopg.connect(settings.database_url) as conn:
-        lexical_scores = lexical_search(conn, q, k)
-        semantic_scores = vector_search(q, k)
-        fused = fuse_scores(lexical_scores, semantic_scores)
-        doc_ids = sorted(fused.keys(), key=lambda doc: fused[doc]["score"], reverse=True)[:k]
-        docs = fetch_messages_by_doc_ids(conn, doc_ids)
-
-    results: List[SearchHit] = []
-    for doc_id in doc_ids:
-        doc = docs.get(doc_id)
-        if not doc:
-            continue
-        results.append(
-            SearchHit(
-                doc_id=doc.doc_id,
-                thread_id=doc.thread_id,
-                ts=doc.ts,
-                sender=doc.sender,
-                text=doc.text,
-                score=round(fused[doc_id]["score"], 4),
-                sources=fused[doc_id]["sources"],
-            )
-        )
-    return SearchResponse(query=q, results=results)
-
-
-def build_summary_text(query: str, docs: Sequence[MessageDoc]) -> str:
-    if not docs:
-        return "No relevant messages found."
-
-    summary_sentences: List[str] = []
-    for doc in docs:
-        ts_str = doc.ts.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
-        summary_sentences.append(
-            f"{doc.sender} mentioned '{doc.text}' on {ts_str} UTC."
-        )
-        if len(summary_sentences) >= 3:
-            break
-
-    intro = f"Summary for query '{query}':"
-    return intro + " " + " ".join(summary_sentences)
+    request = SearchRequest(query=q, page=PageCursor(size=k))
+    result = await client.asearch(request)
+    hits = [convert_hit(hit) for hit in result.hits]
+    return SearchResponse(query=q, results=hits)
 
 
 @app.post("/v1/ask", response_model=AskResponse)
 async def ask_endpoint(
     payload: AskRequest,
     _: None = Depends(require_token),
+    client: SearchServiceClient = Depends(get_search_client),
 ) -> AskResponse:
     k = min(max(payload.k, 1), 10)
-    with psycopg.connect(settings.database_url) as conn:
-        lexical_scores = lexical_search(conn, payload.query, k)
-        semantic_scores = vector_search(payload.query, k)
-        fused = fuse_scores(lexical_scores, semantic_scores)
-        doc_ids = sorted(fused.keys(), key=lambda doc: fused[doc]["score"], reverse=True)[:k]
-        docs = fetch_messages_by_doc_ids(conn, doc_ids)
+    request = SearchRequest(query=payload.query, page=PageCursor(size=k))
+    result = await client.asearch(request)
+    ordered_docs = [convert_hit(hit) for hit in result.hits[:k]]
 
-    ordered_docs = [docs[doc_id] for doc_id in doc_ids if doc_id in docs]
     answer = build_summary_text(payload.query, ordered_docs)
     citations = [
-        {"doc_id": doc.doc_id, "ts": doc.ts.astimezone(UTC).isoformat()}
-        for doc in ordered_docs[:3]
+        {"document_id": hit.document_id, "chunk_id": hit.chunk_id, "score": hit.score}
+        for hit in ordered_docs
     ]
     return AskResponse(query=payload.query, answer=answer, citations=citations)
 
 
+def convert_hit(hit: SearchServiceHit) -> SearchHit:
+    return SearchHit(
+        document_id=hit.document_id,
+        chunk_id=hit.chunk_id,
+        title=hit.title,
+        url=hit.url,
+        snippet=hit.snippet,
+        score=hit.score,
+        sources=hit.sources,
+        metadata=hit.metadata,
+    )
+
+
+SummaryInput = Union[SearchHit, MessageDoc]
+
+
+def build_summary_text(query: str, docs: Sequence[SummaryInput]) -> str:
+    if not docs:
+        return "No relevant messages found."
+
+    summary_sentences: List[str] = []
+    for doc in docs[:3]:
+        if isinstance(doc, MessageDoc):
+            ts_str = doc.ts.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
+            summary_sentences.append(f"{doc.sender} mentioned '{doc.text}' on {ts_str} UTC.")
+        else:
+            title = doc.title or doc.metadata.get("title") or doc.document_id
+            snippet = (doc.snippet or doc.metadata.get("snippet", "")).strip().replace("\n", " ")
+            snippet = snippet[:160] + ("…" if len(snippet) > 160 else "")
+            summary_sentences.append(f"Document '{title}' scored {doc.score:.2f}: {snippet}")
+
+    intro = f"Summary for query '{query}':"
+    return intro + " " + " ".join(summary_sentences)
+
+
 @app.get("/v1/doc/{doc_id}")
 async def doc_endpoint(doc_id: str, _: None = Depends(require_token)) -> Dict[str, Any]:
+    import psycopg
+
     with psycopg.connect(settings.database_url) as conn:
-        docs = fetch_messages_by_doc_ids(conn, [doc_id])
-    doc = docs.get(doc_id)
-    if not doc:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT doc_id, thread_id, ts, sender, text
+                FROM messages
+                WHERE doc_id = %s
+                """,
+                (doc_id,),
+            )
+            row = cur.fetchone()
+    if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     return {
-        "doc_id": doc.doc_id,
-        "thread_id": doc.thread_id,
-        "ts": doc.ts,
-        "sender": doc.sender,
-        "text": doc.text,
+        "doc_id": row[0],
+        "thread_id": row[1],
+        "ts": row[2],
+        "sender": row[3],
+        "text": row[4],
     }
 
 
@@ -335,4 +249,3 @@ async def proxy_catalog_events(
 @app.get("/v1/healthz")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
-
