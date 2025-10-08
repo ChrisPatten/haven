@@ -6,8 +6,6 @@ services:
       POSTGRES_DB: haven
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    ports:
-      - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./schema/catalog_mvp.sql:/docker-entrypoint-initdb.d/catalog_mvp.sql:ro
@@ -15,8 +13,6 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
 
@@ -30,8 +26,6 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_COLLECTION=haven_chunks
       - DB_DSN=postgresql://postgres:postgres@postgres:5432/haven
-    ports:
-      - "127.0.0.1:8081:8080"
     depends_on:
       - postgres
       - qdrant
@@ -65,10 +59,9 @@ services:
       CATALOG_TOKEN: ${CATALOG_TOKEN:-}
     depends_on:
       - postgres
-    ports:
-      - "127.0.0.1:8082:8081"
 
   collector_web:
+    profiles: ["collector"]
     build:
       context: .
       args:
@@ -78,6 +71,24 @@ services:
       - AUTH_TOKEN=${AUTH_TOKEN:-changeme}
     depends_on:
       - search
+
+  embedding_worker:
+    build:
+      context: .
+      args:
+        SERVICE: "embedding_worker"
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/haven
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=haven_chunks
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-m3}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-1024}
+      - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-2.0}
+      - WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE:-16}
+    depends_on:
+      - postgres
+      - qdrant
 
 volumes:
   pg_data:

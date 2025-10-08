@@ -120,3 +120,23 @@ def test_process_events_preserves_state_on_failure(monkeypatch):
     monkeypatch.setattr(collector, "post_events", fake_post)
     assert collector.process_events(state, [_make_event(12)]) is False
     assert state.last_seen_rowid == 7
+
+
+def test_compute_sleep_from_inactivity_short():
+    # Activity 30s ago -> use base poll interval
+    sleep = collector.compute_sleep_from_inactivity(30, base=5, max_sleep=60)
+    assert sleep == 5
+
+
+def test_compute_sleep_from_inactivity_mid_ramp():
+    # 2 minutes after activity => 60s of inactivity beyond first minute -> ramp_progress = 60/300 = 0.2
+    inactivity = 120
+    sleep = collector.compute_sleep_from_inactivity(inactivity, base=5, max_sleep=60)
+    expected = 5 + 0.2 * (60 - 5)
+    assert abs(sleep - expected) < 1e-6
+
+
+def test_compute_sleep_from_inactivity_maxed():
+    # Long inactivity should cap at max_sleep
+    sleep = collector.compute_sleep_from_inactivity(60 * 10, base=5, max_sleep=60)
+    assert sleep == 60
