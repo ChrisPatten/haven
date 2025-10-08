@@ -42,7 +42,7 @@
 | --- | --- | --- | --- |
 | GET | `/v1/search` | Proxy to search service with pagination controls via `k` | Bearer `AUTH_TOKEN` (optional but recommended) |
 | POST | `/v1/ask` | Generate summary answer + citations for a query | Bearer `AUTH_TOKEN` |
-| GET | `/v1/doc/{doc_id}` | Fetch message metadata/text from Postgres | Bearer `AUTH_TOKEN` |
+| GET | `/v1/doc/{doc_id}` | Proxy to Catalog service for message metadata/text; gateway forwards the request to `CATALOG_BASE_URL` and surfaces the same 404/200 behavior | Bearer `AUTH_TOKEN` |
 | GET | `/v1/context/general` | Proxy to catalog for aggregate stats | Bearer `AUTH_TOKEN`, forwards `CATALOG_TOKEN` |
 | POST | `/v1/catalog/events` | Proxy ingestion events to catalog | Bearer `CATALOG_TOKEN` if configured |
 | GET | `/v1/healthz` | Health probe | None |

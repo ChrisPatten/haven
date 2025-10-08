@@ -38,13 +38,14 @@ All services share the default Docker network (`haven_default`). Gateway maps po
 - **Routes**:
   - `GET /v1/search`: Async search proxy converting search service hits to gateway models.
   - `POST /v1/ask`: Fetches top-k search results and synthesizes a natural language summary.
-  - `GET /v1/doc/{doc_id}`: Direct Postgres lookup for a single message.
+  - `GET /v1/doc/{doc_id}`: Proxy to the Catalog service for record lookups. The gateway forwards the request to the catalog at `CATALOG_BASE_URL` and surfaces the same 404/200 behavior; it no longer performs a direct Postgres read for this endpoint.
   - `GET /v1/context/general`: Proxies to catalog context endpoint, forwarding catalog token.
   - `POST /v1/catalog/events`: Streams ingestion payloads to catalog API.
   - `GET /v1/healthz`: Health status.
 - **Environment**:
   - `AUTH_TOKEN`: Bearer token required for gateway endpoints (optional).
   - `CATALOG_BASE_URL`: Default `http://catalog:8081`.
+  - Developer note: a workspace VS Code settings file (`.vscode/settings.json`) has been added in the staged changes to include `./src` in Python analysis paths for local development.
   - `CATALOG_TOKEN`, `SEARCH_URL`, `SEARCH_TOKEN` for downstream auth.
   - `DATABASE_URL`, `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_MODEL` for alignment with search metadata.
 

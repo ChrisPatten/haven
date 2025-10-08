@@ -182,28 +182,28 @@ def build_summary_text(query: str, docs: Sequence[SummaryInput]) -> str:
 
 @app.get("/v1/doc/{doc_id}")
 async def doc_endpoint(doc_id: str, _: None = Depends(require_token)) -> Dict[str, Any]:
-    import psycopg
+    """Proxy document lookups to the Catalog service which owns record-wise access.
 
-    with psycopg.connect(settings.database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT doc_id, thread_id, ts, sender, text
-                FROM messages
-                WHERE doc_id = %s
-                """,
-                (doc_id,),
-            )
-            row = cur.fetchone()
-    if not row:
+    The Catalog service is responsible for create/update/delete and record lookups.
+    Gateway will forward the request and surface the same 404/200 behavior.
+    """
+    headers: Dict[str, str] = {}
+    if settings.catalog_token:
+        headers["Authorization"] = f"Bearer {settings.catalog_token}"
+
+    async with httpx.AsyncClient(base_url=settings.catalog_base_url, timeout=10.0) as client:
+        response = await client.get(f"/v1/doc/{doc_id}", headers=headers)
+
+    if response.status_code == 404:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    return {
-        "doc_id": row[0],
-        "thread_id": row[1],
-        "ts": row[2],
-        "sender": row[3],
-        "text": row[4],
-    }
+    if response.status_code >= 400:
+        try:
+            detail: Any = response.json()
+        except ValueError:
+            detail = response.text
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    return response.json()
 
 
 @app.get("/v1/context/general")

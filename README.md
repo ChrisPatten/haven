@@ -57,6 +57,10 @@ Environment variables (with sensible defaults):
 - `QDRANT_URL`, `QDRANT_COLLECTION` – vector store configuration.
 - `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` – collector tuning knobs.
 
+Developer notes:
+- The Gateway now proxies document lookups (`GET /v1/doc/{doc_id}`) to the Catalog service and surfaces the same 404/200 responses. The gateway no longer performs a direct Postgres read for that endpoint; it forwards requests to the catalog at `CATALOG_BASE_URL` (default `http://catalog:8081`).
+- A workspace VS Code settings file (`.vscode/settings.json`) is staged to add `./src` to Python analysis paths to improve local editing and linting.
+
 ## Validation
 
 ```bash

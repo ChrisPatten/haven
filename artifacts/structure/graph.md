@@ -20,7 +20,7 @@
 ## Cross-Service Calls & Data Flows
 - `gateway` → `search`: HTTP via `haven.search.sdk.SearchServiceClient` targeting `${SEARCH_URL}/v1/search/query`.
 - `gateway` → `catalog`: HTTP proxy of `/v1/catalog/events` and `/v1/context/general` to `${CATALOG_BASE_URL}`; defaults to `http://catalog:8081`.
-- `gateway` ↔ Postgres: direct `psycopg` usage for `/v1/doc/{doc_id}` when `DATABASE_URL` configured.
+- `gateway` → `catalog`: HTTP proxy of `/v1/catalog/events`, `/v1/context/general`, and `/v1/doc/{doc_id}` to `${CATALOG_BASE_URL}`; defaults to `http://catalog:8081` (gateway no longer reads Postgres directly for `/v1/doc/{doc_id}`).
 - `search` ↔ Postgres: async queries through `haven.search.db.get_connection()` for lexical search + metadata.
 - `search` ↔ Qdrant: `QdrantClient.search` with collection `${QDRANT_COLLECTION}` (default `haven_chunks`).
 - `catalog` ↔ Postgres: synchronous ingestion into `threads`, `messages`, `chunks`, `embed_index_state`.
@@ -34,6 +34,8 @@
 - **OpenAPI**: `openapi.yaml` (shared definition, not currently referenced in code).
 - **Tests**: `tests/` covering gateway summary/catalog proxy, search models, collector utils/imessage.
 - **Docker Entrypoint Logic**: `Dockerfile` ARG `SERVICE` controls which console script/command runs; packages built via optional extras `search`, `gateway`, `collector`, `common`.
+
+- Developer note: a workspace VS Code settings file (`.vscode/settings.json`) is staged to add `./src` to Python analysis paths to improve local editing and linting.
 
 ## Network & Auth Contracts
 - Auth tokens provided via env: `AUTH_TOKEN` for gateway endpoints; `CATALOG_TOKEN` shared between gateway proxy and catalog ingestion; `SEARCH_TOKEN` optional for gateway→search.
