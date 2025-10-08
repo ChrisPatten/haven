@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 import re
+import unicodedata
 
 import psycopg
 
@@ -12,35 +13,65 @@ import os
 # Use configured default region for phone normalization/resolution when available
 DEFAULT_CONTACTS_REGION = os.getenv("CONTACTS_DEFAULT_REGION", "US")
 
-# Regex pattern to detect messages that are only problematic characters
-# Includes: whitespace, object replacement char (FFFC), replacement char (FFFD),
-# zero-width spaces (200B-200D), zero-width no-break space/BOM (FEFF)
-EMPTY_MESSAGE_PATTERN = re.compile(r'^[\ufffd\ufffc\s\u200b\u200c\u200d\ufeff]+$')
+# Set of explicit disallowed codepoints (object/replacement/zero-width/BOM)
+_DISALLOWED_CODEPOINTS = {
+    "\uFFFD",  # replacement character
+    "\uFFFC",  # object replacement character
+    "\u200B",  # zero-width space
+    "\u200C",  # zero-width non-joiner
+    "\u200D",  # zero-width joiner
+    "\uFEFF",  # zero-width no-break space (BOM)
+}
 
 
 def is_message_text_valid(text: str | None) -> bool:
-    """Check if message text is valid (not empty, whitespace-only, or only problematic Unicode).
-    
-    Returns True if the text contains at least one meaningful character.
+    """Check if message text is valid.
+
+    Rejects None, empty, whitespace-only, or text made up only of disallowed
+    codepoints/control/format characters. Accepts letters, numbers, punctuation
+    and symbol characters (this includes emoji).
     """
     if not text:
         return False
-    
-    # Strip regular whitespace
+
+    # Trim normal whitespace first (again) and normalize to a composed form so similar characters are treated uniformly
     stripped = text.strip()
-    if not stripped:
+    normalized = unicodedata.normalize("NFKC", stripped)
+
+    # If the normalized string equals a disallowed codepoint, reject it
+    if normalized in _DISALLOWED_CODEPOINTS:
         return False
-    
-    # Check if it only contains problematic Unicode characters
-    if EMPTY_MESSAGE_PATTERN.match(stripped):
-        return False
-    
-    # Remove known problematic characters and whitespace, then check if anything remains
-    cleaned = re.sub(r'[\ufffd\ufffc\s\u200b\u200c\u200d\ufeff]+', '', stripped)
+
+    # Build a cleaned string by removing characters that are:
+    # - in our explicit disallowed set, or
+    # - have a Unicode category that starts with 'C' (Other: control, format, surrogate, unassigned)
+    # - or are separator categories besides a normal space (Zs). We already stripped whitespace.
+    cleaned_chars: list[str] = []
+    for ch in normalized:
+        if ch in _DISALLOWED_CODEPOINTS:
+            continue
+        cat = unicodedata.category(ch)
+        if cat[0] == "C":
+            # Control/format/surrogate/unassigned -> skip
+            continue
+        if cat == "Zl" or cat == "Zp":
+            # line/paragraph separators -> skip
+            continue
+        # Keep the character
+        cleaned_chars.append(ch)
+
+    cleaned = "".join(cleaned_chars).strip()
     if not cleaned:
         return False
-    
-    return True
+
+    # Accept if any remaining character is a letter/number/punctuation/symbol (including emoji)
+    for ch in cleaned:
+        cat = unicodedata.category(ch)
+        if cat[0] in {"L", "N", "P", "S"}:
+            return True
+
+    # If nothing matching those categories remains, reject
+    return False
 
 
 def fetch_context_overview(conn: psycopg.Connection) -> Dict[str, Any]:
@@ -74,18 +105,20 @@ def fetch_context_overview(conn: psycopg.Connection) -> Dict[str, Any]:
             for row in cur.fetchall()
         ]
 
+        # Use a simple, portable SQL filter here (non-NULL and not-whitespace-only).
+        # Postgres regexes do not support \uXXXX escapes in the pattern text, so
+        # attempts to filter Unicode codepoints at the SQL layer were ineffective.
+        # We perform robust Unicode filtering in Python below via is_message_text_valid().
+        # Fetch extra messages (30) so that after filtering out invalid ones, we still
+        # have enough valid messages to return 5 highlights.
         cur.execute(
-            r"""
+            """
             SELECT doc_id, thread_id, ts, sender, text
             FROM messages
             WHERE text IS NOT NULL
               AND btrim(text) <> ''
-              -- Filter out object replacement characters and other problematic Unicode
-              AND text !~ '^[\uFFFD\uFFFC\s\u200B\u200C\u200D\uFEFF]+$'
-              -- Ensure there's at least one printable character
-              AND LENGTH(regexp_replace(text, '[\uFFFD\uFFFC\s\u200B\u200C\u200D\uFEFF]+', '', 'g')) > 0
             ORDER BY ts DESC
-            LIMIT 5
+            LIMIT 30
             """
         )
         recent_rows = [row for row in cur.fetchall()]
@@ -93,12 +126,12 @@ def fetch_context_overview(conn: psycopg.Connection) -> Dict[str, Any]:
         # Build basic recent_highlights list, then try to map sender values
         # (phone/email handles) to ingested contacts and replace the sender
         # display with the person's display_name when available.
-        # Apply Python-side validation as an additional safety layer
+        # Apply Python-side validation as an additional safety layer, then limit to 5
         recent_highlights = [
             {"doc_id": row[0], "thread_id": row[1], "ts": row[2], "sender": row[3], "text": row[4]}
             for row in recent_rows
             if is_message_text_valid(row[4])
-        ]
+        ][:5]  # Take only the first 5 valid messages
 
         # Collect unique senders to resolve (skip empty and local 'me')
         senders = [r[3] for r in recent_rows if r[3] and r[3] != "me"]

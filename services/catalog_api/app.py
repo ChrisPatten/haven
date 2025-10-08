@@ -13,7 +13,7 @@ from psycopg.types.json import Json
 
 from shared.db import get_connection
 from shared.logging import get_logger, setup_logging
-from shared.context import fetch_context_overview
+from shared.context import fetch_context_overview, is_message_text_valid
 from shared.people_repository import PeopleResolver
 from shared.people_normalization import IdentifierKind, normalize_identifier
 
@@ -396,12 +396,18 @@ def get_document(doc_id: str) -> DocResponse:
                     # If normalization/resolution fails, fall back to raw sender
                     pass
 
+            text_val = row[4] or ""
+            # If the message text appears to be only replacement/object/zero-width characters
+            # (for example an image placeholder), do not return it and use an empty string.
+            if not is_message_text_valid(text_val):
+                text_val = ""
+
             return DocResponse(
                 doc_id=row[0],
                 thread_id=row[1],
                 ts=row[2],
                 sender=str(sender_value),
-                text=row[4],
+                text=text_val,
                 attrs=row[5],
             )
 
