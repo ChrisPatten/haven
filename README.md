@@ -132,3 +132,13 @@ curl -s "http://localhost:8085/v1/search?q=MMED" -H "Authorization: Bearer $AUTH
 - Only the gateway service publishes a host port; other services remain on the internal Docker network.
 - Bearer token authentication enforced on ingestion (optional) and all gateway routes.
 - Collector maintains local state in `~/.haven/imessage_collector_state.json` and never uploads raw attachments.
+
+### Recent staged changes
+
+The latest staged changes add image enrichment and related tooling to the iMessage collector:
+
+- Image enrichment in `services/collector/collector_imessage.py`: attachments are inspected, OCR/text extraction is performed, captions may be requested from an Ollama vision model, and image metadata (captions, OCR text, entities, blob ids) is appended to message payloads and chunk text where appropriate.
+- A small Swift helper `services/collector/imdesc.swift` was added to run Vision-based OCR and entity extraction on macOS. A convenience build script `scripts/build-imdesc.sh` and a test helper `scripts/test_imdesc_ollama.py` were also added.
+- New unit tests were added under `tests/test_collector_imessage.py` to cover attachment/image enrichment behavior and cache round-trips.
+
+These additions are optional at runtime and degrade gracefully when native tools or external services are not available. See `artifacts/documentation/technical_reference.md` and `artifacts/documentation/functional_guide.md` for details on how the image enrichment integrates with the rest of the ingestion pipeline.

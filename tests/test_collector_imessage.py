@@ -140,3 +140,234 @@ def test_compute_sleep_from_inactivity_maxed():
     # Long inactivity should cap at max_sleep
     sleep = collector.compute_sleep_from_inactivity(60 * 10, base=5, max_sleep=60)
     assert sleep == 60
+
+
+def test_is_image_attachment_detects_extension():
+    assert collector._is_image_attachment({"transfer_name": "photo.JPG"}) is True
+    assert collector._is_image_attachment({"mime_type": "text/plain"}) is False
+
+
+def test_build_attachment_chunk_text_combines_parts():
+    attachment = {
+        "image": {
+            "caption": "A mountain vista",
+            "ocr_text": "Trailhead elevation 8200ft",
+            "ocr_entities": {"dates": ["2024-01-01"], "urls": []},
+        }
+    }
+    chunk_text = collector._build_attachment_chunk_text(attachment)
+    assert "Image caption: A mountain vista" in chunk_text
+    assert "OCR text: Trailhead elevation 8200ft" in chunk_text
+    assert "dates: 2024-01-01" in chunk_text
+
+
+def test_normalize_row_includes_image_enrichment(monkeypatch):
+    row = {
+        "text": "",
+        "attributed_body": None,
+        "attachment_count": 1,
+        "guid": "guid-1",
+        "chat_guid": "chat-1",
+        "chat_display_name": "Chat",
+        "ROWID": 42,
+        "date": None,
+        "is_from_me": 1,
+        "handle_id": None,
+        "service": "iMessage",
+    }
+
+    attachments = [{"row_id": 99}]
+    enriched = [
+        {
+            "row_id": 99,
+            "guid": "attach-guid",
+            "mime_type": "image/png",
+            "transfer_name": "photo.png",
+            "uti": "public.png",
+            "total_bytes": 1024,
+            "image": {
+                "caption": "A cat on a sofa",
+                "ocr_text": "meow",
+                "ocr_boxes": [],
+                "ocr_entities": {"urls": ["https://example.com"]},
+                "blob_id": "hash-123",
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        collector,
+        "enrich_image_attachments",
+        lambda _attachments, thread_id, message_guid: (
+            enriched,
+            [
+                {
+                    "source": "imessage",
+                    "kind": "image",
+                    "thread_id": thread_id,
+                    "message_id": message_guid,
+                    "blob_id": "hash-123",
+                    "caption": "A cat on a sofa",
+                    "ocr_text": "meow",
+                    "entities": {"urls": ["https://example.com"]},
+                    "facets": {"urls": ["https://example.com"], "has_text": False},
+                }
+            ],
+        ),
+    )
+
+    event = collector.normalize_row(row, participants=["me"], attachments=attachments)
+
+    assert event.message["attachments"] == enriched
+    assert len(event.chunks) == 2
+    assert "Image caption: A cat on a sofa" in event.chunks[1]["text"]
+    assert event.chunks[1]["meta"]["attachment_row_id"] == 99
+    assert event.message["attrs"]["image_captions"] == ["A cat on a sofa"]
+    assert event.message["attrs"]["image_blob_ids"] == ["hash-123"]
+    assert event.image_events[0]["blob_id"] == "hash-123"
+    # Verify that the caption and OCR text are now also included in the main message text
+    assert event.message["text"] == "[Image: A cat on a sofa] [OCR: meow]"
+    assert event.chunks[0]["text"] == "[Image: A cat on a sofa] [OCR: meow]"
+
+
+def test_normalize_row_appends_captions_to_existing_text(monkeypatch):
+    """Test that captions and OCR text are appended to existing message text."""
+    row = {
+        "text": "Check out this photo!",
+        "attributed_body": None,
+        "attachment_count": 1,
+        "guid": "guid-2",
+        "chat_guid": "chat-2",
+        "chat_display_name": "Chat",
+        "ROWID": 43,
+        "date": None,
+        "is_from_me": 1,
+        "handle_id": None,
+        "service": "iMessage",
+    }
+
+    attachments = [{"row_id": 100}]
+    enriched = [
+        {
+            "row_id": 100,
+            "guid": "attach-guid-2",
+            "mime_type": "image/jpeg",
+            "transfer_name": "sunset.jpg",
+            "uti": "public.jpeg",
+            "total_bytes": 2048,
+            "image": {
+                "caption": "Beautiful sunset over the ocean",
+                "ocr_text": "Golden Gate Bridge",
+                "ocr_boxes": [],
+                "ocr_entities": {},
+                "blob_id": "hash-456",
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        collector,
+        "enrich_image_attachments",
+        lambda _attachments, thread_id, message_guid: (
+            enriched,
+            [
+                {
+                    "source": "imessage",
+                    "kind": "image",
+                    "thread_id": thread_id,
+                    "message_id": message_guid,
+                    "blob_id": "hash-456",
+                    "caption": "Beautiful sunset over the ocean",
+                    "ocr_text": "Golden Gate Bridge",
+                    "entities": {},
+                    "facets": {"has_text": False},
+                }
+            ],
+        ),
+    )
+
+    event = collector.normalize_row(row, participants=["me", "you"], attachments=attachments)
+
+    # Verify caption and OCR text are both appended to the existing text
+    expected_text = "Check out this photo! [Image: Beautiful sunset over the ocean] [OCR: Golden Gate Bridge]"
+    assert event.message["text"] == expected_text
+    assert event.chunks[0]["text"] == expected_text
+    assert event.message["attrs"]["image_captions"] == ["Beautiful sunset over the ocean"]
+    assert event.message["attrs"]["image_ocr_text"] == ["Golden Gate Bridge"]
+
+
+def test_normalize_row_includes_ocr_without_caption(monkeypatch):
+    """Test that OCR text is included even when there's no caption."""
+    row = {
+        "text": "",
+        "attributed_body": None,
+        "attachment_count": 1,
+        "guid": "guid-3",
+        "chat_guid": "chat-3",
+        "chat_display_name": "Chat",
+        "ROWID": 44,
+        "date": None,
+        "is_from_me": 0,
+        "handle_id": "+1234567890",
+        "service": "iMessage",
+    }
+
+    attachments = [{"row_id": 101}]
+    enriched = [
+        {
+            "row_id": 101,
+            "guid": "attach-guid-3",
+            "mime_type": "image/png",
+            "transfer_name": "screenshot.png",
+            "uti": "public.png",
+            "total_bytes": 512,
+            "image": {
+                "caption": "",  # No caption generated
+                "ocr_text": "Error 404: Page not found",
+                "ocr_boxes": [],
+                "ocr_entities": {},
+                "blob_id": "hash-789",
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        collector,
+        "enrich_image_attachments",
+        lambda _attachments, thread_id, message_guid: (
+            enriched,
+            [
+                {
+                    "source": "imessage",
+                    "kind": "image",
+                    "thread_id": thread_id,
+                    "message_id": message_guid,
+                    "blob_id": "hash-789",
+                    "caption": "",
+                    "ocr_text": "Error 404: Page not found",
+                    "entities": {},
+                    "facets": {"has_text": False},
+                }
+            ],
+        ),
+    )
+
+    event = collector.normalize_row(row, participants=["+1234567890", "me"], attachments=attachments)
+
+    # Verify OCR text is used even without caption
+    assert event.message["text"] == "[OCR: Error 404: Page not found]"
+    assert event.chunks[0]["text"] == "[OCR: Error 404: Page not found]"
+    assert event.message["attrs"]["image_ocr_text"] == ["Error 404: Page not found"]
+    # No captions should be in attrs since none were generated
+    assert "image_captions" not in event.message["attrs"]
+
+
+def test_image_enrichment_cache_round_trip(tmp_path):
+    cache_path = tmp_path / "cache.json"
+    cache = collector.ImageEnrichmentCache(cache_path)
+    assert cache.get("abc") is None
+    cache.set("abc", {"caption": "hello"})
+    cache.save()
+
+    cache_reload = collector.ImageEnrichmentCache(cache_path)
+    assert cache_reload.get("abc") == {"caption": "hello"}

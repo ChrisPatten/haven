@@ -62,3 +62,13 @@ Use `requirements.txt` with a Python 3.11 virtualenv when running services outsi
 - Treat `~/Library/Messages/chat.db` and `~/.haven/*` as sensitive; never commit personal data.
 - Store auth tokens in local env vars or `.env` files excluded from version control.
 - Services assume localhost networking; avoid exposing ports publicly without additional authentication.
+
+### Recent staged changes
+
+Staged changes introduce image enrichment for the iMessage collector and supporting developer tooling:
+
+- The iMessage collector (`services/collector/collector_imessage.py`) now enriches image attachments: OCR extraction, entity detection, and optional captioning via an Ollama vision model. Extracted captions and OCR text are appended to message chunks and stored in message attrs where applicable.
+- A native helper `services/collector/imdesc.swift` was added to perform Vision-based OCR and entity extraction on macOS. A build helper `scripts/build-imdesc.sh` and a test utility `scripts/test_imdesc_ollama.py` were also added.
+- Unit tests were extended (`tests/test_collector_imessage.py`) to cover the enrichment code and cache behavior.
+
+These features are implemented to degrade gracefully when native binaries or external captioning services are not present.

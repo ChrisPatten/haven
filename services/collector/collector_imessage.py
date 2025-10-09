@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import plistlib
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import NAMESPACE_URL, uuid5
+
+import hashlib
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -35,7 +41,55 @@ COLLECTOR_AUTH_TOKEN = os.getenv("CATALOG_TOKEN")
 POLL_INTERVAL_SECONDS = float(os.getenv("COLLECTOR_POLL_INTERVAL", "5"))
 BATCH_SIZE = int(os.getenv("COLLECTOR_BATCH_SIZE", "200"))
 
+
+def _safe_float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+IMDESC_EXECUTABLE = os.getenv("IMDESC_CLI_PATH", "imdesc")
+IMDESC_TIMEOUT_SECONDS = _safe_float_env("IMDESC_TIMEOUT_SECONDS", 15.0)
+OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b")
+OLLAMA_TIMEOUT_SECONDS = _safe_float_env("OLLAMA_TIMEOUT_SECONDS", 20.0)
+OLLAMA_CAPTION_PROMPT = os.getenv(
+    "OLLAMA_CAPTION_PROMPT",
+    "describe the image scene and contents. ignore text. short response",
+)
+CATALOG_IMAGE_ENDPOINT = os.getenv(
+    "CATALOG_IMAGE_ENDPOINT", "http://localhost:8085/v1/catalog/images"
+)
+CATALOG_IMAGE_TIMEOUT_SECONDS = _safe_float_env("CATALOG_IMAGE_TIMEOUT_SECONDS", 10.0)
+IMAGE_EMBEDDING_MODEL = os.getenv("IMAGE_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"))
+IMAGE_ATTACHMENT_EXTENSIONS = {
+    ".bmp",
+    ".gif",
+    ".heic",
+    ".heif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
+IMAGE_CACHE_FILE = STATE_DIR / "imessage_image_cache.json"
+
 logger = get_logger("collector.imessage")
+
+_IMDESC_MISSING_LOGGED = False
+_OLLAMA_CONNECTION_WARNED = False
+_CAPTION_EMBEDDING_AVAILABLE_LOGGED = False
+
+# Embedding is handled by the embedding_worker service. The collector should
+# not compute or attach embeddings directly. Keep the SentenceTransformer
+# symbol only for optional lazy imports elsewhere; do not instantiate here.
+SentenceTransformer = None  # type: ignore[assignment]
 
 
 def deterministic_chunk_id(doc_id: str, chunk_index: int) -> str:
@@ -92,6 +146,7 @@ class SourceEvent:
     thread: Dict[str, Any]
     message: Dict[str, Any]
     chunks: List[Dict[str, Any]]
+    image_events: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_payload(self) -> Dict[str, Any]:
         return {
@@ -105,6 +160,57 @@ class SourceEvent:
                 }
             ]
         }
+
+
+class ImageEnrichmentCache:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._data: Dict[str, Dict[str, Any]] = {}
+        self._dirty = False
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            raw = json.loads(self.path.read_text())
+        except Exception:
+            logger.warning("image_cache_load_failed", path=str(self.path))
+            return
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                if isinstance(key, str) and isinstance(value, dict):
+                    self._data[key] = value
+
+    def get(self, blob_id: str) -> Optional[Dict[str, Any]]:
+        return self._data.get(blob_id)
+
+    def set(self, blob_id: str, payload: Dict[str, Any]) -> None:
+        self._data[blob_id] = payload
+        self._dirty = True
+
+    def save(self) -> None:
+        if not self._dirty:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self._data))
+            self._dirty = False
+        except Exception:
+            logger.warning("image_cache_save_failed", path=str(self.path), exc_info=True)
+
+
+_image_cache: Optional[ImageEnrichmentCache] = None
+# Do not instantiate any embedder here. Embeddings are the responsibility of
+# the dedicated embedding_worker; the collector should only attach metadata
+# (captions, OCR text, entities) and send those to the gateway/catalog.
+
+
+def get_image_cache() -> ImageEnrichmentCache:
+    global _image_cache
+    if _image_cache is None:
+        _image_cache = ImageEnrichmentCache(IMAGE_CACHE_FILE)
+    return _image_cache
 
 
 def backup_chat_db(source: Path) -> Path:
@@ -286,8 +392,434 @@ def decode_attributed_body(blob: Optional[bytes]) -> str:
     return ""
 
 
-def normalize_row(row: sqlite3.Row, participants: List[str]) -> SourceEvent:
+def _is_image_attachment(metadata: Dict[str, Any]) -> bool:
+    mime_type = str(metadata.get("mime_type") or "").lower()
+    if mime_type.startswith("image/"):
+        return True
+
+    uti = str(metadata.get("uti") or "").lower()
+    if uti.startswith("public.image") or uti.startswith("public.heic") or uti.startswith("public.heif"):
+        return True
+
+    name = metadata.get("transfer_name") or metadata.get("filename")
+    if name:
+        suffix = Path(str(name)).suffix.lower()
+        if suffix in IMAGE_ATTACHMENT_EXTENSIONS:
+            return True
+
+    return False
+
+
+def _resolve_attachment_path(raw: Optional[str]) -> Optional[Path]:
+    if not raw:
+        return None
+
+    try:
+        candidate = Path(str(raw)).expanduser()
+    except TypeError:
+        return None
+
+    if candidate.is_absolute():
+        return candidate
+
+    base = Path.home() / "Library" / "Messages" / "Attachments"
+    return (base / candidate).expanduser()
+
+
+def _hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _truncate_caption(value: Optional[str], limit: int = 200) -> str:
+    if not value:
+        return ""
+    caption = value.strip()
+    if len(caption) <= limit:
+        return caption
+    return caption[: limit - 1] + "\u2026"
+
+
+def _build_image_facets(entities: Dict[str, List[str]]) -> Dict[str, Any]:
+    facets: Dict[str, Any] = {}
+    for key in ("dates", "phones", "urls", "addresses"):
+        values = entities.get(key)
+        if values:
+            facets[key] = values
+    facets["has_text"] = bool(entities.get("dates") or entities.get("phones") or entities.get("urls") or entities.get("addresses"))
+    return facets
+
+
+def _copy_attachment_to_temp(source: Path, dest_dir: Path, *, row_id: Any) -> Optional[Path]:
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        target_name = f"{row_id}_{source.name}"
+        target = dest_dir / target_name
+        shutil.copy2(source, target)
+        return target
+    except FileNotFoundError:
+        logger.debug("attachment_source_missing", path=str(source))
+    except Exception:
+        logger.debug(
+            "attachment_copy_failed", src=str(source), dest=str(dest_dir), exc_info=True
+        )
+    return None
+
+
+def _run_imdesc(image_path: Path) -> Optional[Dict[str, Any]]:
+    global _IMDESC_MISSING_LOGGED
+
+    try:
+        completed = subprocess.run(
+            [IMDESC_EXECUTABLE, "--format", "json", str(image_path)],
+            capture_output=True,
+            text=True,
+            timeout=IMDESC_TIMEOUT_SECONDS,
+            check=True,
+        )
+    except FileNotFoundError:
+        if not _IMDESC_MISSING_LOGGED:
+            logger.warning("imdesc_cli_missing", executable=IMDESC_EXECUTABLE)
+            _IMDESC_MISSING_LOGGED = True
+        return None
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "imdesc_cli_timeout", timeout=IMDESC_TIMEOUT_SECONDS, path=str(image_path)
+        )
+        return None
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            "imdesc_cli_error",
+            returncode=exc.returncode,
+            stderr=_truncate_text(exc.stderr),
+            path=str(image_path),
+        )
+        return None
+    except Exception:
+        logger.warning("imdesc_cli_failed", path=str(image_path), exc_info=True)
+        return None
+
+    output = (completed.stdout or "").strip()
+    if not output:
+        return None
+
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        logger.warning("imdesc_cli_invalid_json", output=_truncate_text(output))
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    return data
+
+
+def _request_ollama_caption(image_path: Path) -> Optional[str]:
+    global _OLLAMA_CONNECTION_WARNED
+
+    try:
+        image_bytes = image_path.read_bytes()
+    except FileNotFoundError:
+        logger.debug("ollama_image_missing", path=str(image_path))
+        return None
+    except Exception:
+        logger.debug("ollama_image_read_failed", path=str(image_path), exc_info=True)
+        return None
+
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    payload = {
+        "model": OLLAMA_VISION_MODEL,
+        "prompt": OLLAMA_CAPTION_PROMPT,
+        "images": [image_b64],
+        "stream": False,
+    }
+
+    try:
+        response = requests.post(
+            OLLAMA_API_URL, json=payload, timeout=OLLAMA_TIMEOUT_SECONDS
+        )
+        response.raise_for_status()
+    except requests.ConnectionError as exc:
+        if not _OLLAMA_CONNECTION_WARNED:
+            logger.warning("ollama_unreachable", url=OLLAMA_API_URL, error=str(exc))
+            _OLLAMA_CONNECTION_WARNED = True
+        return None
+    except requests.Timeout:
+        logger.warning("ollama_timeout", timeout=OLLAMA_TIMEOUT_SECONDS)
+        return None
+    except requests.RequestException as exc:
+        logger.warning("ollama_request_failed", error=str(exc))
+        return None
+
+    try:
+        data = response.json()
+    except ValueError:
+        logger.warning("ollama_invalid_json", text=_truncate_text(response.text))
+        return None
+
+    caption = data.get("response")
+    if isinstance(caption, str) and caption.strip():
+        return caption.strip()
+
+    message = data.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    return None
+
+
+def _sanitize_ocr_result(result: Optional[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]], Dict[str, List[str]]]:
+    if not isinstance(result, dict):
+        return "", [], {}
+
+    ocr_text = ""
+    text_value = result.get("text")
+    if isinstance(text_value, str):
+        ocr_text = text_value.strip()
+
+    boxes: List[Dict[str, Any]] = []
+    boxes_value = result.get("boxes")
+    if isinstance(boxes_value, list):
+        boxes = [box for box in boxes_value if isinstance(box, dict)]
+
+    entities: Dict[str, List[str]] = {}
+    raw_entities = result.get("entities")
+    if isinstance(raw_entities, dict):
+        for key, values in raw_entities.items():
+            if not isinstance(values, list):
+                continue
+            cleaned: List[str] = []
+            for item in values:
+                if isinstance(item, str):
+                    candidate = item.strip()
+                elif isinstance(item, (int, float)):
+                    candidate = str(item)
+                else:
+                    continue
+                if candidate:
+                    cleaned.append(candidate)
+            if cleaned:
+                entities[str(key)] = cleaned
+
+    return ocr_text, boxes, entities
+
+
+def enrich_image_attachment(
+    metadata: Dict[str, Any],
+    tmp_dir: Path,
+    *,
+    thread_id: str,
+    message_guid: str,
+    cache: ImageEnrichmentCache,
+) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    if not _is_image_attachment(metadata):
+        return None
+
+    source = _resolve_attachment_path(metadata.get("filename"))
+    if source is None or not source.exists():
+        transfer_name = metadata.get("transfer_name")
+        alt_source = _resolve_attachment_path(transfer_name) if transfer_name else None
+        if alt_source is not None and alt_source.exists():
+            source = alt_source
+
+    if source is None or not source.exists():
+        logger.debug(
+            "attachment_file_missing",
+            row_id=metadata.get("row_id"),
+            filename=metadata.get("filename"),
+        )
+        return None
+
+    try:
+        image_bytes = source.read_bytes()
+    except Exception:
+        logger.debug("attachment_read_failed", path=str(source), exc_info=True)
+        return None
+
+    blob_id = _hash_bytes(image_bytes)
+    cached = cache.get(blob_id) or {}
+
+    caption = cached.get("caption") if isinstance(cached, dict) else None
+    ocr_text = cached.get("ocr_text") if isinstance(cached, dict) else ""
+    ocr_boxes = cached.get("ocr_boxes") if isinstance(cached, dict) else []
+    ocr_entities = cached.get("ocr_entities") if isinstance(cached, dict) else {}
+
+    if not caption and not ocr_text:
+        copied = _copy_attachment_to_temp(
+            source, tmp_dir, row_id=metadata.get("row_id", "attachment")
+        )
+        if copied is None:
+            return None
+
+        ocr_raw = _run_imdesc(copied)
+        caption = _request_ollama_caption(copied)
+        ocr_text, ocr_boxes, ocr_entities = _sanitize_ocr_result(ocr_raw)
+        caption = _truncate_caption(caption)
+
+        cache.set(
+            blob_id,
+            {
+                "caption": caption,
+                "ocr_text": ocr_text,
+                "ocr_boxes": ocr_boxes,
+                "ocr_entities": ocr_entities,
+            },
+        )
+    else:
+        caption = _truncate_caption(caption)
+        if not isinstance(ocr_boxes, list):
+            ocr_boxes = []
+        if not isinstance(ocr_entities, dict):
+            ocr_entities = {}
+
+    image_data = {
+        "ocr_text": ocr_text,
+        "ocr_boxes": ocr_boxes,
+        "ocr_entities": ocr_entities,
+        "caption": caption,
+        "blob_id": blob_id,
+    }
+
+    enriched = {
+        "row_id": metadata.get("row_id"),
+        "guid": metadata.get("guid"),
+        "mime_type": metadata.get("mime_type"),
+        "transfer_name": metadata.get("transfer_name"),
+        "uti": metadata.get("uti"),
+        "total_bytes": metadata.get("total_bytes"),
+        "image": image_data,
+    }
+
+    facets = _build_image_facets(ocr_entities)
+    image_event = {
+        "source": "imessage",
+        "kind": "image",
+        "thread_id": thread_id,
+        "message_id": message_guid,
+        "blob_id": blob_id,
+        "caption": caption,
+        "ocr_text": ocr_text,
+        "entities": ocr_entities,
+        "facets": facets,
+    }
+
+    return enriched, image_event
+
+
+def enrich_image_attachments(
+    attachments: Optional[List[Dict[str, Any]]],
+    *,
+    thread_id: str,
+    message_guid: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not attachments:
+        return [], []
+
+    enriched: List[Dict[str, Any]] = []
+    image_events: List[Dict[str, Any]] = []
+    cache = get_image_cache()
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        for metadata in attachments:
+            try:
+                enriched_attachment = enrich_image_attachment(
+                    metadata,
+                    tmp_dir,
+                    thread_id=thread_id,
+                    message_guid=message_guid,
+                    cache=cache,
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger.error(
+                    "attachment_enrichment_failed",
+                    row_id=metadata.get("row_id"),
+                    exc_info=True,
+                )
+                continue
+            if enriched_attachment:
+                enriched.append(enriched_attachment[0])
+                image_events.append(enriched_attachment[1])
+
+    cache.save()
+
+    return enriched, image_events
+
+
+def _build_attachment_chunk_text(attachment: Dict[str, Any]) -> str:
+    image_data = attachment.get("image")
+    if not isinstance(image_data, dict):
+        return ""
+
+    parts: List[str] = []
+
+    caption = image_data.get("caption")
+    if isinstance(caption, str) and caption.strip():
+        parts.append(f"Image caption: {caption.strip()}")
+
+    ocr_text = image_data.get("ocr_text")
+    if isinstance(ocr_text, str) and ocr_text.strip():
+        parts.append(f"OCR text: {ocr_text.strip()}")
+
+    entities = image_data.get("ocr_entities")
+    if isinstance(entities, dict):
+        entity_parts: List[str] = []
+        for key, values in entities.items():
+            if not isinstance(values, list):
+                continue
+            cleaned = [str(item).strip() for item in values if str(item).strip()]
+            if cleaned:
+                entity_parts.append(f"{key}: {', '.join(cleaned)}")
+        if entity_parts:
+            parts.append("Entities: " + "; ".join(entity_parts))
+
+    return "\n".join(parts)
+
+
+def fetch_message_attachments(conn: sqlite3.Connection, message_rowid: int) -> List[Dict[str, Any]]:
+    conn.row_factory = sqlite3.Row
+    cursor = conn.execute(
+        """
+        SELECT a.ROWID,
+               a.guid,
+               a.filename,
+               a.mime_type,
+               a.transfer_name,
+               a.uti,
+               a.total_bytes
+        FROM attachment a
+        JOIN message_attachment_join maj ON maj.attachment_id = a.ROWID
+        WHERE maj.message_id = ?
+        ORDER BY a.ROWID
+        """,
+        (message_rowid,),
+    )
+
+    attachments: List[Dict[str, Any]] = []
+    for row in cursor.fetchall():
+        attachments.append(
+            {
+                "row_id": int(row["ROWID"]) if row["ROWID"] is not None else None,
+                "guid": row["guid"],
+                "filename": row["filename"],
+                "mime_type": row["mime_type"],
+                "transfer_name": row["transfer_name"],
+                "uti": row["uti"],
+                "total_bytes": row["total_bytes"],
+            }
+        )
+
+    return attachments
+
+
+def normalize_row(
+    row: sqlite3.Row,
+    participants: List[str],
+    attachments: Optional[List[Dict[str, Any]]] = None,
+) -> SourceEvent:
     text = (row["text"] or "").strip()
+    original_text_empty = not text
     if not text:
         text = decode_attributed_body(row["attributed_body"])
     if not text:
@@ -320,18 +852,124 @@ def normalize_row(row: sqlite3.Row, participants: List[str]) -> SourceEvent:
         },
     }
 
-    chunk = {
-        "id": deterministic_chunk_id(doc_id, 0),
-        "chunk_index": 0,
-        "text": text,
-        "meta": {
-            "doc_id": doc_id,
-            "ts": ts_iso,
-            "thread_id": row["chat_guid"],
-        },
-    }
+    chunks: List[Dict[str, Any]] = [
+        {
+            "id": deterministic_chunk_id(doc_id, 0),
+            "chunk_index": 0,
+            "text": text,
+            "meta": {
+                "doc_id": doc_id,
+                "ts": ts_iso,
+                "thread_id": row["chat_guid"],
+            },
+        }
+    ]
 
-    return SourceEvent(doc_id=doc_id, thread=thread, message=message, chunks=[chunk])
+    enriched_attachments, image_events = enrich_image_attachments(
+        attachments,
+        thread_id=row["chat_guid"],
+        message_guid=row["guid"],
+    )
+    if enriched_attachments:
+        message["attachments"] = enriched_attachments
+
+        captions = [
+            attachment.get("image", {}).get("caption")
+            for attachment in enriched_attachments
+            if isinstance(attachment.get("image"), dict)
+            and isinstance(attachment.get("image", {}).get("caption"), str)
+            and attachment.get("image", {}).get("caption").strip()
+        ]
+        
+        ocr_texts = [
+            attachment.get("image", {}).get("ocr_text")
+            for attachment in enriched_attachments
+            if isinstance(attachment.get("image"), dict)
+            and isinstance(attachment.get("image", {}).get("ocr_text"), str)
+            and attachment.get("image", {}).get("ocr_text").strip()
+        ]
+        
+        # Build enriched text parts to append to the message
+        enriched_parts = []
+        if captions:
+            message["attrs"]["image_captions"] = [caption.strip() for caption in captions]
+            enriched_parts.extend([f"[Image: {cap.strip()}]" for cap in captions])
+        
+        if ocr_texts:
+            message["attrs"]["image_ocr_text"] = [ocr.strip() for ocr in ocr_texts]
+            enriched_parts.extend([f"[OCR: {ocr.strip()}]" for ocr in ocr_texts])
+        
+        # Append captions and OCR text to the message text so they're retrievable via /context/general
+        if enriched_parts:
+            enriched_text = " ".join(enriched_parts)
+            if text and not text.startswith("[") and not text.endswith("attachment(s) omitted]"):
+                # Message has real text, append enriched content
+                text = f"{text} {enriched_text}"
+            elif original_text_empty or text.endswith("attachment(s) omitted]"):
+                # Message has no text or only placeholder, use enriched content as main text
+                text = enriched_text
+            message["text"] = text
+            # Update the first chunk's text to match
+            chunks[0]["text"] = text
+
+        entity_payload = [
+            attachment.get("image", {}).get("ocr_entities")
+            for attachment in enriched_attachments
+            if isinstance(attachment.get("image"), dict)
+            and isinstance(attachment.get("image", {}).get("ocr_entities"), dict)
+            and attachment.get("image", {}).get("ocr_entities")
+        ]
+        if entity_payload:
+            message["attrs"]["image_ocr_entities"] = entity_payload
+
+        if original_text_empty and captions:
+            message["attrs"]["image_primary_caption"] = captions[0].strip()
+
+        blob_ids = [
+            attachment.get("image", {}).get("blob_id")
+            for attachment in enriched_attachments
+            if isinstance(attachment.get("image"), dict)
+            and attachment.get("image", {}).get("blob_id")
+        ]
+        if blob_ids:
+            message["attrs"]["image_blob_ids"] = blob_ids
+
+        next_chunk_index = 1
+        for attachment_payload in enriched_attachments:
+            chunk_text = _build_attachment_chunk_text(attachment_payload)
+            if not chunk_text:
+                continue
+
+            chunk_meta = {
+                "doc_id": doc_id,
+                "ts": ts_iso,
+                "thread_id": row["chat_guid"],
+                "attachment_row_id": attachment_payload.get("row_id"),
+            }
+            if attachment_payload.get("guid"):
+                chunk_meta["attachment_guid"] = attachment_payload["guid"]
+            if attachment_payload.get("mime_type"):
+                chunk_meta["attachment_mime_type"] = attachment_payload["mime_type"]
+            if attachment_payload.get("transfer_name"):
+                chunk_meta["attachment_transfer_name"] = attachment_payload["transfer_name"]
+
+            chunks.append(
+                {
+                    "id": deterministic_chunk_id(doc_id, next_chunk_index),
+                    "chunk_index": next_chunk_index,
+                    "text": chunk_text,
+                    "meta": chunk_meta,
+                }
+            )
+            next_chunk_index += 1
+
+    return SourceEvent(
+        doc_id=doc_id,
+        thread=thread,
+        message=message,
+        chunks=chunks,
+        image_events=image_events,
+    )
 
 
 def fetch_new_messages(
@@ -373,7 +1011,8 @@ def fetch_new_messages(
 
     for row in cursor.fetchall():
         participants = get_participants(conn, row["chat_rowid"])
-        yield normalize_row(row, participants)
+        attachments = fetch_message_attachments(conn, row["ROWID"])
+        yield normalize_row(row, participants, attachments)
 
 
 def get_current_max_rowid(conn: sqlite3.Connection) -> int:
@@ -468,6 +1107,36 @@ def post_events(events: List[SourceEvent]) -> bool:
     return True
 
 
+def post_image_events(image_events: List[Dict[str, Any]]) -> bool:
+    if not image_events:
+        return True
+
+    headers = {"Content-Type": "application/json"}
+    if COLLECTOR_AUTH_TOKEN:
+        headers["Authorization"] = f"Bearer {COLLECTOR_AUTH_TOKEN}"
+
+    all_success = True
+    for event in image_events:
+        try:
+            response = requests.post(
+                CATALOG_IMAGE_ENDPOINT,
+                json=event,
+                headers=headers,
+                timeout=CATALOG_IMAGE_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            all_success = False
+            logger.warning(
+                "catalog_image_post_failed",
+                endpoint=CATALOG_IMAGE_ENDPOINT,
+                blob_id=event.get("blob_id"),
+                error=str(exc),
+            )
+
+    return all_success
+
+
 def process_events(
     state: CollectorState,
     events: List[SourceEvent],
@@ -489,6 +1158,18 @@ def process_events(
             batch_max_ts=batch_max_ts,
         )
         return False
+
+    image_events: List[Dict[str, Any]] = []
+    for event in events:
+        image_events.extend(event.image_events)
+
+    if image_events:
+        if not post_image_events(image_events):
+            logger.warning(
+                "image_event_dispatch_failed",
+                count=len(image_events),
+                endpoint=CATALOG_IMAGE_ENDPOINT,
+            )
 
     row_ids: List[int] = []
     for event in events:
@@ -612,7 +1293,10 @@ def run_poll_loop(args: argparse.Namespace) -> None:
                         batch_events = []
                         for row in cursor.fetchall():
                             participants = get_participants(conn, row["chat_rowid"])
-                            batch_events.append(normalize_row(row, participants))
+                            attachments = fetch_message_attachments(conn, row["ROWID"])
+                            batch_events.append(
+                                normalize_row(row, participants, attachments)
+                            )
                         
                         if not batch_events:
                             # No more messages in this range - backlog complete
@@ -711,7 +1395,10 @@ def run_poll_loop(args: argparse.Namespace) -> None:
                             batch_events = []
                             for row in cursor.fetchall():
                                 participants = get_participants(conn, row["chat_rowid"])
-                                batch_events.append(normalize_row(row, participants))
+                                attachments = fetch_message_attachments(conn, row["ROWID"])
+                                batch_events.append(
+                                    normalize_row(row, participants, attachments)
+                                )
                             
                             if not batch_events:
                                 break

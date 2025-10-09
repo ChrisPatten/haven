@@ -29,6 +29,7 @@
 3. Gateway forwards payload to catalog. Catalog:
    - Upserts thread/message/chunk rows in Postgres.
    - Enqueues chunk IDs into `embed_index_state` with `status='pending'`.
+   - If the collector has detected image attachments, OCR/caption text and entities are included on message chunks and message attrs so that image-derived content is searchable and appears in context endpoints.
 4. Search service ingestion endpoint (if used by other sources) normalizes documents and sets `embedding_status='pending'` on `search_chunks`.
 
 ### 2.4 Embedding Workflow
@@ -96,6 +97,13 @@
 2. Install project extras: `pip install -e .[collector,common]` or use `requirements.txt`.
 3. Run collector: `python services/collector/collector_imessage.py --simulate "Hello"` (simulation) or without `--simulate` for live ingest.
 4. Monitor `~/.haven/imessage_collector_state.json` for progress and `.haven/chat_backup/chat.db` for backups.
+
+Notes on image enrichment
+------------------------
+
+- The collector now supports optional image enrichment. On macOS, build `services/collector/imdesc.swift` with `scripts/build-imdesc.sh` to enable local OCR/entity extraction. The build script compiles the Swift tool and places an executable the collector can invoke.
+- If configured, the collector can also request captions from an Ollama vision model. Both features are optional and the collector will continue to run without them (it logs warnings when external tools are missing).
+- Expect new unit tests under `tests/test_collector_imessage.py` that validate enrichment behavior and the image enrichment cache.
 
 ### 6.3 Embedding Worker Operations
 - Ensure `SentenceTransformer` model configured by `EMBEDDING_MODEL` is available (pulls from Hugging Face on first run).

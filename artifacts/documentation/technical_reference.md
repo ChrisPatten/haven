@@ -87,6 +87,18 @@ All services share the default Docker network (`haven_default`). Gateway maps po
 - **CLI**: `collector-run` entrypoint exposes `main()`; CLI options defined with `argparse` allow simulation mode (`--simulate`).
  - **Contacts Collector (macOS)**: A new optional collector `services/collector/collector_contacts.py` uses pyobjc to read the system Contacts store and POST batched Person ingest records to the gateway `POST /catalog/contacts/ingest`. It's optional and gated by the `collector` compose profile or run directly on macOS with `pip install -r local_requirements.txt`.
 
+#### Image enrichment (new)
+
+Recent staged changes add an image enrichment pipeline to the iMessage collector. Key points:
+
+- The collector inspects message attachments and attempts to locate image files from the `~/Library/Messages/Attachments` area or absolute paths recorded in the database.
+- A Swift helper (`services/collector/imdesc.swift`) leveraging Vision is included to perform OCR and basic entity extraction (dates, phones, URLs, addresses) when run on macOS. The helper returns JSON compatible with collector parsing.
+- The collector may optionally call an Ollama vision captioning model (configurable via `OLLAMA_API_URL` and related settings) to request human-readable captions for images. Both OCR text and captions are truncated and cached to avoid reprocessing.
+- Extracted captions and OCR text are appended to the message `chunks` and exposed in `message.attrs` (for example, `image_captions`, `image_ocr_text`, `image_blob_ids`) so they are queryable via the catalog context and search pipelines.
+- Image-level events (including blob ids and facets) are emitted to a catalog image ingestion endpoint for downstream indexing or processing.
+
+See `services/collector/collector_imessage.py`, `services/collector/imdesc.swift`, and `scripts/build-imdesc.sh` for build and runtime details. Unit tests under `tests/test_collector_imessage.py` exercise the enrichment paths and cache behavior.
+
 ### 3.5 Embedding Worker
 - **Workflow**:
   1. Connect to Postgres and fetch `embed_index_state` rows with `status='pending'`.
