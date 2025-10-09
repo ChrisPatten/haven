@@ -1,74 +1,48 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-- Core services live under `services/`: `catalog_api`, `gateway_api`, `embedding_worker`, and the `collector` CLI each expose a FastAPI app or worker entrypoint.
-- Shared helpers such as database sessions and logging live in `shared/`; reusable domain code (search pipelines, SDK) is packaged in `src/haven/` for import.
-- Integration assets sit in `compose.yaml`, `Dockerfile`, and `openapi.yaml`; SQL migrations live in `schema/`.
-- Python tests reside in `tests/` and mirror service names (e.g., `test_gateway_summary.py`).
+## Layout & Ownership
+- `services/` houses deployable FastAPI apps and workers: `catalog_api`, `gateway_api`, `embedding_worker`, and the `collector` CLI.
+- Shared helpers live in `shared/`; reusable domain code (search pipelines, SDK) is packaged under `src/haven/`.
+- Infrastructure assets (`compose.yaml`, `Dockerfile`, `openapi.yaml`) and SQL migrations (`schema/`) sit at the root.
+- Tests reside in `tests/`, mirroring service names (e.g., `test_gateway_summary.py`).
 
-## Build, Test, and Development Commands
+## Day-to-Day Development
 ```bash
 export AUTH_TOKEN="changeme"      # required by gateway endpoints
 docker compose up --build          # start Postgres, Qdrant, and API stack
-# Apply the Postgres schema from within the running Postgres container so the host doesn't need a local psql client.
-# Start the compose stack first (this will create the `postgres` service):
-#
-#   docker compose up -d postgres
-#
-# Then apply the SQL from the host by streaming it into the container. Examples:
-#
-# Using docker compose exec (preferred when the service is healthy):
-#
-#   docker compose exec -T postgres psql -U postgres -d haven -f - < schema/catalog_mvp.sql
-#
-# Using docker exec (when you know the container id/name):
-#
-#   docker exec -i <container_name_or_id> psql -U postgres -d haven -f - < schema/catalog_mvp.sql
-#
-# Alternatively, copy the file into the container and run psql there:
-#
-#   docker cp schema/catalog_mvp.sql $(docker compose ps -q postgres):/tmp/catalog_mvp.sql
-#   docker compose exec postgres psql -U postgres -d haven -f /tmp/catalog_mvp.sql
 
-# If using contacts support, apply the contacts schema additions as well (inside the container):
+# Apply the Postgres schema from the running container (preferred)
+docker compose exec -T postgres psql -U postgres -d haven -f - < schema/catalog_mvp.sql
+
+# Optional contacts schema additions
 docker compose exec -T postgres psql -U postgres -d haven -f - < schema/contacts.sql
-# If using contacts support, apply the contacts schema additions as well:
-psql postgresql://postgres:postgres@localhost:5432/haven -f schema/contacts.sql
+
 python services/collector/collector_imessage.py [--simulate "Hi"]
 
-# On macOS you can also run the Contacts collector (requires pyobjc):
+# macOS Contacts collector (pyobjc requirement)
 pip install -r local_requirements.txt
 python services/collector/collector_contacts.py
 ```
-Use `requirements.txt` with a Python 3.11 virtualenv when running services outside Docker. To run the collector via Docker, enable the optional profile: `COMPOSE_PROFILES=collector docker compose up --build collector`.
+- Use `requirements.txt` with a Python 3.11 virtualenv when running services outside Docker.
+- To run the collector in Docker, enable the optional profile: `COMPOSE_PROFILES=collector docker compose up --build collector`.
 
-## Coding Style & Naming Conventions
-- Python 3.11, 4-space indentation, and type hints are expected across services.
-- Keep modules small and align new files with existing package layout under `services/` or `shared/`.
-- Run `ruff check .` and `black .` before committing; configure editors to save in UTF-8 without trailing whitespace. Fix existing lint debt opportunistically.
-- Prefer `snake_case` for modules/functions, `PascalCase` for classes, and descriptive FastAPI route names.
+## Coding Style & Naming
+- Python 3.11, 4-space indentation, and type hints across services.
+- Prefer `snake_case` for modules/functions, `PascalCase` for classes.
+- Run `ruff check .` and `black .` before committing; fix existing lint debt opportunistically.
+- Keep modules scoped and align new files with existing package layout.
 
-## Testing Guidelines
-- Unit tests belong beside peers in `tests/test_*.py`; mirror module names and cover edge cases.
-- Execute `pytest` plus `mypy services shared` for type gating; add fixtures in `tests/conftest.py` when sharing setup.
+## Testing & Quality Gates
+- Place unit tests beside peers in `tests/test_*.py`; mirror module names and cover edge cases.
+- Execute `pytest` plus `mypy services shared` before shipping; add fixtures in `tests/conftest.py` for shared setup.
 - For end-to-end smoke tests, run the collector with `--simulate` and query the gateway search endpoint.
 
-## Commit & Pull Request Guidelines
-- History is currently empty; use concise, imperative commits such as `feat: add embeddings worker retry`.
-- Reference related issues in the body, list validation commands executed, and note schema or API changes explicitly.
-- Pull requests should summarize the user impact, link design docs if relevant, and include screenshots or curl transcripts for API-facing changes.
-
-## Environment & Security Notes
+## Environment & Security
 - Treat `~/Library/Messages/chat.db` and `~/.haven/*` as sensitive; never commit personal data.
-- Store auth tokens in local env vars or `.env` files excluded from version control.
+- Store auth tokens in env vars or `.env` files excluded from version control.
 - Services assume localhost networking; avoid exposing ports publicly without additional authentication.
 
-### Recent staged changes
-
-Staged changes introduce image enrichment for the iMessage collector and supporting developer tooling:
-
-- The iMessage collector (`services/collector/collector_imessage.py`) now enriches image attachments: OCR extraction, entity detection, and optional captioning via an Ollama vision model. Extracted captions and OCR text are appended to message chunks and stored in message attrs where applicable.
-- A native helper `services/collector/imdesc.swift` was added to perform Vision-based OCR and entity extraction on macOS. A build helper `scripts/build-imdesc.sh` and a test utility `scripts/test_imdesc_ollama.py` were also added.
-- Unit tests were extended (`tests/test_collector_imessage.py`) to cover the enrichment code and cache behavior.
-
-These features are implemented to degrade gracefully when native binaries or external captioning services are not present.
+## Recent Updates
+- iMessage collector enriches image attachments with OCR, entity detection, and optional Ollama-powered captioning.
+- A native Swift helper (`services/collector/imdesc.swift`) plus `scripts/build-imdesc.sh` supports macOS Vision OCR.
+- `tests/test_collector_imessage.py` covers enrichment flows and cache behavior.

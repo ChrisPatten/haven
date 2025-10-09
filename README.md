@@ -1,117 +1,90 @@
 # Haven PDP MVP
 
-This repository implements the Haven Personal Data Plane (PDP) minimum viable product focused on the macOS iMessage → OpenAPI vertical slice. It ingests local iMessage history, catalogs the normalized messages, indexes semantic embeddings in Qdrant, and exposes hybrid search and summarization endpoints over an authenticated FastAPI gateway.
+Haven is a personal data plane that turns local iMessage history into a searchable knowledge base. The minimum viable product ingests conversations, catalogs normalized threads/messages in Postgres, generates semantic embeddings in Qdrant, and exposes hybrid search plus summarization through a FastAPI gateway.
 
-See the detailed documentation under `artifacts/documentation/`:
-- [`technical_reference.md`](artifacts/documentation/technical_reference.md) — architecture, service internals, data stores, deployment topology, and configuration.
-- [`functional_guide.md`](artifacts/documentation/functional_guide.md) — user workflows, API behavior, authentication model, runbooks, and troubleshooting tips.
+## Documentation Map
+- [`artifacts/documentation/technical_reference.md`](artifacts/documentation/technical_reference.md) – deep dive on architecture, services, and configuration.
+- [`artifacts/documentation/functional_guide.md`](artifacts/documentation/functional_guide.md) – user workflows, API behavior, operating runbooks, and troubleshooting.
 
 ## Components
-
-- **Collector (host process/optional compose profile)** – copies `~/Library/Messages/chat.db` using the SQLite backup API, normalizes new messages, and posts them to the gateway for ingestion. A separate contacts collector reads macOS Contacts via pyobjc and syncs them to the catalog.
-- **Catalog API (internal)** – FastAPI service that stores threads/messages/chunks in Postgres, maintains FTS indexes, and tracks embedding status. It is reachable only on the Docker network.
-- **Embedding Worker** – polls for chunks marked `pending`, generates `BAAI/bge-m3` embeddings, and upserts them into Qdrant.
-- **Gateway API (`:8085`)** – FastAPI service that performs hybrid lexical/vector search, extractive summarization, document retrieval, context insights, and proxies ingestion/context calls to the catalog.
-- **Search Service** – Hybrid lexical/vector search backend with ingestion routes and Typer CLI entrypoint.
-- **OpenAPI Spec** – `openapi.yaml` describes the public endpoints for Custom GPT integration.
+- **Collector (CLI / optional compose profile)** – copies `~/Library/Messages/chat.db`, normalizes new messages, enriches image attachments, and posts catalog events to the gateway.
+- **Catalog API** – internal FastAPI service that persists threads/messages/chunks, maintains FTS indexes, and tracks embedding status.
+- **Embedding Worker** – background worker that polls pending chunks, runs `BAAI/bge-m3`, and upserts vectors into Qdrant.
+- **Gateway API (`:8085`)** – public FastAPI surface for hybrid search, summarization, document retrieval, and catalog proxying.
+- **Search Service** – FastAPI + Typer service that powers hybrid lexical/vector search and ingestion utilities.
+- **OpenAPI Spec** – `openapi.yaml` documents the public gateway surface for external integrations.
 
 ## Repository Layout
-
-- `services/` – Deployable FastAPI apps and workers (gateway, catalog, embedding worker) plus the iMessage collector CLI.
-- `src/haven/` – Installable Python package with search pipelines, SDK, and shared domain logic consumed by services.
+- `services/` – Deployable FastAPI apps and workers (gateway, catalog, embedding worker) and the iMessage collector CLI.
+- `src/haven/` – Installable Python package with search pipelines, SDK, and reusable domain logic.
 - `shared/` – Cross-service helpers (logging, Postgres utilities, dependency guards).
-- `schema/` – SQL migrations / initialization scripts.
-- `artifacts/` – Generated architecture maps, findings, and documentation.
+- `schema/` – SQL migrations and initialization scripts.
+- `artifacts/` – Architecture findings, reports, and reference documentation.
+- `tests/` – Pytest suite covering gateway, collector, and search behaviors.
 
 ## Prerequisites
-
-- macOS with Python 3.11 (for the collector) and Docker Desktop.
-- Access to the local iMessage database at `~/Library/Messages/chat.db`.
-- A bearer token stored in `AUTH_TOKEN` for API access.
+- macOS with Python 3.11 (collector) and Docker Desktop (services).
+- Access to `~/Library/Messages/chat.db`.
+- A bearer token exported as `AUTH_TOKEN` for gateway access.
 
 ## Quick Start
-
 ```bash
-# 1. Start infrastructure and APIs
+# 1. Start infrastructure and APIs (gateway exposed on :8085)
 export AUTH_TOKEN="changeme"
 docker compose up --build
-# (optional) run the collector container
+# Optional: run the collector container
 # COMPOSE_PROFILES=collector docker compose up --build collector
+```
 
-# 2. Initialize Postgres schema
+```bash
+# 2. Initialize the Postgres schema (choose one)
+# Preferred: stream SQL into the running postgres container
+docker compose exec -T postgres psql -U postgres -d haven -f - < schema/catalog_mvp.sql
+# Alternative: apply from host (requires local psql client)
 psql postgresql://postgres:postgres@localhost:5432/haven -f schema/catalog_mvp.sql
 
+# Contacts schema additions (optional feature)
+docker compose exec -T postgres psql -U postgres -d haven -f - < schema/contacts.sql
+```
+
+```bash
 # 3. Run the iMessage collector locally
 python services/collector/collector_imessage.py
+# Simulate a message for end-to-end smoke testing
+python services/collector/collector_imessage.py --simulate "Hey can you pay MMED today?"
 ```
 
-### Running the Contacts Collector (macOS)
-
-The contacts collector reads your local macOS Contacts and syncs them to the catalog via the gateway. It requires pyobjc and must run as the logged-in user with Contacts permission granted in System Settings.
-
+### Contacts Collector (macOS)
 ```bash
-# 1. Install local requirements (pyobjc + dependencies)
 pip install -r local_requirements.txt
-
-# 2. Run the collector once to sync all contacts
 export CATALOG_TOKEN="changeme"
 python services/collector/collector_contacts.py
-
-# The collector will:
-# - Request Contacts access (macOS prompt on first run)
-# - Fetch all contacts from the Contacts store
-# - POST batches to the gateway ingest endpoint
-# - Log progress and completion
 ```
+- Grants Contacts.app permission on first run, exports contacts via pyobjc, and POSTs batches to the gateway ingest proxy.
+- Run manually or via cron/launchd to keep entries synced; the collector stores no local cache beyond `~/.haven` progress files.
 
-**Important notes:**
-- The collector accesses macOS Contacts via the Contacts.framework (pyobjc). You must grant permission in System Settings > Privacy & Security > Contacts.
-- The collector stores no local state; it syncs all contacts on each run. Run it periodically (manually or via cron/launchd) to keep the catalog up-to-date.
-- Never commit `~/.haven/*` files; they are marked sensitive in `.gitignore`.
-```
+### Optional Image Enrichment
+Image attachments can be enriched with OCR, entity extraction, and captions.
 
-### Running the Contacts Collector (macOS)
+1. Build the native helper (macOS vision OCR + entity detection):
+   ```bash
+   scripts/build-imdesc.sh
+   ```
+2. (Optional) Enable captioning via an Ollama vision model:
+   - Ensure an Ollama server with a vision-capable model (e.g., `llava`) is running.
+   - Set `OLLAMA_HOST` for the collector if the server is remote.
+3. The collector falls back gracefully when the helper binary or caption endpoint is unavailable—it logs a warning and continues ingesting messages.
 
-The contacts collector reads your local macOS Contacts and syncs them to the catalog via the gateway. It requires pyobjc and must run as the logged-in user with Contacts permission granted in System Settings.
-
-```bash
-# 1. Install local requirements (pyobjc + dependencies)
-pip install -r local_requirements.txt
-
-# 2. Run the collector once to sync all contacts
-export CATALOG_TOKEN="changeme"
-python services/collector/collector_contacts.py
-
-# The collector will:
-# - Request Contacts access (macOS prompt on first run)
-# - Fetch all contacts from the Contacts store
-# - POST batches to the gateway ingest endpoint
-# - Log progress and completion
-```
-
-**Important notes:**
-- The collector accesses macOS Contacts via the Contacts.framework (pyobjc). You must grant permission in System Settings > Privacy & Security > Contacts.
-- The collector stores no local state; it syncs all contacts on each run. Run it periodically (manually or via cron/launchd) to keep the catalog up-to-date.
-- Never commit `~/.haven/*` files; they are marked sensitive in `.gitignore`.
-
-## Configuration
-
-Environment variables (with sensible defaults):
-
-- `AUTH_TOKEN` – bearer token required by the gateway.
-- `CATALOG_TOKEN` – optional shared secret for collector → gateway → catalog ingestion.
-- `CATALOG_BASE_URL` – internal URL the gateway uses to reach the catalog service (defaults to `http://catalog:8081`).
-- `DATABASE_URL` – Postgres connection string (each service overrides for Docker networking).
-- `EMBEDDING_MODEL` – embedding model identifier (`BAAI/bge-m3`).
+## Configuration Reference
+- `AUTH_TOKEN` – bearer token enforced on gateway routes (optional in development).
+- `CATALOG_TOKEN` – shared secret for ingestion between collector → gateway → catalog.
+- `CATALOG_BASE_URL` – internal URL the gateway uses to reach the catalog (defaults to `http://catalog:8081`).
+- `DATABASE_URL` – Postgres DSN; each service overrides this for Docker networking.
+- `EMBEDDING_MODEL` – embedding identifier (`BAAI/bge-m3`).
 - `QDRANT_URL`, `QDRANT_COLLECTION` – vector store configuration.
 - `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` – collector tuning knobs.
 
-Developer notes:
-- The Gateway now proxies document lookups (`GET /v1/doc/{doc_id}`) to the Catalog service and surfaces the same 404/200 responses. The gateway no longer performs a direct Postgres read for that endpoint; it forwards requests to the catalog at `CATALOG_BASE_URL` (default `http://catalog:8081`).
-- A workspace VS Code settings file (`.vscode/settings.json`) is staged to add `./src` to Python analysis paths to improve local editing and linting.
-
 ## Validation
-
 ```bash
 ruff check .
 black --check .
@@ -119,26 +92,18 @@ mypy services shared
 pytest
 ```
 
-For end-to-end verification a simulated message can be posted:
-
+For end-to-end verification after seeding messages:
 ```bash
-python services/collector/collector_imessage.py --simulate "Hey can you pay MMED today?"
-
 curl -s "http://localhost:8085/v1/search?q=MMED" -H "Authorization: Bearer $AUTH_TOKEN"
 ```
 
-## Security
+## Security Notes
+- Only the gateway publishes a host port; other services remain on the Docker network.
+- Collector stores state in `~/.haven/imessage_collector_state.json` and never uploads raw attachments.
+- Treat `~/Library/Messages/chat.db` and `~/.haven/*` as sensitive; they are ignored by git.
+- Manage tokens through environment variables or `.env` files excluded from version control.
 
-- Only the gateway service publishes a host port; other services remain on the internal Docker network.
-- Bearer token authentication enforced on ingestion (optional) and all gateway routes.
-- Collector maintains local state in `~/.haven/imessage_collector_state.json` and never uploads raw attachments.
-
-### Recent staged changes
-
-The latest staged changes add image enrichment and related tooling to the iMessage collector:
-
-- Image enrichment in `services/collector/collector_imessage.py`: attachments are inspected, OCR/text extraction is performed, captions may be requested from an Ollama vision model, and image metadata (captions, OCR text, entities, blob ids) is appended to message payloads and chunk text where appropriate.
-- A small Swift helper `services/collector/imdesc.swift` was added to run Vision-based OCR and entity extraction on macOS. A convenience build script `scripts/build-imdesc.sh` and a test helper `scripts/test_imdesc_ollama.py` were also added.
-- New unit tests were added under `tests/test_collector_imessage.py` to cover attachment/image enrichment behavior and cache round-trips.
-
-These additions are optional at runtime and degrade gracefully when native tools or external services are not available. See `artifacts/documentation/technical_reference.md` and `artifacts/documentation/functional_guide.md` for details on how the image enrichment integrates with the rest of the ingestion pipeline.
+## Maintenance Tips
+- Keep search and embedding worker defaults aligned so vector dimensions remain consistent.
+- Update Dockerfile entrypoints and compose service settings whenever new services or optional profiles are introduced.
+- Refer to the `artifacts/` folder for architectural reports and change history.
