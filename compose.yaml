@@ -69,6 +69,8 @@ services:
       args:
         SERVICE: "embedding_service"
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/haven
       - CATALOG_BASE_URL=http://catalog:8081

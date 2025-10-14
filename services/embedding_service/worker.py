@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 import time
@@ -99,17 +100,19 @@ def dequeue_jobs(conn: psycopg.Connection, limit: int, worker_id: str) -> List[P
 
 def mark_job_failed(conn: psycopg.Connection, job: PendingJob, error_message: str) -> None:
     backoff_seconds = min(settings.max_backoff_seconds, max(2 ** min(job.attempt, 6), 1))
+    # Serialize error as JSON object for JSONB column
+    error_json = json.dumps({"message": error_message[:512], "attempt": job.attempt})
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE embed_jobs
-               SET last_error = %s,
+               SET last_error = %s::jsonb,
                    locked_by = NULL,
                    locked_at = NULL,
                    next_attempt_at = NOW() + (%s * INTERVAL '1 second')
              WHERE chunk_id = %s
             """,
-            (error_message[:512], backoff_seconds, job.chunk_id),
+            (error_json, backoff_seconds, job.chunk_id),
         )
         cur.execute(
             """
