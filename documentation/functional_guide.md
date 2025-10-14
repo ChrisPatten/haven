@@ -25,18 +25,16 @@
    - Catalog aggregates thread counts, message counts, top conversations, and recent highlights.
 
 ### 2.3 Ingestion Pipeline
-1. Collector runs locally (CLI or Docker profile) and authenticates with `CATALOG_TOKEN` when configured.
-2. Collector reads macOS `chat.db`, converts rows into `CatalogEventsRequest` payloads, and posts them to `POST /v1/catalog/events` on the gateway.
-3. Gateway streams the request to the catalog service, which:
-   - Upserts threads/messages/chunks in Postgres.
-   - Emits chunk IDs into `embed_index_state` with `status='pending'`.
-   - Stores attachment metadata, OCR output, and optional captions on message attributes for downstream search.
-4. Other ingestion surfaces (e.g., search service batch upsert) follow a similar normalization + enqueue pattern.
+1. Collector runs locally (CLI or Docker profile) and authenticates with `AUTH_TOKEN` (falls back to `CATALOG_TOKEN` for legacy deployments).
+2. Collector reads macOS `chat.db`, converts rows into ingest payloads, and posts them to the gateway `POST /v1/ingest` endpoint.
+3. Gateway normalizes document text, enforces idempotency, and forwards the request to catalog `POST /v1/catalog/documents`.
+4. Catalog upserts submission metadata, documents, and chunks; new chunk IDs land in the `embed_jobs` queue with `status='queued'`.
+5. Optional attachment enrichment metadata (OCR, captions) rides along in chunk text and message attributes for downstream search.
 
 ### 2.4 Embedding Worker
-1. Embedding worker polls for pending chunk IDs.
-2. Generates embeddings via `SentenceTransformer` (`BAAI/bge-m3`).
-3. Upserts vectors into Qdrant and marks chunks `ready`.
+1. Embedding service polls `embed_jobs` for chunks ready to embed.
+2. Generates embeddings via the configured provider/model (`BAAI/bge-m3` by default).
+3. Upserts vectors into Qdrant and marks chunks `ready`, clearing the job record.
 4. Hybrid search results combine lexical signals with vector similarity.
 
 ### 2.5 Attachment Enrichment
@@ -54,13 +52,14 @@
 ### 3.1 Gateway API
 | Method | Path | Description | Auth |
 | --- | --- | --- | --- |
-| GET | `/v1/search` | Hybrid search proxy with lexical/vector ranking | Bearer `AUTH_TOKEN` (recommended) |
+| GET | `/v1/search` | Hybrid search proxy with lexical/vector ranking | Bearer `AUTH_TOKEN` |
 | POST | `/v1/ask` | Summarize top search hits with citations | Bearer `AUTH_TOKEN` |
+| POST | `/v1/ingest` | Normalize and forward documents to catalog | Bearer `AUTH_TOKEN` |
+| GET | `/v1/ingest/{submission_id}` | Fetch submission + embedding status | Bearer `AUTH_TOKEN` |
 | GET | `/v1/doc/{doc_id}` | Proxy to catalog for message metadata | Bearer `AUTH_TOKEN` |
-| GET | `/v1/context/general` | Aggregate conversation insights | Bearer `AUTH_TOKEN`, forwards `CATALOG_TOKEN` |
-| POST | `/v1/catalog/events` | Stream collector events into catalog | Bearer `CATALOG_TOKEN` when configured |
+| GET | `/v1/context/general` | Aggregate conversation insights | Bearer `AUTH_TOKEN`, forwards `CATALOG_TOKEN` when set |
 | GET | `/catalog/contacts/export` | Stream contacts as NDJSON | Bearer `AUTH_TOKEN` |
-| POST | `/catalog/contacts/ingest` | Ingest normalized contacts | Bearer `AUTH_TOKEN` + `CATALOG_TOKEN` if required |
+| POST | `/catalog/contacts/ingest` | Ingest normalized contacts | Bearer `AUTH_TOKEN` (+ `CATALOG_TOKEN` if enforced downstream) |
 | GET | `/v1/healthz` | Service health probe | None |
 
 ### 3.2 Search Service
@@ -94,19 +93,19 @@
 | --- | --- |
 | `AUTH_TOKEN` | Gateway bearer token; must be set in production.
 | `CATALOG_BASE_URL` | Gateway → catalog routing. Defaults to `http://catalog:8081` in Docker.
-| `CATALOG_TOKEN` | Shared ingest secret for collector → gateway → catalog.
+| `CATALOG_TOKEN` | Optional shared secret forwarded to catalog ingest/status routes.
 | `SEARCH_URL` / `SEARCH_TOKEN` | Gateway → search routing and auth.
 | `DATABASE_URL` / `DB_DSN` | Postgres DSN for services and worker.
 | `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | Vector configuration shared by search + worker.
-| `WORKER_POLL_INTERVAL`, `WORKER_BATCH_SIZE` | Embedding worker tuning knobs.
-| `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE`, `CATALOG_ENDPOINT` | Collector behavior.
-| `OLLAMA_HOST`, `IMDESC_PATH`, `IMAGE_ENRICHMENT_CACHE` | Optional attachment enrichment configuration.
+| `WORKER_POLL_INTERVAL`, `WORKER_BATCH_SIZE` | Embedding service tuning knobs.
+| `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE`, `CATALOG_ENDPOINT` | Collector behavior (`CATALOG_ENDPOINT` defaults to gateway `/v1/ingest`).
+| `OLLAMA_ENABLED`, `OLLAMA_API_URL`, `OLLAMA_VISION_MODEL`, `IMDESC_PATH`, `IMAGE_ENRICHMENT_CACHE` | Optional attachment enrichment configuration.
 
 ## 6. Operational Runbooks
 ### 6.1 Local Development
 1. Export required tokens (`AUTH_TOKEN`, optionally `CATALOG_TOKEN`).
 2. Start stack: `docker compose up --build` (add `COMPOSE_PROFILES=collector` to include the collector container).
-3. Apply schema from a healthy postgres container: `docker compose exec -T postgres psql -U postgres -d haven -f - < schema/catalog_mvp.sql`.
+3. Apply schema (if you need to reset Postgres) via `docker compose exec -T postgres psql -U postgres -d haven -f - < schema/init.sql`.
 4. Run tests: `pytest`, optionally `mypy services shared` and `ruff check .`.
 5. Tail logs with `docker compose logs -f gateway catalog search` when debugging.
 
@@ -119,7 +118,7 @@
 ### 6.3 Attachment Enrichment
 1. Build `scripts/collectors/imdesc.swift` via `scripts/build-imdesc.sh` (places the helper binary under `scripts/collectors/bin/imdesc`).
 2. Confirm the collector locates the helper (`IMDESC_PATH` override available) and that `IMAGE_ENRICHMENT_CACHE` is writable.
-3. Optional: configure an Ollama vision endpoint (set `OLLAMA_HOST` if not `http://localhost:11434`).
+3. Optional: configure an Ollama vision endpoint (set `OLLAMA_API_URL` and `OLLAMA_VISION_MODEL`; update `OLLAMA_BASE_URL` for the embedding service if it calls a remote provider).
 4. Review collector logs for enrichment warnings; ingestion proceeds even without helpers.
 
 ### 6.4 Contacts Collector
@@ -127,15 +126,16 @@
 2. Run `python scripts/collectors/collector_contacts.py` (requires GUI permission prompt).
 3. Confirm contacts appear in catalog via `/catalog/contacts/export` or gateway proxy.
 
-### 6.5 Embedding Worker Operations
-- Ensure the embedding model referenced by `EMBEDDING_MODEL` is available (downloads on first run).
-- Monitor logs for successful `embedded_chunks` events and handle failures by resetting `embed_index_state.status` to `pending`.
+### 6.5 Embedding Service Operations
+1. Ensure the embedding model referenced by `EMBEDDING_MODEL` is available (downloads on first run).
+2. Monitor `embedding.service` logs for successful job completion events; failures leave rows in `embed_jobs` for retry.
+3. If a job stalls, reset `chunks.status` to `queued` or adjust `embed_jobs.next_attempt_at` to trigger immediate retries.
 
 ### 6.6 Troubleshooting
 | Symptom | Checks |
 | --- | --- |
 | Gateway 502 on catalog proxy | Verify `CATALOG_BASE_URL` and catalog container health. |
-| Empty search results | Confirm Qdrant is reachable, embedding worker running, and chunks marked `ready`. |
+| Empty search results | Confirm Qdrant is reachable, the embedding service is running, and chunks marked `ready`. |
 | Collector fails to post | Ensure `CATALOG_ENDPOINT` is correct and `CATALOG_TOKEN` matches gateway configuration. |
 | Attachment enrichment skipped | Check helper binary path, Ollama availability, and permissions for the cache directory. |
 | Worker stuck pending | Validate Qdrant collection existence and embedding model downloads. |
@@ -147,6 +147,6 @@
 - Attachment content is used only for enrichment metadata; raw image bytes are not uploaded.
 
 ## 8. Change Management Notes
-- Architectural maps, findings, and previous change reports live in `artifacts/structure/`.
+- Architectural maps, findings, and change reports live in `documentation/`.
 - When adjusting routes or service names, update Dockerfile entrypoints and compose service definitions to avoid drift.
-- Keep search service configuration in sync with the embedding worker to maintain vector compatibility.
+- Keep search service configuration in sync with the embedding service to maintain vector compatibility.

@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Layout & Ownership
-- `services/` houses deployable FastAPI apps and workers: `catalog_api`, `gateway_api`, `embedding_worker`, and the `collector` CLI.
+- `services/` houses deployable FastAPI apps and workers: `catalog_api`, `gateway_api`, and `embedding_service`.
 - Shared helpers live in `shared/`; reusable domain code (search pipelines, SDK) is packaged under `src/haven/`.
 - Infrastructure assets (`compose.yaml`, `Dockerfile`, `openapi.yaml`) and SQL migrations (`schema/`) sit at the root.
 - Tests reside in `tests/`, mirroring service names (e.g., `test_gateway_summary.py`).
@@ -11,11 +11,8 @@
 export AUTH_TOKEN="changeme"      # required by gateway endpoints
 docker compose up --build          # start Postgres, Qdrant, and API stack
 
-# Apply the Postgres schema from the running container (preferred)
-docker compose exec -T postgres psql -U postgres -d haven -f - < schema/catalog_mvp.sql
-
-# Optional contacts schema additions
-docker compose exec -T postgres psql -U postgres -d haven -f - < schema/contacts.sql
+# Postgres applies schema/init.sql on first boot; rerun manually if needed
+docker compose exec -T postgres psql -U postgres -d haven -f - < schema/init.sql
 
 python scripts/collectors/collector_imessage.py [--simulate "Hi"]
 

@@ -3,23 +3,24 @@
 Haven is a personal data plane that turns local iMessage history into a searchable knowledge base. The minimum viable product ingests conversations, catalogs normalized threads/messages in Postgres, generates semantic embeddings in Qdrant, and exposes hybrid search plus summarization through a FastAPI gateway.
 
 ## Documentation Map
-- [`artifacts/documentation/technical_reference.md`](artifacts/documentation/technical_reference.md) – deep dive on architecture, services, and configuration.
-- [`artifacts/documentation/functional_guide.md`](artifacts/documentation/functional_guide.md) – user workflows, API behavior, operating runbooks, and troubleshooting.
+- [`documentation/technical_reference.md`](documentation/technical_reference.md) – deep dive on architecture, services, and configuration.
+- [`documentation/functional_guide.md`](documentation/functional_guide.md) – user workflows, API behavior, operating runbooks, and troubleshooting.
 
 ## Components
-- **Collector (CLI / optional compose profile)** – copies `~/Library/Messages/chat.db`, normalizes new messages, enriches image attachments, and posts catalog events to the gateway.
+- **Collector (CLI / optional compose profile)** – `scripts/collectors/collector_imessage.py` copies `~/Library/Messages/chat.db`, normalizes new messages, enriches image attachments, and posts catalog events to the gateway.
 - **Catalog API** – internal FastAPI service that persists threads/messages/chunks, maintains FTS indexes, and tracks embedding status.
-- **Embedding Worker** – background worker that polls pending chunks, runs `BAAI/bge-m3`, and upserts vectors into Qdrant.
+- **Embedding Service** – background worker (`services/embedding_service/worker.py`) that polls pending chunks, calls the embedding provider, and upserts vectors into Qdrant.
 - **Gateway API (`:8085`)** – public FastAPI surface for hybrid search, summarization, document retrieval, and catalog proxying.
 - **Search Service** – FastAPI + Typer service that powers hybrid lexical/vector search and ingestion utilities.
 - **OpenAPI Spec** – `openapi.yaml` documents the public gateway surface for external integrations.
 
 ## Repository Layout
-- `services/` – Deployable FastAPI apps and workers (gateway, catalog, embedding worker) and the iMessage collector CLI.
+- `services/` – Deployable FastAPI apps and workers (gateway, catalog, embedding service).
+- `scripts/collectors/` – iMessage and Contacts collectors plus the native image description helper.
 - `src/haven/` – Installable Python package with search pipelines, SDK, and reusable domain logic.
 - `shared/` – Cross-service helpers (logging, Postgres utilities, dependency guards).
 - `schema/` – SQL migrations and initialization scripts.
-- `artifacts/` – Architecture findings, reports, and reference documentation.
+- `documentation/` – Architecture findings, runbooks, and reference guides.
 - `tests/` – Pytest suite covering gateway, collector, and search behaviors.
 
 ## Prerequisites
@@ -38,13 +39,11 @@ docker compose up --build
 
 ```bash
 # 2. Initialize the Postgres schema (choose one)
-# Preferred: stream SQL into the running postgres container
-docker compose exec -T postgres psql -U postgres -d haven -f - < schema/catalog_mvp.sql
+# The postgres service automatically applies schema/init.sql on first boot.
+# Re-run manually if you need to reset the database:
+docker compose exec -T postgres psql -U postgres -d haven -f - < schema/init.sql
 # Alternative: apply from host (requires local psql client)
-psql postgresql://postgres:postgres@localhost:5432/haven -f schema/catalog_mvp.sql
-
-# Contacts schema additions (optional feature)
-docker compose exec -T postgres psql -U postgres -d haven -f - < schema/contacts.sql
+psql postgresql://postgres:postgres@localhost:5432/haven -f schema/init.sql
 ```
 
 ```bash
@@ -85,21 +84,24 @@ Image attachments can be enriched with OCR, entity extraction, and captions.
    ```
 2. (Optional) Enable captioning via an Ollama vision model:
    - Ensure an Ollama server with a vision-capable model (e.g., `llava`) is running.
-   - Set `OLLAMA_HOST` for the collector if the server is remote.
+   - Export `OLLAMA_API_URL` for the collector and `OLLAMA_BASE_URL` for the embedding service when using a remote server or custom port.
 3. The collector falls back gracefully when the helper binary or caption endpoint is unavailable—it logs a warning and continues ingesting messages.
 
 ## Configuration Reference
 - `AUTH_TOKEN` – bearer token enforced on gateway routes (optional in development).
-- `CATALOG_TOKEN` – legacy shared secret for catalog calls; collectors now prefer `AUTH_TOKEN` and fall back to this when present.
+- `CATALOG_TOKEN` – optional shared secret forwarded by the gateway for catalog ingest/status calls.
 - `CATALOG_BASE_URL` – internal URL the gateway uses to reach the catalog (defaults to `http://catalog:8081`).
 - `DATABASE_URL` – Postgres DSN; each service overrides this for Docker networking.
 - `EMBEDDING_MODEL` – embedding identifier (`BAAI/bge-m3`).
 - `QDRANT_URL`, `QDRANT_COLLECTION` – vector store configuration.
-- `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` – collector tuning knobs.
+- `OLLAMA_ENABLED`, `OLLAMA_API_URL`, `OLLAMA_VISION_MODEL` – configure optional vision captioning for image enrichment.
+- `OLLAMA_BASE_URL` – base URL the embedding service uses when calling the embedding provider.
+- `WORKER_POLL_INTERVAL`, `WORKER_BATCH_SIZE` – embedding service tuning knobs.
+- `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` – collector scheduling controls for incremental sync.
 
 ### Using a .env file
 
-For convenient local development you can create a `.env` in the repository root containing environment variables used by `docker compose` and services. A sample `.env` with sensible defaults is included in the repo. Example usage:
+For convenient local development you can create a `.env` in the repository root containing environment variables used by `docker compose` and services. Copy `.env.example` to `.env` and edit values as needed. Example usage:
 
 ```bash
 # Use the values in .env automatically when running docker compose (docker-compose v2 reads .env by default)
@@ -130,6 +132,6 @@ curl -s "http://localhost:8085/v1/search?q=MMED" -H "Authorization: Bearer $AUTH
 - Manage tokens through environment variables or `.env` files excluded from version control.
 
 ## Maintenance Tips
-- Keep search and embedding worker defaults aligned so vector dimensions remain consistent.
+- Keep search and embedding service defaults aligned so vector dimensions remain consistent.
 - Update Dockerfile entrypoints and compose service settings whenever new services or optional profiles are introduced.
-- Refer to the `artifacts/` folder for architectural reports and change history.
+- Refer to the `documentation/` folder for architectural reports and change history.
