@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: postgres
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./schema/catalog_mvp.sql:/docker-entrypoint-initdb.d/catalog_mvp.sql:ro
+      - ./schema/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
 
   qdrant:
     image: qdrant/qdrant:latest
