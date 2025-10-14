@@ -34,6 +34,7 @@ search = [
 ]
 gateway = ["authlib", "redis", "jinja2"]
 collector = ["beautifulsoup4", "pypdf", "tika", "pytesseract"]
+catalog = ["qdrant-client>=1.8"]
 contacts = [
   "phonenumberslite>=8.13",
   "idna>=3.6",
@@ -47,8 +48,8 @@ package-dir = {"haven" = "src/haven"}
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["haven*", "services*", "shared*"]
+include = ["haven*", "services*", "shared*", "scripts*"]
 
 [project.scripts]
 search-service = "haven.search.main:cli"
-collector-run = "services.collector.collector_imessage:main"
+collector-run = "scripts.collectors.collector_imessage:main"

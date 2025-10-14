@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Query, status
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
-from typing import Iterator
 import orjson
+import psycopg
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
+from psycopg.rows import dict_row
 from psycopg.types.json import Json
+from pydantic import BaseModel, Field
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qm
 
+from shared.context import fetch_context_overview, is_message_text_valid
 from shared.db import get_connection
 from shared.logging import get_logger, setup_logging
-from shared.context import fetch_context_overview, is_message_text_valid
-from shared.people_repository import PeopleResolver
-from shared.people_normalization import IdentifierKind, normalize_identifier
 
 logger = get_logger("catalog.api")
 
@@ -27,59 +31,577 @@ class CatalogSettings(BaseModel):
         )
     )
     ingest_token: Optional[str] = Field(default_factory=lambda: os.getenv("CATALOG_TOKEN"))
-    embedding_model: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"))
+    qdrant_url: str = Field(default_factory=lambda: os.getenv("QDRANT_URL", "http://qdrant:6333"))
+    qdrant_collection: str = Field(default_factory=lambda: os.getenv("QDRANT_COLLECTION", "haven_chunks"))
     contacts_default_region: str | None = Field(default_factory=lambda: os.getenv("CONTACTS_DEFAULT_REGION", "US"))
 
 
 settings = CatalogSettings()
+app = FastAPI(title="Haven Catalog API", version="0.3.0")
+
+_qdrant_client: QdrantClient | None = None
 
 
-class ThreadPayload(BaseModel):
-    id: str
-    kind: str
-    participants: List[str] = Field(default_factory=list)
+def verify_token(request: Request) -> None:
+    if not settings.ingest_token:
+        return
+    header = request.headers.get("Authorization")
+    if not header or not header.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+    token = header.split(" ", 1)[1]
+    if token != settings.ingest_token:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
+
+
+def get_qdrant_client() -> QdrantClient:
+    global _qdrant_client
+    if _qdrant_client is None:
+        _qdrant_client = QdrantClient(url=settings.qdrant_url)
+    return _qdrant_client
+
+
+def ensure_qdrant_collection(client: QdrantClient, vector_size: int) -> None:
+    try:
+        info = client.get_collection(settings.qdrant_collection)
+        current_size = info.config.params.vectors.size  # type: ignore[attr-defined]
+        if current_size != vector_size:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Qdrant collection vector size mismatch (expected {vector_size}, found {current_size})",
+            )
+    except Exception as exc:
+        logger.info("creating_qdrant_collection", collection=settings.qdrant_collection)
+        try:
+            client.create_collection(
+                collection_name=settings.qdrant_collection,
+                vectors_config=qm.VectorParams(size=vector_size, distance=qm.Distance.COSINE),
+            )
+        except Exception as create_exc:  # pragma: no cover
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create Qdrant collection: {create_exc}",
+            ) from exc
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    setup_logging()
+    os.environ.setdefault("DATABASE_URL", settings.database_url)
+    logger.info("catalog_api_startup", qdrant_collection=settings.qdrant_collection)
+
+
+class DocumentIngestRequest(BaseModel):
+    idempotency_key: str
+    source_type: str
+    source_id: str
+    content_sha256: str
+    text: str
+    mime_type: str = "text/plain"
+    canonical_uri: Optional[str] = None
     title: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-class MessagePayload(BaseModel):
-    row_id: Optional[int] = None
-    guid: str
-    thread_id: str
-    ts: Optional[datetime] = None
-    sender: str
-    sender_service: Optional[str] = None
-    is_from_me: bool
-    text: str
-    attrs: Dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("ts", mode="before")
-    @classmethod
-    def parse_ts(cls, value: Any) -> Optional[datetime]:
-        if value is None or isinstance(value, datetime):
-            return value
-        if isinstance(value, str):
-            value = value.replace("Z", "+00:00")
-            return datetime.fromisoformat(value)
-        raise ValueError("Unsupported timestamp format")
+class DocumentIngestResponse(BaseModel):
+    submission_id: str
+    doc_id: Optional[str]
+    status: str
+    total_chunks: int
+    duplicate: bool = False
 
 
-class ChunkPayload(BaseModel):
-    id: str
-    chunk_index: int
-    text: str
-    meta: Dict[str, Any] = Field(default_factory=dict)
+class SubmissionStatusResponse(BaseModel):
+    submission_id: str
+    status: str
+    doc_id: Optional[str] = None
+    document_status: Optional[str] = None
+    total_chunks: int = 0
+    embedded_chunks: int = 0
+    pending_chunks: int = 0
+    error: Optional[Dict[str, Any]] = None
 
 
-class CatalogEventItem(BaseModel):
-    source: str
+class DocumentStatusResponse(BaseModel):
     doc_id: str
-    thread: ThreadPayload
-    message: MessagePayload
-    chunks: List[ChunkPayload]
+    status: str
+    submission_id: str
+    total_chunks: int
+    embedded_chunks: int
+    pending_chunks: int
 
 
-class CatalogEventsRequest(BaseModel):
-    items: List[CatalogEventItem]
+class EmbeddingSubmitRequest(BaseModel):
+    chunk_id: str
+    vector: List[float]
+    model: str
+    dimensions: int
+
+
+class EmbeddingSubmitResponse(BaseModel):
+    chunk_id: str
+    status: str
+
+
+class DeleteDocumentResponse(BaseModel):
+    doc_id: str
+    status: str
+
+
+def _normalize_text(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+@dataclass
+class ChunkCandidate:
+    ordinal: int
+    text: str
+    text_sha256: str
+
+
+def _chunk_text(text: str, max_chars: int = 1200, overlap: int = 200) -> List[ChunkCandidate]:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return []
+    length = len(normalized)
+    ordinal = 0
+    start = 0
+    chunks: List[ChunkCandidate] = []
+    while start < length:
+        end = min(length, start + max_chars)
+        if end < length:
+            # Try to break on whitespace or newline to avoid mid-word splits.
+            window = normalized[start:end]
+            newline_break = window.rfind("\n")
+            space_break = window.rfind(" ")
+            candidate_break = max(newline_break, space_break)
+            min_chunk = max_chars // 2
+            if candidate_break >= min_chunk:
+                end = start + candidate_break
+        chunk_text = normalized[start:end].strip()
+        if chunk_text:
+            chunk_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
+            chunks.append(ChunkCandidate(ordinal=ordinal, text=chunk_text, text_sha256=chunk_hash))
+            ordinal += 1
+        if end >= length:
+            break
+        start = max(start + 1, end - overlap)
+    return chunks
+
+
+def _row_to_dict(cur, row) -> dict:
+    cols = [d[0] for d in cur.description]
+    return {k: v for k, v in zip(cols, row)}
+
+
+@app.post(
+    "/v1/catalog/documents",
+    response_model=DocumentIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def register_document(
+    payload: DocumentIngestRequest,
+    response: Response,
+    _token: None = Depends(verify_token),
+) -> DocumentIngestResponse:
+    chunk_candidates = _chunk_text(payload.text)
+    if not chunk_candidates:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document produced no valid chunks")
+
+    text_sha = hashlib.sha256(_normalize_text(payload.text).encode("utf-8")).hexdigest()
+
+    with get_connection(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                INSERT INTO ingest_submissions (idempotency_key, source_type, source_id, content_sha256, status)
+                VALUES (%s, %s, %s, %s, 'submitted')
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING submission_id, status
+                """,
+                (payload.idempotency_key, payload.source_type, payload.source_id, payload.content_sha256),
+            )
+            inserted = cur.fetchone()
+            if not inserted:
+                cur.execute(
+                    """
+                    SELECT submission_id, status
+                    FROM ingest_submissions
+                    WHERE idempotency_key = %s
+                    """,
+                    (payload.idempotency_key,),
+                )
+                existing = cur.fetchone()
+                if not existing:
+                    conn.rollback()
+                    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to load submission")
+                conn.commit()
+                response.status_code = status.HTTP_200_OK
+                return DocumentIngestResponse(
+                    submission_id=str(existing["submission_id"]),
+                    doc_id=None,
+                    status=existing["status"],
+                    total_chunks=0,
+                    duplicate=True,
+                )
+
+            submission_id = inserted["submission_id"]
+            cur.execute(
+                """
+                INSERT INTO documents (submission_id, canonical_uri, mime_type, title, text, text_sha256, metadata, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'submitted')
+                RETURNING doc_id
+                """,
+                (
+                    submission_id,
+                    payload.canonical_uri,
+                    payload.mime_type,
+                    payload.title,
+                    _normalize_text(payload.text),
+                    text_sha,
+                    Json(payload.metadata),
+                ),
+            )
+            doc_row = cur.fetchone()
+            if not doc_row:
+                conn.rollback()
+                raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create document record")
+
+            doc_id = doc_row["doc_id"]
+            doc_uuid = uuid.UUID(str(doc_id))
+
+            cur.execute(
+                "UPDATE ingest_submissions SET status = 'cataloged' WHERE submission_id = %s",
+                (submission_id,),
+            )
+            cur.execute(
+                "UPDATE documents SET status = 'cataloged' WHERE doc_id = %s",
+                (doc_id,),
+            )
+
+            for chunk in chunk_candidates:
+                chunk_uuid = uuid.uuid5(doc_uuid, f"chunk:{chunk.ordinal}")
+                cur.execute(
+                    """
+                    INSERT INTO chunks (chunk_id, doc_id, ord, text, text_sha256, status)
+                    VALUES (%s, %s, %s, %s, %s, 'queued')
+                    ON CONFLICT (chunk_id) DO UPDATE
+                    SET text = EXCLUDED.text,
+                        text_sha256 = EXCLUDED.text_sha256,
+                        status = 'queued',
+                        updated_at = NOW()
+                    """,
+                    (chunk_uuid, doc_id, chunk.ordinal, chunk.text, chunk.text_sha256),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO embed_jobs (chunk_id, tries, last_error, locked_by, locked_at, next_attempt_at)
+                    VALUES (%s, 0, NULL, NULL, NULL, NOW())
+                    ON CONFLICT (chunk_id) DO UPDATE
+                    SET last_error = NULL,
+                        locked_by = NULL,
+                        locked_at = NULL,
+                        next_attempt_at = NOW()
+                    """,
+                    (chunk_uuid,),
+                )
+
+            cur.execute(
+                "UPDATE documents SET status = 'chunked' WHERE doc_id = %s",
+                (doc_id,),
+            )
+            cur.execute(
+                "UPDATE ingest_submissions SET status = 'chunked' WHERE submission_id = %s",
+                (submission_id,),
+            )
+            cur.execute(
+                "UPDATE documents SET status = 'embedding_pending' WHERE doc_id = %s",
+                (doc_id,),
+            )
+            cur.execute(
+                "UPDATE ingest_submissions SET status = 'embedding_pending' WHERE submission_id = %s",
+                (submission_id,),
+            )
+        conn.commit()
+
+    response.status_code = status.HTTP_202_ACCEPTED
+    return DocumentIngestResponse(
+        submission_id=str(submission_id),
+        doc_id=str(doc_id),
+        status="embedding_pending",
+        total_chunks=len(chunk_candidates),
+        duplicate=False,
+    )
+
+
+@app.get("/v1/catalog/submissions/{submission_id}", response_model=SubmissionStatusResponse)
+def get_submission_status(submission_id: str, _token: None = Depends(verify_token)) -> SubmissionStatusResponse:
+    try:
+        submission_uuid = uuid.UUID(submission_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid submission_id") from exc
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.submission_id,
+                    s.status,
+                    s.error_json,
+                    d.doc_id,
+                    d.status AS document_status,
+                    COALESCE(stats.total_chunks, 0) AS total_chunks,
+                    COALESCE(stats.embedded_chunks, 0) AS embedded_chunks,
+                    COALESCE(stats.pending_chunks, 0) AS pending_chunks
+                FROM ingest_submissions s
+                LEFT JOIN documents d ON d.submission_id = s.submission_id
+                LEFT JOIN (
+                    SELECT
+                        doc_id,
+                        COUNT(*) AS total_chunks,
+                        COUNT(*) FILTER (WHERE status = 'embedded') AS embedded_chunks,
+                        COUNT(*) FILTER (WHERE status IN ('queued', 'embedding')) AS pending_chunks
+                    FROM chunks
+                    GROUP BY doc_id
+                ) stats ON stats.doc_id = d.doc_id
+                WHERE s.submission_id = %s
+                """,
+                (submission_uuid,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Submission not found")
+
+    error_payload = row["error_json"]
+    if isinstance(error_payload, memoryview):
+        error_payload = orjson.loads(error_payload.tobytes())
+
+    return SubmissionStatusResponse(
+        submission_id=str(row["submission_id"]),
+        status=row["status"],
+        doc_id=str(row["doc_id"]) if row["doc_id"] else None,
+        document_status=row["document_status"],
+        total_chunks=row["total_chunks"],
+        embedded_chunks=row["embedded_chunks"],
+        pending_chunks=row["pending_chunks"],
+        error=error_payload,
+    )
+
+
+@app.get("/v1/catalog/documents/{doc_id}/status", response_model=DocumentStatusResponse)
+def get_document_status(doc_id: str, _token: None = Depends(verify_token)) -> DocumentStatusResponse:
+    try:
+        doc_uuid = uuid.UUID(doc_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid doc_id") from exc
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT
+                    d.doc_id,
+                    d.submission_id,
+                    d.status,
+                    COALESCE(stats.total_chunks, 0) AS total_chunks,
+                    COALESCE(stats.embedded_chunks, 0) AS embedded_chunks,
+                    COALESCE(stats.pending_chunks, 0) AS pending_chunks
+                FROM documents d
+                LEFT JOIN (
+                    SELECT
+                        doc_id,
+                        COUNT(*) AS total_chunks,
+                        COUNT(*) FILTER (WHERE status = 'embedded') AS embedded_chunks,
+                        COUNT(*) FILTER (WHERE status IN ('queued', 'embedding')) AS pending_chunks
+                    FROM chunks
+                    GROUP BY doc_id
+                ) stats ON stats.doc_id = d.doc_id
+                WHERE d.doc_id = %s
+                """,
+                (doc_uuid,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    return DocumentStatusResponse(
+        doc_id=str(row["doc_id"]),
+        submission_id=str(row["submission_id"]),
+        status=row["status"],
+        total_chunks=row["total_chunks"],
+        embedded_chunks=row["embedded_chunks"],
+        pending_chunks=row["pending_chunks"],
+    )
+
+
+@app.post("/v1/catalog/embeddings", response_model=EmbeddingSubmitResponse)
+def submit_embedding(payload: EmbeddingSubmitRequest, _token: None = Depends(verify_token)) -> EmbeddingSubmitResponse:
+    if not payload.vector:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Embedding vector is required")
+    if payload.dimensions != len(payload.vector):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Vector length does not match dimensions")
+
+    try:
+        chunk_uuid = uuid.UUID(payload.chunk_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid chunk_id") from exc
+
+    client = get_qdrant_client()
+    ensure_qdrant_collection(client, payload.dimensions)
+
+    with get_connection(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT c.chunk_id, c.doc_id, c.status, d.submission_id
+                FROM chunks c
+                JOIN documents d ON d.doc_id = c.doc_id
+                WHERE c.chunk_id = %s
+                FOR UPDATE
+                """,
+                (chunk_uuid,),
+            )
+            chunk_row = cur.fetchone()
+            if not chunk_row:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Chunk not found")
+
+            doc_id = chunk_row["doc_id"]
+            submission_id = chunk_row["submission_id"]
+
+            client.upsert(
+                collection_name=settings.qdrant_collection,
+                points=qm.Batch(
+                    ids=[str(chunk_uuid)],
+                    vectors=[payload.vector],
+                    payloads=[
+                        {
+                            "doc_id": str(doc_id),
+                            "submission_id": str(submission_id),
+                            "model": payload.model,
+                        }
+                    ],
+                ),
+            )
+
+            cur.execute(
+                "UPDATE chunks SET status = 'embedded', updated_at = NOW() WHERE chunk_id = %s",
+                (chunk_uuid,),
+            )
+            cur.execute("DELETE FROM embed_jobs WHERE chunk_id = %s", (chunk_uuid,))
+
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_chunks,
+                    COUNT(*) FILTER (WHERE status = 'embedded') AS embedded_chunks
+                FROM chunks
+                WHERE doc_id = %s
+                """,
+                (doc_id,),
+            )
+            counts = cur.fetchone()
+            if counts and counts["total_chunks"] == counts["embedded_chunks"]:
+                cur.execute(
+                    "UPDATE documents SET status = 'ingested_complete' WHERE doc_id = %s",
+                    (doc_id,),
+                )
+                cur.execute(
+                    "UPDATE ingest_submissions SET status = 'ingested_complete', error_json = NULL WHERE submission_id = %s",
+                    (submission_id,),
+                )
+            else:
+                cur.execute(
+                    "UPDATE documents SET status = 'embedding_pending' WHERE doc_id = %s",
+                    (doc_id,),
+                )
+                cur.execute(
+                    "UPDATE ingest_submissions SET status = 'embedding_pending' WHERE submission_id = %s",
+                    (submission_id,),
+                )
+        conn.commit()
+
+    return EmbeddingSubmitResponse(chunk_id=str(chunk_uuid), status="embedded")
+
+
+@app.delete(
+    "/v1/catalog/documents/{doc_id}",
+    response_model=DeleteDocumentResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def delete_document(doc_id: str, _token: None = Depends(verify_token)) -> DeleteDocumentResponse:
+    try:
+        doc_uuid = uuid.UUID(doc_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid doc_id") from exc
+
+    chunk_ids: List[str] = []
+    submission_id: Optional[uuid.UUID] = None
+
+    with get_connection(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT doc_id, submission_id, status
+                FROM documents
+                WHERE doc_id = %s
+                FOR UPDATE
+                """,
+                (doc_uuid,),
+            )
+            doc_row = cur.fetchone()
+            if not doc_row:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found")
+            submission_id = doc_row["submission_id"]
+            status_value = doc_row["status"]
+            if status_value == "deleted":
+                conn.commit()
+                return DeleteDocumentResponse(doc_id=str(doc_uuid), status="deleted")
+
+            cur.execute(
+                "UPDATE documents SET status = 'deleting' WHERE doc_id = %s",
+                (doc_uuid,),
+            )
+            if submission_id:
+                cur.execute(
+                    "UPDATE ingest_submissions SET status = 'deleting' WHERE submission_id = %s",
+                    (submission_id,),
+                )
+
+            cur.execute(
+                "SELECT chunk_id FROM chunks WHERE doc_id = %s",
+                (doc_uuid,),
+            )
+            chunk_ids = [str(row["chunk_id"]) for row in cur.fetchall()]
+
+            if chunk_ids:
+                cur.execute(
+                    "DELETE FROM chunks WHERE doc_id = %s",
+                    (doc_uuid,),
+                )
+                cur.execute(
+                    "DELETE FROM embed_jobs WHERE chunk_id = ANY(%s)",
+                    (chunk_ids,),
+                )
+
+            cur.execute(
+                "UPDATE documents SET status = 'deleted' WHERE doc_id = %s",
+                (doc_uuid,),
+            )
+            if submission_id:
+                cur.execute(
+                    "UPDATE ingest_submissions SET status = 'deleted', error_json = NULL WHERE submission_id = %s",
+                    (submission_id,),
+                )
+        conn.commit()
+
+    if chunk_ids:
+        client = get_qdrant_client()
+        client.delete(
+            collection_name=settings.qdrant_collection,
+            points_selector=qm.PointIdsList(ids=chunk_ids),
+        )
+
+    return DeleteDocumentResponse(doc_id=str(doc_uuid), status="deleted")
 
 
 class DocResponse(BaseModel):
@@ -113,51 +635,17 @@ class ContextGeneralResponse(BaseModel):
     recent_highlights: List[ContextHighlight]
 
 
-app = FastAPI(title="Haven Catalog API", version="0.1.0")
-
-
-def verify_token(request: Request) -> None:
-    if not settings.ingest_token:
-        return
-    header = request.headers.get("Authorization")
-    if not header or not header.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
-    token = header.split(" ", 1)[1]
-    if token != settings.ingest_token:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    setup_logging()
-    os.environ.setdefault("DATABASE_URL", settings.database_url)
-    logger.info("catalog_api_startup")
-
-
-def _row_to_dict(cur, row) -> dict:
-    # Build a dict for a cursor row using description
-    cols = [d[0] for d in cur.description]
-    return {k: v for k, v in zip(cols, row)}
-
-
 @app.get("/contacts/export")
 def export_contacts(
     request: Request,
     since_token: Optional[str] = Query(default=None),
     full: Optional[bool] = Query(default=False),
 ) -> StreamingResponse:
-    """Stream contacts as NDJSON. Each line is a JSON object with fields:
-    {"change_token": "...", "contact": {...}}
-
-    since_token may be an ISO timestamp produced by this endpoint previously; when provided
-    only contacts with updated_at > since_token will be emitted. If `full` is true, all
-    contacts are emitted regardless of since_token.
-    """
+    verify_token(request)
 
     def iter_contacts() -> Iterator[bytes]:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Fetch people, optionally filtering by since_token (which we expect to be an ISO ts)
                 if since_token and not full:
                     try:
                         parsed = datetime.fromisoformat(since_token.replace("Z", "+00:00"))
@@ -172,7 +660,7 @@ def export_contacts(
                             WHERE updated_at > %s
                             ORDER BY updated_at ASC
                             """,
-                            (parsed,)
+                            (parsed,),
                         )
                     else:
                         cur.execute(
@@ -194,222 +682,10 @@ def export_contacts(
                     )
 
                 for row in cur.fetchall():
-                    p = _row_to_dict(cur, row)
-                    person_id = p["person_id"]
-
-                    # identifiers
-                    with conn.cursor() as cur_ids:
-                        cur_ids.execute(
-                            """
-                            SELECT kind, value_raw, value_canonical, label, priority, verified
-                            FROM person_identifiers
-                            WHERE person_id = %s
-                            """,
-                            (person_id,)
-                        )
-                        ids = [ _row_to_dict(cur_ids, r) for r in cur_ids.fetchall() ]
-
-                    phones = [
-                        {"value": i["value_canonical"], "value_raw": i.get("value_raw"), "label": i.get("label"), "priority": i.get("priority"), "verified": i.get("verified")}
-                        for i in ids if i.get("kind") == "phone"
-                    ]
-                    emails = [
-                        {"value": i["value_canonical"], "value_raw": i.get("value_raw"), "label": i.get("label"), "priority": i.get("priority"), "verified": i.get("verified")}
-                        for i in ids if i.get("kind") == "email"
-                    ]
-
-                    # addresses
-                    with conn.cursor() as cur_addr:
-                        cur_addr.execute(
-                            """
-                            SELECT label, street, city, region, postal_code, country
-                            FROM person_addresses
-                            WHERE person_id = %s
-                            """,
-                            (person_id,)
-                        )
-                        addrs = [ _row_to_dict(cur_addr, r) for r in cur_addr.fetchall() ]
-
-                    addresses = [
-                        {"label": a.get("label"), "street": a.get("street"), "city": a.get("city"), "region": a.get("region"), "postal_code": a.get("postal_code"), "country": a.get("country")}
-                        for a in addrs
-                    ]
-
-                    # urls
-                    with conn.cursor() as cur_urls:
-                        cur_urls.execute(
-                            """
-                            SELECT label, url
-                            FROM person_urls
-                            WHERE person_id = %s
-                            """,
-                            (person_id,)
-                        )
-                        urls_r = [ _row_to_dict(cur_urls, r) for r in cur_urls.fetchall() ]
-
-                    urls = [{"label": u.get("label"), "url": u.get("url")} for u in urls_r]
-
-                    contact = {
-                        "external_id": str(person_id),
-                        "display_name": p.get("display_name"),
-                        "given_name": p.get("given_name"),
-                        "family_name": p.get("family_name"),
-                        "organization": p.get("organization"),
-                        "nicknames": p.get("nicknames") or [],
-                        "notes": p.get("notes"),
-                        "photo_hash": p.get("photo_hash"),
-                        "emails": emails,
-                        "phones": phones,
-                        "addresses": addresses,
-                        "urls": urls,
-                        "version": int(p.get("version") or 1),
-                        "deleted": bool(p.get("deleted")),
-                    }
-
-                    change_token = None
-                    if p.get("updated_at"):
-                        try:
-                            change_token = p["updated_at"].isoformat()
-                        except Exception:
-                            change_token = None
-
-                    out = {"change_token": change_token, "contact": contact}
-                    yield orjson.dumps(out) + b"\n"
+                    person = _row_to_dict(cur, row)
+                    yield orjson.dumps(person) + b"\n"
 
     return StreamingResponse(iter_contacts(), media_type="application/x-ndjson")
-
-
-@app.post("/v1/catalog/events", status_code=status.HTTP_202_ACCEPTED)
-def ingest_events(payload: CatalogEventsRequest, _: None = Depends(verify_token)) -> Dict[str, Any]:
-    if not payload.items:
-        return {"ingested": 0}
-
-    ingested = 0
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            for item in payload.items:
-                logger.info("ingest_event", doc_id=item.doc_id, source=item.source)
-                cur.execute(
-                    """
-                    INSERT INTO threads (id, kind, participants, title)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (id) DO UPDATE
-                    SET participants = EXCLUDED.participants,
-                        title = EXCLUDED.title,
-                        updated_at = NOW()
-                    """,
-                    (
-                        item.thread.id,
-                        item.thread.kind,
-                        Json(item.thread.participants),
-                        item.thread.title,
-                    ),
-                )
-
-                ts_value = item.message.ts or datetime.now(tz=UTC)
-
-                cur.execute(
-                    """
-                    INSERT INTO messages (doc_id, thread_id, message_guid, ts, sender, sender_service, is_from_me, text, attrs)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (doc_id) DO UPDATE
-                    SET text = EXCLUDED.text,
-                        attrs = EXCLUDED.attrs,
-                        ts = EXCLUDED.ts,
-                        sender = EXCLUDED.sender,
-                        sender_service = EXCLUDED.sender_service,
-                        updated_at = NOW()
-                    """,
-                    (
-                        item.doc_id,
-                        item.thread.id,
-                        item.message.guid,
-                        ts_value,
-                        item.message.sender,
-                        item.message.sender_service,
-                        item.message.is_from_me,
-                        item.message.text,
-                        Json(item.message.attrs),
-                    ),
-                )
-
-                for chunk in item.chunks:
-                    cur.execute(
-                        """
-                        INSERT INTO chunks (id, doc_id, chunk_index, text, meta)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (id) DO UPDATE
-                        SET text = EXCLUDED.text,
-                            meta = EXCLUDED.meta
-                        RETURNING id
-                        """,
-                        (
-                            chunk.id,
-                            item.doc_id,
-                            chunk.chunk_index,
-                            chunk.text,
-                            Json(chunk.meta),
-                        ),
-                    )
-                    chunk_id = cur.fetchone()[0]
-                    cur.execute(
-                        """
-                        INSERT INTO embed_index_state (chunk_id, model, status)
-                        VALUES (%s, %s, 'pending')
-                        ON CONFLICT (chunk_id) DO UPDATE
-                        SET status = 'pending', updated_at = NOW(), last_error = NULL
-                        """,
-                        (chunk_id, settings.embedding_model),
-                    )
-
-                ingested += 1
-
-    return {"ingested": ingested}
-
-
-@app.get("/v1/doc/{doc_id}", response_model=DocResponse)
-def get_document(doc_id: str) -> DocResponse:
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT doc_id, thread_id, ts, sender, text, attrs
-                FROM messages
-                WHERE doc_id = %s
-                """,
-                (doc_id,),
-            )
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-            sender_value = row[3] or ""
-            # Try to resolve sender to an ingested contact (skip 'me' and empty)
-            if sender_value and sender_value != "me":
-                try:
-                    kind = IdentifierKind.EMAIL if "@" in sender_value else IdentifierKind.PHONE
-                    ident = normalize_identifier(kind, sender_value, default_region=None)
-                    resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
-                    person = resolver.resolve(kind, sender_value)
-                    if person and person.get("display_name"):
-                        sender_value = person.get("display_name")
-                except Exception:
-                    # If normalization/resolution fails, fall back to raw sender
-                    pass
-
-            text_val = row[4] or ""
-            # If the message text appears to be only replacement/object/zero-width characters
-            # (for example an image placeholder), do not return it and use an empty string.
-            if not is_message_text_valid(text_val):
-                text_val = ""
-
-            return DocResponse(
-                doc_id=row[0],
-                thread_id=row[1],
-                ts=row[2],
-                sender=str(sender_value),
-                text=text_val,
-                attrs=row[5],
-            )
 
 
 @app.get("/v1/context/general", response_model=ContextGeneralResponse)
@@ -418,22 +694,34 @@ def get_context_general() -> ContextGeneralResponse:
         overview = fetch_context_overview(conn)
 
     top_threads = [
-        ContextThread(thread_id=t["thread_id"], title=t["title"], message_count=t["message_count"])
-        for t in overview["top_threads"]
+        ContextThread(
+            thread_id=item["thread_id"],
+            title=item["title"],
+            message_count=item["message_count"],
+        )
+        for item in overview["top_threads"]
     ]
+
     recent_highlights = [
-        ContextHighlight(**h) for h in overview["recent_highlights"]
+        ContextHighlight(
+            doc_id=item["doc_id"],
+            thread_id=item["thread_id"],
+            ts=item["ts"],
+            sender=item["sender"],
+            text=item["text"],
+        )
+        for item in overview["recent_highlights"]
     ]
 
     return ContextGeneralResponse(
         total_threads=overview["total_threads"],
         total_messages=overview["total_messages"],
-        last_message_ts=overview.get("last_message_ts"),
+        last_message_ts=overview["last_message_ts"],
         top_threads=top_threads,
         recent_highlights=recent_highlights,
     )
 
 
 @app.get("/v1/healthz")
-def healthcheck() -> Dict[str, str]:
+def health_check() -> Dict[str, str]:
     return {"status": "ok"}

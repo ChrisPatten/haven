@@ -1,4 +1,4 @@
-from services.collector.collector_contacts import (
+from scripts.collectors.collector_contacts import (
     ContactNormalizer,
     HelperContact,
     chunked,

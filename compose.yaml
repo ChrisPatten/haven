@@ -46,6 +46,7 @@ services:
       - EMBEDDING_MODEL=BAAI/bge-m3
     depends_on:
       - search
+      - catalog
     ports:
       - "127.0.0.1:8085:8080"
 
@@ -57,40 +58,28 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/haven
       CATALOG_TOKEN: ${CATALOG_TOKEN:-}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: haven_chunks
     depends_on:
       - postgres
 
-  collector:
-    profiles: ["collector"]
+  embedding_service:
     build:
       context: .
       args:
-        SERVICE: "collector"
-    environment:
-      - CATALOG_ENDPOINT=http://gateway:8080/v1/catalog/events
-      - AUTH_TOKEN=${AUTH_TOKEN:-changeme}
-      - CONTACTS_GATEWAY_URL=http://gateway:8080
-      - CONTACTS_GATEWAY_ENDPOINT=http://gateway:8080/catalog/contacts/ingest
-    depends_on:
-      - search
-
-  embedding_worker:
-    build:
-      context: .
-      args:
-        SERVICE: "embedding_worker"
+        SERVICE: "embedding_service"
     restart: unless-stopped
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/haven
-      - QDRANT_URL=http://qdrant:6333
-      - QDRANT_COLLECTION=haven_chunks
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-m3}
-      - EMBEDDING_DIM=${EMBEDDING_DIM:-1024}
+      - CATALOG_BASE_URL=http://catalog:8081
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-bge-m3}
       - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-2.0}
       - WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE:-16}
     depends_on:
       - postgres
       - qdrant
+      - catalog
 
 volumes:
   pg_data:

@@ -6,14 +6,14 @@
 - **search** – builds with `SERVICE=search`; command `search-service --host 0.0.0.0 --port 8080`; depends on `postgres`, `qdrant`.
 - **gateway** – builds with `SERVICE=gateway`; command `uvicorn services.gateway_api.app:app --host 0.0.0.0 --port 8080`; publishes `127.0.0.1:8085`.
 - **catalog** – builds with `SERVICE=catalog`; command `uvicorn services.catalog_api.app:app --host 0.0.0.0 --port 8081`.
-- **collector** – optional profile `collector`; runs `python services/collector/collector_imessage.py` posting to the gateway proxy.
+- **collector** – optional profile `collector`; runs `python scripts/collectors/collector_imessage.py` posting to the gateway ingest endpoint.
 - **embedding_worker** – runs `python services/embedding_worker/worker.py`; polls for pending chunks and writes to Qdrant.
 
 ## Python Packages per Service
 - **gateway** (`services/gateway_api`) – FastAPI app, token guards, catalog proxies, search summarization, contacts endpoints.
 - **search** (`src/haven/search`) – FastAPI app with Typer CLI, ingestion pipelines, hybrid ranking over Postgres + Qdrant.
 - **catalog** (`services/catalog_api`) – FastAPI app persisting threads/messages/chunks, aggregate context, contacts APIs.
-- **collector** (`services/collector`) – CLI for chat database backup, normalization, optional image enrichment, and HTTP ingestion.
+- **collector** (`scripts/collectors`) – CLI for chat database backup, normalization, optional image enrichment, and HTTP ingestion.
 - **embedding_worker** (`services/embedding_worker`) – Worker pulling pending chunks, encoding via `SentenceTransformer`, upserting to Qdrant.
 - **shared** (`shared/`) – Logging bootstrap, dependency guards, Postgres helpers, context queries reused by services.
 
@@ -31,7 +31,7 @@
 ## Data & Integration Assets
 - **Database schema** – `schema/catalog_mvp.sql` (messages) and `schema/contacts.sql` (optional contacts).
 - **Volumes** – `pg_data` for Postgres, `qdrant_data` for vector storage.
-- **Attachment enrichment helper** – `services/collector/imdesc.swift` compiled via `scripts/build-imdesc.sh`; optional Ollama vision integration documented in README.
+- **Attachment enrichment helper** – `scripts/collectors/imdesc.swift` compiled via `scripts/build-imdesc.sh`; optional Ollama vision integration documented in README.
 - **OpenAPI** – `openapi.yaml` describes public gateway endpoints for external integrations.
 - **Tests** – `tests/` includes coverage for gateway summary/catalog proxy, search models, and collector enrichment logic.
 
@@ -44,6 +44,6 @@
 services/gateway_api/app.py
 services/catalog_api/app.py
 src/haven/search/main.py
-services/collector/collector_imessage.py
+scripts/collectors/collector_imessage.py
 services/embedding_worker/worker.py
 ```

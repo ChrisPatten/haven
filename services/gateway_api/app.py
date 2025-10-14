@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
-from typing import Any, Dict, List, Optional, Sequence, Union, Iterator
-
-import httpx
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 try:  # pragma: no cover - optional dependency for tests
     from psycopg.rows import dict_row
@@ -263,6 +265,130 @@ class MessageDoc:
     text: str
 
 
+class IngestContentModel(BaseModel):
+    mime_type: str = "text/plain"
+    data: str
+    encoding: Optional[str] = None
+
+
+class IngestRequestModel(BaseModel):
+    source_type: str
+    source_id: str
+    title: Optional[str] = None
+    canonical_uri: Optional[str] = None
+    content: IngestContentModel
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IngestSubmissionResponse(BaseModel):
+    submission_id: str
+    status: str
+    doc_id: Optional[str] = None
+    total_chunks: int = 0
+    duplicate: bool = False
+
+
+class IngestStatusResponse(BaseModel):
+    submission_id: str
+    status: str
+    document_status: Optional[str] = None
+    doc_id: Optional[str] = None
+    total_chunks: int = 0
+    embedded_chunks: int = 0
+    pending_chunks: int = 0
+    error: Optional[Dict[str, Any]] = None
+
+
+class ErrorEnvelope(BaseModel):
+    error_code: str
+    message: str
+    retryable: bool
+    correlation_id: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+CATALOG_TIMEOUT_SECONDS = float(os.getenv("CATALOG_TIMEOUT_SECONDS", "15"))
+SUPPORTED_TEXT_MIME_TYPES = {"text/plain", "text/markdown"}
+
+
+def _normalize_ingest_text(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _compute_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _build_idempotency_key(source_type: str, source_id: str, text_hash: str) -> str:
+    seed = f"{source_type}:{source_id}:{text_hash}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _make_correlation_id(prefix: str) -> str:
+    now = datetime.now(tz=UTC).isoformat()
+    return f"{prefix}_{now}_{uuid.uuid4().hex[:8]}"
+
+
+def _error_response(
+    status_code: int,
+    error_code: str,
+    message: str,
+    correlation_id: str,
+    *,
+    retryable: bool = False,
+    details: Optional[Dict[str, Any]] = None,
+) -> JSONResponse:
+    envelope = ErrorEnvelope(
+        error_code=error_code,
+        message=message,
+        retryable=retryable,
+        correlation_id=correlation_id,
+        details=details or {},
+    )
+    return JSONResponse(status_code=status_code, content=envelope.model_dump(), headers={"X-Correlation-ID": correlation_id})
+
+
+def _extract_text(content: IngestContentModel) -> str:
+    mime = content.mime_type.lower()
+    if mime in SUPPORTED_TEXT_MIME_TYPES:
+        if content.encoding and content.encoding.lower() == "base64":
+            try:
+                decoded = base64.b64decode(content.data)
+            except Exception as exc:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail=f"Failed to decode base64 payload: {exc}",
+                ) from exc
+            try:
+                return decoded.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, detail="Base64 payload is not valid UTF-8"
+                ) from exc
+        return content.data
+    raise HTTPException(
+        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        detail=f"Unsupported MIME type: {content.mime_type}",
+    )
+
+
+async def _catalog_request(
+    method: str,
+    path: str,
+    correlation_id: str,
+    *,
+    json_payload: Optional[Dict[str, Any]] = None,
+) -> httpx.Response:
+    headers: Dict[str, str] = {"X-Correlation-ID": correlation_id}
+    if settings.catalog_token:
+        headers["Authorization"] = f"Bearer {settings.catalog_token}"
+    async with httpx.AsyncClient(
+        base_url=settings.catalog_base_url,
+        timeout=CATALOG_TIMEOUT_SECONDS,
+    ) as client:
+        return await client.request(method, path, json=json_payload, headers=headers)
+
+
 def require_token(request: Request) -> None:
     if not settings.api_token:
         return
@@ -404,6 +530,157 @@ def _update_change_token(
             """,
             (source, device_id, token),
         )
+
+
+@app.post(
+    "/v1/ingest",
+    response_model=IngestSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ingest_document(
+    payload: IngestRequestModel,
+    response: Response,
+    _: None = Depends(require_token),
+) -> IngestSubmissionResponse | JSONResponse:
+    correlation_id = _make_correlation_id("gw_ingest")
+    response.headers["X-Correlation-ID"] = correlation_id
+
+    try:
+        raw_text = _extract_text(payload.content)
+    except HTTPException as exc:
+        return _error_response(
+            exc.status_code,
+            "INGEST.EXTRACTION_FAILED",
+            str(exc.detail),
+            correlation_id,
+            retryable=False,
+        )
+
+    text_normalized = _normalize_ingest_text(raw_text)
+    if not text_normalized:
+        return _error_response(
+            status.HTTP_400_BAD_REQUEST,
+            "INGEST.EMPTY_TEXT",
+            "Document text empty after extraction",
+            correlation_id,
+        )
+
+    text_hash = _compute_sha256(text_normalized)
+    idempotency_key = _build_idempotency_key(payload.source_type, payload.source_id, text_hash)
+
+    catalog_payload = {
+        "idempotency_key": idempotency_key,
+        "source_type": payload.source_type,
+        "source_id": payload.source_id,
+        "content_sha256": text_hash,
+        "mime_type": payload.content.mime_type,
+        "text": text_normalized,
+        "title": payload.title,
+        "canonical_uri": payload.canonical_uri,
+        "metadata": payload.metadata,
+    }
+
+    try:
+        catalog_resp = await _catalog_request(
+            "POST", "/v1/catalog/documents", correlation_id, json_payload=catalog_payload
+        )
+    except httpx.HTTPError as exc:
+        logger.error(
+            "catalog_request_failed",
+            correlation_id=correlation_id,
+            error=str(exc),
+        )
+        return _error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "INGEST.CATALOG_UNAVAILABLE",
+            "Catalog service unavailable",
+            correlation_id,
+            retryable=True,
+            details={"error": str(exc)},
+        )
+
+    if catalog_resp.status_code not in (status.HTTP_200_OK, status.HTTP_202_ACCEPTED):
+        try:
+            body = catalog_resp.json()
+        except Exception:
+            body = catalog_resp.text
+        logger.warning(
+            "catalog_rejected_ingest",
+            correlation_id=correlation_id,
+            status_code=catalog_resp.status_code,
+            body=body,
+        )
+        return _error_response(
+            catalog_resp.status_code,
+            "INGEST.CATALOG_ERROR",
+            "Catalog rejected ingest request",
+            correlation_id,
+            retryable=catalog_resp.status_code >= 500,
+            details={"status_code": catalog_resp.status_code, "body": body},
+        )
+
+    payload_json = catalog_resp.json()
+    response.status_code = catalog_resp.status_code
+    response.headers["X-Content-SHA256"] = text_hash
+    return IngestSubmissionResponse(**payload_json)
+
+
+@app.get("/v1/ingest/{submission_id}", response_model=IngestStatusResponse)
+async def get_ingest_status(
+    submission_id: str,
+    response: Response,
+    _: None = Depends(require_token),
+) -> IngestStatusResponse | JSONResponse:
+    correlation_id = _make_correlation_id("gw_status")
+    response.headers["X-Correlation-ID"] = correlation_id
+
+    try:
+        uuid.UUID(submission_id)
+    except ValueError:
+        return _error_response(
+            status.HTTP_400_BAD_REQUEST,
+            "INGEST.INVALID_SUBMISSION_ID",
+            "submission_id must be a valid UUID",
+            correlation_id,
+        )
+
+    try:
+        catalog_resp = await _catalog_request(
+            "GET",
+            f"/v1/catalog/submissions/{submission_id}",
+            correlation_id,
+        )
+    except httpx.HTTPError as exc:
+        logger.error(
+            "catalog_status_failed",
+            correlation_id=correlation_id,
+            error=str(exc),
+        )
+        return _error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "INGEST.CATALOG_UNAVAILABLE",
+            "Catalog service unavailable",
+            correlation_id,
+            retryable=True,
+            details={"error": str(exc)},
+        )
+
+    if catalog_resp.status_code != status.HTTP_200_OK:
+        try:
+            body = catalog_resp.json()
+        except Exception:
+            body = catalog_resp.text
+        return _error_response(
+            catalog_resp.status_code,
+            "INGEST.STATUS_ERROR",
+            "Catalog could not provide submission status",
+            correlation_id,
+            retryable=catalog_resp.status_code >= 500,
+            details={"status_code": catalog_resp.status_code, "body": body},
+        )
+
+    payload_json = catalog_resp.json()
+    return IngestStatusResponse(**payload_json)
 
 
 @app.get("/search/people", response_model=PeopleSearchResponse)
@@ -715,27 +992,6 @@ async def context_general(_: None = Depends(require_token)) -> Dict[str, Any]:
         raise HTTPException(status_code=response.status_code, detail=detail)
 
     return response.json()
-
-
-@app.post("/v1/catalog/events", status_code=status.HTTP_202_ACCEPTED)
-async def proxy_catalog_events(
-    request: Request,
-    _: None = Depends(require_catalog_token),
-) -> Response:
-    payload = await request.body()
-
-    headers: Dict[str, str] = {"Content-Type": request.headers.get("content-type", "application/json")}
-    if settings.catalog_token:
-        headers["Authorization"] = f"Bearer {settings.catalog_token}"
-
-    async with httpx.AsyncClient(base_url=settings.catalog_base_url, timeout=10.0) as client:
-        response = await client.post("/v1/catalog/events", content=payload, headers=headers)
-
-    return Response(
-        content=response.content,
-        status_code=response.status_code,
-        media_type=response.headers.get("content-type", "application/json"),
-    )
 
 
 @app.get("/v1/healthz")

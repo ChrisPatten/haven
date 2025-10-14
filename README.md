@@ -49,16 +49,29 @@ docker compose exec -T postgres psql -U postgres -d haven -f - < schema/contacts
 
 ```bash
 # 3. Run the iMessage collector locally
-python services/collector/collector_imessage.py
+python scripts/collectors/collector_imessage.py
 # Simulate a message for end-to-end smoke testing
-python services/collector/collector_imessage.py --simulate "Hey can you pay MMED today?"
+python scripts/collectors/collector_imessage.py --simulate "Hey can you pay MMED today?"
+```
+
+Disable image handling
+----------------------
+
+If you'd like to skip image enrichment (OCR, captioning, entity extraction) for performance or privacy reasons, pass the `--no-images` flag. When enabled the collector replaces image attachments with the literal text "[image]" in the message content so the message remains searchable without uploading or processing binaries.
+
+```bash
+# Run the collector without processing images
+python scripts/collectors/collector_imessage.py --no-images
+
+# Single-run, no images
+python scripts/collectors/collector_imessage.py --no-images --once
 ```
 
 ### Contacts Collector (macOS)
 ```bash
 pip install -r local_requirements.txt
 export CATALOG_TOKEN="changeme"
-python services/collector/collector_contacts.py
+python scripts/collectors/collector_contacts.py
 ```
 - Grants Contacts.app permission on first run, exports contacts via pyobjc, and POSTs batches to the gateway ingest proxy.
 - Run manually or via cron/launchd to keep entries synced; the collector stores no local cache beyond `~/.haven` progress files.
@@ -77,12 +90,25 @@ Image attachments can be enriched with OCR, entity extraction, and captions.
 
 ## Configuration Reference
 - `AUTH_TOKEN` – bearer token enforced on gateway routes (optional in development).
-- `CATALOG_TOKEN` – shared secret for ingestion between collector → gateway → catalog.
+- `CATALOG_TOKEN` – legacy shared secret for catalog calls; collectors now prefer `AUTH_TOKEN` and fall back to this when present.
 - `CATALOG_BASE_URL` – internal URL the gateway uses to reach the catalog (defaults to `http://catalog:8081`).
 - `DATABASE_URL` – Postgres DSN; each service overrides this for Docker networking.
 - `EMBEDDING_MODEL` – embedding identifier (`BAAI/bge-m3`).
 - `QDRANT_URL`, `QDRANT_COLLECTION` – vector store configuration.
 - `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` – collector tuning knobs.
+
+### Using a .env file
+
+For convenient local development you can create a `.env` in the repository root containing environment variables used by `docker compose` and services. A sample `.env` with sensible defaults is included in the repo. Example usage:
+
+```bash
+# Use the values in .env automatically when running docker compose (docker-compose v2 reads .env by default)
+docker compose up --build
+```
+
+Notes:
+- Keep secrets out of source control for production; `.env` is ignored by the repository's `.gitignore`.
+- For macOS local development the Ollama host is often `http://host.docker.internal:11434` to reach a host service from containers.
 
 ## Validation
 ```bash

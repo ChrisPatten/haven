@@ -1,6 +1,6 @@
 from datetime import timezone
 
-from services.collector.collector_imessage import APPLE_EPOCH, apple_time_to_utc
+from scripts.collectors.collector_imessage import APPLE_EPOCH, apple_time_to_utc
 
 
 def test_apple_time_to_utc_seconds():
@@ -19,4 +19,3 @@ def test_apple_time_to_utc_microseconds():
 
 def test_apple_time_to_utc_none():
     assert apple_time_to_utc(None) is None
-

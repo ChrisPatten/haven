@@ -16,8 +16,8 @@ RUN pip install --upgrade pip && \
     case "$SERVICE" in \
       search)   pip wheel --no-cache-dir .[search,common] -w /wheels/$SERVICE ;; \
       gateway)  pip wheel --no-cache-dir .[gateway,common] -w /wheels/$SERVICE ;; \
-      collector)pip wheel --no-cache-dir .[collector,common] -w /wheels/$SERVICE ;; \
-      embedding_worker)pip wheel --no-cache-dir .[search,common] -w /wheels/$SERVICE ;; \
+      catalog)  pip wheel --no-cache-dir .[catalog,common] -w /wheels/$SERVICE ;; \
+      embedding_service)pip wheel --no-cache-dir .[common] -w /wheels/$SERVICE ;; \
       *)        pip wheel --no-cache-dir . -w /wheels/$SERVICE ;; \
     esac && \
     rm -rf /wheels/current || true && \
@@ -33,4 +33,4 @@ COPY services ./services
 COPY shared ./shared
 COPY schema ./schema
 ENV SERVICE=${SERVICE}
-ENTRYPOINT ["bash","-lc","case \"$SERVICE\" in search) exec search-service --host 0.0.0.0 --port 8080 ;; gateway) exec uvicorn services.gateway_api.app:app --host 0.0.0.0 --port 8080 ;; catalog) exec uvicorn services.catalog_api.app:app --host 0.0.0.0 --port 8081 ;; collector) exec python services/collector/collector_imessage.py ;; embedding_worker) exec python services/embedding_worker/worker.py ;; *) exec search-service --host 0.0.0.0 --port 8080 ;; esac"]
+ENTRYPOINT ["bash","-lc","case \"$SERVICE\" in search) exec search-service --host 0.0.0.0 --port 8080 ;; gateway) exec uvicorn services.gateway_api.app:app --host 0.0.0.0 --port 8080 ;; catalog) exec uvicorn services.catalog_api.app:app --host 0.0.0.0 --port 8081 ;; embedding_service) exec python services/embedding_service/worker.py ;; *) exec search-service --host 0.0.0.0 --port 8080 ;; esac"]

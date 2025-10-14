@@ -2,7 +2,7 @@ import plistlib
 
 import requests
 
-from services.collector import collector_imessage as collector
+from scripts.collectors import collector_imessage as collector
 
 
 def _make_archive(text: str) -> bytes:
@@ -79,18 +79,20 @@ def test_post_events_success(monkeypatch):
     monkeypatch.setattr(collector.requests, "post", fake_post)
 
     assert collector.post_events([_make_event()]) is True
-    assert payloads and payloads[0]["items"]
+    assert payloads and payloads[0]["content"]["data"] == "hello"
+    assert payloads[0]["metadata"]["message"]["text"] == "hello"
 
 
 def test_post_events_failure_returns_false(monkeypatch):
-    response = requests.Response()
-    response.status_code = 501
-    response._content = b"Unsupported method ('POST')"  # type: ignore[attr-defined]
-    response.url = "http://localhost/v1/catalog/events"
-    response.request = requests.Request("POST", response.url).prepare()
+    class ErrorResponse:
+        status_code = 500
+        text = "error"
 
-    def fake_post(url: str, json: dict[str, object], headers: dict[str, str], timeout: int) -> requests.Response:
-        return response
+        def raise_for_status(self) -> None:
+            raise requests.HTTPError(response=self)
+
+    def fake_post(url: str, json: dict[str, object], headers: dict[str, str], timeout: int) -> ErrorResponse:
+        return ErrorResponse()
 
     monkeypatch.setattr(collector.requests, "post", fake_post)
     assert collector.post_events([_make_event()]) is False

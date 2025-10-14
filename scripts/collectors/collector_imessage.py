@@ -26,6 +26,17 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import requests
 
+try:
+    from PIL import Image
+    # Register HEIC/HEIF support if pillow-heif is available
+    try:
+        from pillow_heif import register_heif_opener
+        register_heif_opener()
+    except ImportError as e:
+        raise e # HEIC files will fail to convert, but other formats will still work
+except ImportError:
+    Image = None  # type: ignore[assignment]
+
 from shared.db import get_connection
 
 from shared.logging import get_logger, setup_logging
@@ -35,9 +46,9 @@ DEFAULT_CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
 STATE_DIR = Path.home() / ".haven"
 STATE_FILE = STATE_DIR / "imessage_collector_state.json"
 CATALOG_ENDPOINT = os.getenv(
-    "CATALOG_ENDPOINT", "http://localhost:8085/v1/catalog/events"
+    "CATALOG_ENDPOINT", "http://localhost:8085/v1/ingest"
 )
-COLLECTOR_AUTH_TOKEN = os.getenv("CATALOG_TOKEN")
+COLLECTOR_AUTH_TOKEN = os.getenv("AUTH_TOKEN") or os.getenv("CATALOG_TOKEN")
 POLL_INTERVAL_SECONDS = float(os.getenv("COLLECTOR_POLL_INTERVAL", "5"))
 BATCH_SIZE = int(os.getenv("COLLECTOR_BATCH_SIZE", "200"))
 
@@ -54,9 +65,13 @@ def _safe_float_env(name: str, default: float) -> float:
 
 IMDESC_EXECUTABLE = os.getenv("IMDESC_CLI_PATH", "imdesc")
 IMDESC_TIMEOUT_SECONDS = _safe_float_env("IMDESC_TIMEOUT_SECONDS", 15.0)
+
+# Ollama configuration for optional image captioning
+OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
 OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b")
-OLLAMA_TIMEOUT_SECONDS = _safe_float_env("OLLAMA_TIMEOUT_SECONDS", 20.0)
+# Vision models are slower than text models; default to 60s (first load can take even longer)
+OLLAMA_TIMEOUT_SECONDS = _safe_float_env("OLLAMA_TIMEOUT_SECONDS", 60.0)
 OLLAMA_CAPTION_PROMPT = os.getenv(
     "OLLAMA_CAPTION_PROMPT",
     "describe the image scene and contents. ignore text. short response",
@@ -66,6 +81,9 @@ CATALOG_IMAGE_ENDPOINT = os.getenv(
 )
 CATALOG_IMAGE_TIMEOUT_SECONDS = _safe_float_env("CATALOG_IMAGE_TIMEOUT_SECONDS", 10.0)
 IMAGE_EMBEDDING_MODEL = os.getenv("IMAGE_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"))
+
+# How many times to retry Ollama requests on transient errors (Connection/Timeout)
+OLLAMA_MAX_RETRIES = int(os.getenv("OLLAMA_MAX_RETRIES", "2"))
 IMAGE_ATTACHMENT_EXTENSIONS = {
     ".bmp",
     ".gif",
@@ -148,17 +166,34 @@ class SourceEvent:
     chunks: List[Dict[str, Any]]
     image_events: List[Dict[str, Any]] = field(default_factory=list)
 
-    def to_payload(self) -> Dict[str, Any]:
+    def to_ingest_payload(self) -> Dict[str, Any]:
+        parts: List[str] = []
+        message_text = self.message.get("text")
+        if isinstance(message_text, str) and message_text.strip():
+            parts.append(message_text.strip())
+        for chunk in self.chunks:
+            chunk_text = chunk.get("text")
+            if isinstance(chunk_text, str) and chunk_text.strip():
+                text_value = chunk_text.strip()
+                if not parts or parts[-1] != text_value:
+                    parts.append(text_value)
+
+        text_body = "\n\n".join(parts)
+        if not text_body:
+            text_body = f"[empty message {self.doc_id}]"
+        metadata = {
+            "thread": self.thread,
+            "message": self.message,
+            "chunks": self.chunks,
+        }
+
         return {
-            "items": [
-                {
-                    "source": "imessage",
-                    "doc_id": self.doc_id,
-                    "thread": self.thread,
-                    "message": self.message,
-                    "chunks": self.chunks,
-                }
-            ]
+            "source_type": "imessage",
+            "source_id": self.doc_id,
+            "title": self.thread.get("title"),
+            "canonical_uri": None,
+            "content": {"mime_type": "text/plain", "data": text_body},
+            "metadata": metadata,
         }
 
 
@@ -515,6 +550,13 @@ def _run_imdesc(image_path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _request_ollama_caption(image_path: Path) -> Optional[str]:
+    """Request an image caption from Ollama vision model.
+    
+    Returns None if OLLAMA_ENABLED=false or if all attempts fail.
+    """
+    if not OLLAMA_ENABLED:
+        return None
+    
     global _OLLAMA_CONNECTION_WARNED
 
     try:
@@ -526,6 +568,26 @@ def _request_ollama_caption(image_path: Path) -> Optional[str]:
         logger.debug("ollama_image_read_failed", path=str(image_path), exc_info=True)
         return None
 
+    # Log file info for debugging
+    logger.debug("ollama_image_prepare", path=str(image_path), size_bytes=len(image_bytes), suffix=image_path.suffix.lower())
+
+    # Convert image to PNG format if PIL is available (Ollama doesn't support HEIC/HEIF)
+    if Image is not None:
+        try:
+            import io
+            img = Image.open(io.BytesIO(image_bytes))
+            # Convert to RGB if needed (e.g., RGBA or CMYK)
+            if img.mode not in ('RGB', 'L'):
+                img = img.convert('RGB')
+            # Re-encode as PNG
+            buf = io.BytesIO()
+            img.save(buf, format='PNG')
+            image_bytes = buf.getvalue()
+            logger.debug("ollama_image_converted", original_format=image_path.suffix, size_bytes=len(image_bytes))
+        except Exception as exc:
+            logger.warning("ollama_image_conversion_failed", path=str(image_path), error=str(exc))
+            # Fall back to original bytes (will likely fail with 500)
+
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     payload = {
         "model": OLLAMA_VISION_MODEL,
@@ -534,21 +596,55 @@ def _request_ollama_caption(image_path: Path) -> Optional[str]:
         "stream": False,
     }
 
-    try:
-        response = requests.post(
-            OLLAMA_API_URL, json=payload, timeout=OLLAMA_TIMEOUT_SECONDS
-        )
-        response.raise_for_status()
-    except requests.ConnectionError as exc:
-        if not _OLLAMA_CONNECTION_WARNED:
-            logger.warning("ollama_unreachable", url=OLLAMA_API_URL, error=str(exc))
-            _OLLAMA_CONNECTION_WARNED = True
-        return None
-    except requests.Timeout:
-        logger.warning("ollama_timeout", timeout=OLLAMA_TIMEOUT_SECONDS)
-        return None
-    except requests.RequestException as exc:
-        logger.warning("ollama_request_failed", error=str(exc))
+    # Log the minimal request info for diagnostics (don't log full base64 body)
+    logger.debug("ollama_request_prepare", url=OLLAMA_API_URL, model=OLLAMA_VISION_MODEL, prompt=_truncate_text(OLLAMA_CAPTION_PROMPT, 200))
+
+    attempt = 0
+    last_exc: Optional[Exception] = None
+    while attempt <= OLLAMA_MAX_RETRIES:
+        try:
+            attempt += 1
+            logger.debug("ollama_request_send", attempt=attempt, url=OLLAMA_API_URL)
+            response = requests.post(
+                OLLAMA_API_URL, json=payload, timeout=OLLAMA_TIMEOUT_SECONDS
+            )
+            # Record status for debugging
+            logger.debug("ollama_response_status", status_code=response.status_code, attempt=attempt)
+            response.raise_for_status()
+            last_exc = None
+            break
+        except requests.ConnectionError as exc:
+            last_exc = exc
+            if not _OLLAMA_CONNECTION_WARNED:
+                logger.warning("ollama_unreachable", url=OLLAMA_API_URL, error=str(exc))
+                _OLLAMA_CONNECTION_WARNED = True
+            logger.debug("ollama_conn_error", attempt=attempt, error=str(exc))
+        except requests.Timeout as exc:
+            last_exc = exc
+            logger.warning("ollama_timeout", timeout=OLLAMA_TIMEOUT_SECONDS, attempt=attempt)
+        except requests.RequestException as exc:
+            last_exc = exc
+            # Non-retryable HTTP error (4xx/5xx) or other request exception
+            logger.warning("ollama_request_failed", error=str(exc), attempt=attempt)
+            # If response exists, capture body for diagnosis
+            try:
+                resp = getattr(exc, "response", None)
+                if resp is not None:
+                    logger.debug("ollama_response_text", text=_truncate_text(getattr(resp, "text", None)))
+            except Exception:
+                # best-effort logging; don't fail the enrichment flow
+                pass
+            break
+
+        # If we'll retry, sleep with exponential backoff
+        if attempt <= OLLAMA_MAX_RETRIES:
+            backoff = 0.5 * (2 ** (attempt - 1))
+            logger.debug("ollama_retry_backoff", attempt=attempt, backoff=backoff)
+            time.sleep(backoff)
+
+    if last_exc is not None:
+        # Nothing succeeded
+        logger.debug("ollama_all_attempts_failed", attempts=attempt, last_error=str(last_exc))
         return None
 
     try:
@@ -817,6 +913,7 @@ def normalize_row(
     row: sqlite3.Row,
     participants: List[str],
     attachments: Optional[List[Dict[str, Any]]] = None,
+    disable_images: bool = False,
 ) -> SourceEvent:
     text = (row["text"] or "").strip()
     original_text_empty = not text
@@ -865,11 +962,37 @@ def normalize_row(
         }
     ]
 
-    enriched_attachments, image_events = enrich_image_attachments(
-        attachments,
-        thread_id=row["chat_guid"],
-        message_guid=row["guid"],
-    )
+    image_events: List[Dict[str, Any]] = []
+    enriched_attachments: List[Dict[str, Any]] = []
+
+    if not disable_images:
+        enriched_attachments, image_events = enrich_image_attachments(
+            attachments,
+            thread_id=row["chat_guid"],
+            message_guid=row["guid"],
+        )
+    else:
+        # When image handling is disabled, replace any image attachments with
+        # a placeholder text. Do not perform enrichment or produce image events.
+        if attachments:
+            # Count image attachments and append placeholder(s)
+            image_count = 0
+            for meta in attachments:
+                try:
+                    if _is_image_attachment(meta):
+                        image_count += 1
+                except Exception:
+                    continue
+
+            if image_count:
+                placeholders = " ".join(["[image]" for _ in range(image_count)])
+                if text and not text.startswith("[") and not text.endswith("attachment(s) omitted]"):
+                    text = f"{text} {placeholders}"
+                else:
+                    # No original text or only placeholder - use placeholders as main text
+                    text = placeholders
+                # Update first chunk's text
+                chunks[0]["text"] = text
     if enriched_attachments:
         message["attachments"] = enriched_attachments
 
@@ -1012,7 +1135,16 @@ def fetch_new_messages(
     for row in cursor.fetchall():
         participants = get_participants(conn, row["chat_rowid"])
         attachments = fetch_message_attachments(conn, row["ROWID"])
-        yield normalize_row(row, participants, attachments)
+        # Attempt to read disable_images flag from a thread-local-like place: the sqlite3 connection
+        # doesn't carry args, so callers should pass the flag via connection.info if present. Fall back to False.
+        disable_images = False
+        try:
+            # If the caller attached 'disable_images' attribute to the connection object, use it.
+            disable_images = bool(getattr(conn, "disable_images", False))
+        except Exception:
+            disable_images = False
+
+        yield normalize_row(row, participants, attachments, disable_images=disable_images)
 
 
 def get_current_max_rowid(conn: sqlite3.Connection) -> int:
@@ -1073,68 +1205,48 @@ def post_events(events: List[SourceEvent]) -> bool:
     if not events:
         return True
 
-    payload = {"items": []}
-    for event in events:
-        payload["items"].extend(event.to_payload()["items"])
-
-    headers = {"Content-Type": "application/json"}
-    if COLLECTOR_AUTH_TOKEN:
-        headers["Authorization"] = f"Bearer {COLLECTOR_AUTH_TOKEN}"
-
-    try:
-        response = requests.post(
-            CATALOG_ENDPOINT, json=payload, headers=headers, timeout=10
-        )
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        resp = exc.response
-        logger.error(
-            "catalog_post_failed",
-            endpoint=CATALOG_ENDPOINT,
-            status_code=getattr(resp, "status_code", None),
-            response_text=_truncate_text(getattr(resp, "text", None)),
-            error=str(exc),
-        )
-        return False
-    except requests.RequestException as exc:
-        logger.error(
-            "catalog_post_failed",
-            endpoint=CATALOG_ENDPOINT,
-            error=str(exc),
-        )
-        return False
-
-    return True
-
-
-def post_image_events(image_events: List[Dict[str, Any]]) -> bool:
-    if not image_events:
-        return True
-
     headers = {"Content-Type": "application/json"}
     if COLLECTOR_AUTH_TOKEN:
         headers["Authorization"] = f"Bearer {COLLECTOR_AUTH_TOKEN}"
 
     all_success = True
-    for event in image_events:
+    for event in events:
+        payload = event.to_ingest_payload()
         try:
             response = requests.post(
-                CATALOG_IMAGE_ENDPOINT,
-                json=event,
+                CATALOG_ENDPOINT,
+                json=payload,
                 headers=headers,
-                timeout=CATALOG_IMAGE_TIMEOUT_SECONDS,
+                timeout=10,
             )
             response.raise_for_status()
-        except requests.RequestException as exc:
-            all_success = False
-            logger.warning(
-                "catalog_image_post_failed",
-                endpoint=CATALOG_IMAGE_ENDPOINT,
-                blob_id=event.get("blob_id"),
+        except requests.HTTPError as exc:
+            resp = exc.response
+            logger.error(
+                "ingest_post_failed",
+                endpoint=CATALOG_ENDPOINT,
+                status_code=getattr(resp, "status_code", None),
+                response_text=_truncate_text(getattr(resp, "text", None)),
                 error=str(exc),
+                doc_id=event.doc_id,
             )
+            all_success = False
+        except requests.RequestException as exc:
+            logger.error(
+                "ingest_post_failed",
+                endpoint=CATALOG_ENDPOINT,
+                error=str(exc),
+                doc_id=event.doc_id,
+            )
+            all_success = False
 
     return all_success
+
+
+def post_image_events(image_events: List[Dict[str, Any]]) -> bool:
+    if image_events:
+        logger.debug("image_events_included_in_metadata", count=len(image_events))
+    return True
 
 
 def process_events(
@@ -1229,6 +1341,11 @@ def run_poll_loop(args: argparse.Namespace) -> None:
         try:
             backup_path = backup_chat_db(args.chat_db)
             with sqlite3.connect(backup_path) as conn:
+                # Propagate disable_images flag to helper functions via the connection
+                try:
+                    setattr(conn, "disable_images", bool(getattr(args, "disable_images", False)))
+                except Exception:
+                    pass
                 current_max = get_current_max_rowid(conn)
                 
                 # Determine scan range based on state
@@ -1295,7 +1412,7 @@ def run_poll_loop(args: argparse.Namespace) -> None:
                             participants = get_participants(conn, row["chat_rowid"])
                             attachments = fetch_message_attachments(conn, row["ROWID"])
                             batch_events.append(
-                                normalize_row(row, participants, attachments)
+                                normalize_row(row, participants, attachments, disable_images=bool(getattr(args, "disable_images", False)))
                             )
                         
                         if not batch_events:
@@ -1397,7 +1514,7 @@ def run_poll_loop(args: argparse.Namespace) -> None:
                                 participants = get_participants(conn, row["chat_rowid"])
                                 attachments = fetch_message_attachments(conn, row["ROWID"])
                                 batch_events.append(
-                                    normalize_row(row, participants, attachments)
+                                    normalize_row(row, participants, attachments, disable_images=bool(getattr(args, "disable_images", False)))
                                 )
                             
                             if not batch_events:
@@ -1539,6 +1656,12 @@ def parse_args() -> argparse.Namespace:
             "so the collector will skip the backlog and start at the head."
         ),
     )
+    parser.add_argument(
+        "--no-images",
+        dest="disable_images",
+        action="store_true",
+        help="Disable image handling and replace images with the text '[image]'.",
+    )
     return parser.parse_args()
 
 
@@ -1651,6 +1774,11 @@ def main() -> None:
         state = CollectorState.load()
         backup_path = backup_chat_db(args.chat_db)
         with sqlite3.connect(backup_path) as conn:
+            # Propagate disable_images flag so fetch_new_messages can read it
+            try:
+                setattr(conn, "disable_images", bool(getattr(args, "disable_images", False)))
+            except Exception:
+                pass
             current_max = get_current_max_rowid(conn)
             
             # Determine if there are new messages to process

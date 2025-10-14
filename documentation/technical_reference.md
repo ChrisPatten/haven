@@ -7,7 +7,7 @@ Core runtime components:
 - **Gateway API** (`services/gateway_api/app.py`) – public HTTP surface for search, ask/summary, catalog proxying, document retrieval, and contact sync.
 - **Search Service** (`src/haven/search`) – hybrid lexical/vector engine providing ingestion, query, and admin endpoints.
 - **Catalog API** (`services/catalog_api/app.py`) – receives ingestion events, stores normalized threads/messages/chunks, and aggregates context views.
-- **Collector** (`services/collector/collector_imessage.py`) – macOS CLI that extracts iMessage data, enriches attachments, and forwards events to the catalog pipeline.
+- **Collector** (`scripts/collectors/collector_imessage.py`) – macOS CLI that extracts iMessage data, enriches attachments, and POSTs normalized text to the gateway ingest endpoint.
 - **Embedding Worker** (`services/embedding_worker/worker.py`) – polls pending chunks, generates embeddings, and writes vectors to Qdrant.
 - **Shared Library** (`shared/`) – logging bootstrap, dependency checks, Postgres session helpers, and reusable reporting queries.
 

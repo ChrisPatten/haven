@@ -113,18 +113,18 @@
 ### 6.2 iMessage Collector
 1. Create a Python 3.11 virtualenv (`python3.11 -m venv env && source env/bin/activate`) or reuse Docker profile.
 2. Install dependencies (`pip install -e .[collector,common]` or `pip install -r requirements.txt`).
-3. Run `python services/collector/collector_imessage.py --simulate "Hello"` for dry runs or omit `--simulate` for live ingest.
+3. Run `python scripts/collectors/collector_imessage.py --simulate "Hello"` for dry runs or omit `--simulate` for live ingest.
 4. Monitor `~/.haven/imessage_collector_state.json` and `.haven/chat_backup/chat.db` for progress.
 
 ### 6.3 Attachment Enrichment
-1. Build `services/collector/imdesc.swift` via `scripts/build-imdesc.sh` (places the helper in `services/collector/bin/imdesc`).
+1. Build `scripts/collectors/imdesc.swift` via `scripts/build-imdesc.sh` (places the helper binary under `scripts/collectors/bin/imdesc`).
 2. Confirm the collector locates the helper (`IMDESC_PATH` override available) and that `IMAGE_ENRICHMENT_CACHE` is writable.
 3. Optional: configure an Ollama vision endpoint (set `OLLAMA_HOST` if not `http://localhost:11434`).
 4. Review collector logs for enrichment warnings; ingestion proceeds even without helpers.
 
 ### 6.4 Contacts Collector
 1. Install macOS-specific dependencies: `pip install -r local_requirements.txt`.
-2. Run `python services/collector/collector_contacts.py` (requires GUI permission prompt).
+2. Run `python scripts/collectors/collector_contacts.py` (requires GUI permission prompt).
 3. Confirm contacts appear in catalog via `/catalog/contacts/export` or gateway proxy.
 
 ### 6.5 Embedding Worker Operations

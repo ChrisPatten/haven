@@ -17,11 +17,11 @@ docker compose exec -T postgres psql -U postgres -d haven -f - < schema/catalog_
 # Optional contacts schema additions
 docker compose exec -T postgres psql -U postgres -d haven -f - < schema/contacts.sql
 
-python services/collector/collector_imessage.py [--simulate "Hi"]
+python scripts/collectors/collector_imessage.py [--simulate "Hi"]
 
 # macOS Contacts collector (pyobjc requirement)
 pip install -r local_requirements.txt
-python services/collector/collector_contacts.py
+python scripts/collectors/collector_contacts.py
 ```
 - Use `requirements.txt` with a Python 3.11 virtualenv when running services outside Docker.
 - To run the collector in Docker, enable the optional profile: `COMPOSE_PROFILES=collector docker compose up --build collector`.
@@ -44,5 +44,16 @@ python services/collector/collector_contacts.py
 
 ## Recent Updates
 - iMessage collector enriches image attachments with OCR, entity detection, and optional Ollama-powered captioning.
-- A native Swift helper (`services/collector/imdesc.swift`) plus `scripts/build-imdesc.sh` supports macOS Vision OCR.
+- A native Swift helper (`scripts/collectors/imdesc.swift`) plus `scripts/build-imdesc.sh` supports macOS Vision OCR.
 - `tests/test_collector_imessage.py` covers enrichment flows and cache behavior.
+
+### Collector: disable image handling
+
+- New CLI flag for the iMessage collector: `--no-images` (or `--disable_images` in the args namespace).
+- When set, the collector will skip image enrichment (OCR/captioning/entity extraction) and instead replace image attachments with the text "[image]" in the message content/chunks. This is useful for low-resource environments or when privacy requires skipping binary processing.
+
+Example:
+
+```bash
+python scripts/collectors/collector_imessage.py --no-images
+```

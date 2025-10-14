@@ -16,7 +16,7 @@ if [ -n "${BASH_SOURCE+x}" ]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
-SWIFT_SOURCE="$ROOT_DIR/services/collector/imdesc.swift"
+SWIFT_SOURCE="$ROOT_DIR/scripts/collectors/imdesc.swift"
 DEST_DIR="${IMDESC_INSTALL_DIR:-/usr/local/bin}"
 DEST_PATH="$DEST_DIR/imdesc"
 MODULE_CACHE_DIR="${MODULE_CACHE_DIR:-$ROOT_DIR/.build/swift-module-cache}"
