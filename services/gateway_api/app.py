@@ -683,6 +683,153 @@ async def get_ingest_status(
     return IngestStatusResponse(**payload_json)
 
 
+class DocumentUpdateRequest(BaseModel):
+    metadata: Dict[str, Any]
+    text: str
+    requeue_for_embedding: bool = True
+
+
+class DocumentUpdateResponse(BaseModel):
+    doc_id: str
+    status: str
+    chunks_requeued: int = 0
+
+
+@app.patch("/v1/documents/{doc_id}", response_model=DocumentUpdateResponse)
+async def update_document(
+    doc_id: str,
+    payload: DocumentUpdateRequest,
+    response: Response,
+    _: None = Depends(require_token),
+) -> DocumentUpdateResponse | JSONResponse:
+    """Update a document's metadata and text, optionally re-queuing for embedding."""
+    correlation_id = _make_correlation_id("gw_update")
+    response.headers["X-Correlation-ID"] = correlation_id
+
+    try:
+        uuid.UUID(doc_id)
+    except ValueError:
+        return _error_response(
+            status.HTTP_400_BAD_REQUEST,
+            "UPDATE.INVALID_DOC_ID",
+            "doc_id must be a valid UUID",
+            correlation_id,
+        )
+
+    catalog_payload = {
+        "metadata": payload.metadata,
+        "text": payload.text,
+        "requeue_for_embedding": payload.requeue_for_embedding,
+    }
+
+    try:
+        catalog_resp = await _catalog_request(
+            "PATCH",
+            f"/v1/catalog/documents/{doc_id}",
+            correlation_id,
+            json_payload=catalog_payload,
+        )
+    except httpx.HTTPError as exc:
+        logger.error(
+            "catalog_update_failed",
+            correlation_id=correlation_id,
+            doc_id=doc_id,
+            error=str(exc),
+        )
+        return _error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "UPDATE.CATALOG_UNAVAILABLE",
+            "Catalog service unavailable",
+            correlation_id,
+            retryable=True,
+            details={"error": str(exc)},
+        )
+
+    if catalog_resp.status_code != status.HTTP_200_OK:
+        try:
+            body = catalog_resp.json()
+        except Exception:
+            body = catalog_resp.text
+        return _error_response(
+            catalog_resp.status_code,
+            "UPDATE.CATALOG_ERROR",
+            "Catalog rejected update request",
+            correlation_id,
+            retryable=catalog_resp.status_code >= 500,
+            details={"status_code": catalog_resp.status_code, "body": body},
+        )
+
+    payload_json = catalog_resp.json()
+    return DocumentUpdateResponse(**payload_json)
+
+
+class DocumentListItem(BaseModel):
+    doc_id: str
+    metadata: Dict[str, Any]
+    text: str
+
+
+class DocumentListResponse(BaseModel):
+    documents: List[DocumentListItem]
+    count: int
+
+
+@app.get("/v1/documents", response_model=DocumentListResponse)
+async def list_documents(
+    source_type: Optional[str] = Query(None),
+    has_attachments: bool = Query(False),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    _: None = Depends(require_token),
+) -> DocumentListResponse:
+    """List documents with optional filtering."""
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            conditions = []
+            params: List[Any] = []
+            
+            if source_type:
+                # Support both direct source_type field and thread.kind field (for iMessage)
+                if source_type == "imessage":
+                    conditions.append("metadata->'thread'->>'kind' = %s")
+                else:
+                    conditions.append("metadata->>'source_type' = %s")
+                params.append(source_type)
+            
+            if has_attachments:
+                conditions.append("""
+                    metadata->'message'->'attrs'->'attachment_count' IS NOT NULL
+                    AND (metadata->'message'->'attrs'->>'attachment_count')::int > 0
+                """)
+            
+            where_clause = ""
+            if conditions:
+                where_clause = "WHERE " + " AND ".join(conditions)
+            
+            query = f"""
+                SELECT doc_id, metadata, text
+                FROM documents
+                {where_clause}
+                ORDER BY doc_id
+                LIMIT %s OFFSET %s
+            """
+            params.extend([limit, offset])
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            
+            documents = [
+                DocumentListItem(
+                    doc_id=str(row["doc_id"]),
+                    metadata=row["metadata"],
+                    text=row["text"],
+                )
+                for row in rows
+            ]
+    
+    return DocumentListResponse(documents=documents, count=len(documents))
+
+
 @app.get("/search/people", response_model=PeopleSearchResponse)
 def search_people(
     request: Request,

@@ -1,24 +1,19 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import plistlib
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import time
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import NAMESPACE_URL, uuid5
-
-import hashlib
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -26,19 +21,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import requests
 
-try:
-    from PIL import Image
-    # Register HEIC/HEIF support if pillow-heif is available
-    try:
-        from pillow_heif import register_heif_opener
-        register_heif_opener()
-    except ImportError as e:
-        raise e # HEIC files will fail to convert, but other formats will still work
-except ImportError:
-    Image = None  # type: ignore[assignment]
-
 from shared.db import get_connection
-
+from shared.image_enrichment import (
+    ImageEnrichmentCache,
+    build_image_facets,
+    enrich_image,
+)
 from shared.logging import get_logger, setup_logging
 
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
@@ -52,38 +40,11 @@ COLLECTOR_AUTH_TOKEN = os.getenv("AUTH_TOKEN") or os.getenv("CATALOG_TOKEN")
 POLL_INTERVAL_SECONDS = float(os.getenv("COLLECTOR_POLL_INTERVAL", "5"))
 BATCH_SIZE = int(os.getenv("COLLECTOR_BATCH_SIZE", "200"))
 
+# Configurable placeholder text for image handling
+IMAGE_PLACEHOLDER_TEXT = os.getenv("IMAGE_PLACEHOLDER_TEXT", "[image]")
+IMAGE_MISSING_PLACEHOLDER_TEXT = os.getenv("IMAGE_MISSING_PLACEHOLDER_TEXT", "[image not available]")
 
-def _safe_float_env(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
-IMDESC_EXECUTABLE = os.getenv("IMDESC_CLI_PATH", "imdesc")
-IMDESC_TIMEOUT_SECONDS = _safe_float_env("IMDESC_TIMEOUT_SECONDS", 15.0)
-
-# Ollama configuration for optional image captioning
-OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "true").lower() in ("1", "true", "yes", "on")
-OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b")
-# Vision models are slower than text models; default to 60s (first load can take even longer)
-OLLAMA_TIMEOUT_SECONDS = _safe_float_env("OLLAMA_TIMEOUT_SECONDS", 60.0)
-OLLAMA_CAPTION_PROMPT = os.getenv(
-    "OLLAMA_CAPTION_PROMPT",
-    "describe the image scene and contents. ignore text. short response",
-)
-CATALOG_IMAGE_ENDPOINT = os.getenv(
-    "CATALOG_IMAGE_ENDPOINT", "http://localhost:8085/v1/catalog/images"
-)
-CATALOG_IMAGE_TIMEOUT_SECONDS = _safe_float_env("CATALOG_IMAGE_TIMEOUT_SECONDS", 10.0)
-IMAGE_EMBEDDING_MODEL = os.getenv("IMAGE_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"))
-
-# How many times to retry Ollama requests on transient errors (Connection/Timeout)
-OLLAMA_MAX_RETRIES = int(os.getenv("OLLAMA_MAX_RETRIES", "2"))
+# Image attachment detection
 IMAGE_ATTACHMENT_EXTENSIONS = {
     ".bmp",
     ".gif",
@@ -96,18 +57,15 @@ IMAGE_ATTACHMENT_EXTENSIONS = {
     ".tiff",
     ".webp",
 }
+
+# Legacy endpoint (used only for logging)
+CATALOG_IMAGE_ENDPOINT = os.getenv(
+    "CATALOG_IMAGE_ENDPOINT", "http://localhost:8085/v1/catalog/images"
+)
+
 IMAGE_CACHE_FILE = STATE_DIR / "imessage_image_cache.json"
 
 logger = get_logger("collector.imessage")
-
-_IMDESC_MISSING_LOGGED = False
-_OLLAMA_CONNECTION_WARNED = False
-_CAPTION_EMBEDDING_AVAILABLE_LOGGED = False
-
-# Embedding is handled by the embedding_worker service. The collector should
-# not compute or attach embeddings directly. Keep the SentenceTransformer
-# symbol only for optional lazy imports elsewhere; do not instantiate here.
-SentenceTransformer = None  # type: ignore[assignment]
 
 
 def deterministic_chunk_id(doc_id: str, chunk_index: int) -> str:
@@ -195,44 +153,6 @@ class SourceEvent:
             "content": {"mime_type": "text/plain", "data": text_body},
             "metadata": metadata,
         }
-
-
-class ImageEnrichmentCache:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._data: Dict[str, Dict[str, Any]] = {}
-        self._dirty = False
-        self._load()
-
-    def _load(self) -> None:
-        if not self.path.exists():
-            return
-        try:
-            raw = json.loads(self.path.read_text())
-        except Exception:
-            logger.warning("image_cache_load_failed", path=str(self.path))
-            return
-        if isinstance(raw, dict):
-            for key, value in raw.items():
-                if isinstance(key, str) and isinstance(value, dict):
-                    self._data[key] = value
-
-    def get(self, blob_id: str) -> Optional[Dict[str, Any]]:
-        return self._data.get(blob_id)
-
-    def set(self, blob_id: str, payload: Dict[str, Any]) -> None:
-        self._data[blob_id] = payload
-        self._dirty = True
-
-    def save(self) -> None:
-        if not self._dirty:
-            return
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(self._data))
-            self._dirty = False
-        except Exception:
-            logger.warning("image_cache_save_failed", path=str(self.path), exc_info=True)
 
 
 _image_cache: Optional[ImageEnrichmentCache] = None
@@ -461,27 +381,14 @@ def _resolve_attachment_path(raw: Optional[str]) -> Optional[Path]:
     return (base / candidate).expanduser()
 
 
-def _hash_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def _truncate_caption(value: Optional[str], limit: int = 200) -> str:
+    """Keep for backwards compatibility - delegates to shared module."""
     if not value:
         return ""
     caption = value.strip()
     if len(caption) <= limit:
         return caption
     return caption[: limit - 1] + "\u2026"
-
-
-def _build_image_facets(entities: Dict[str, List[str]]) -> Dict[str, Any]:
-    facets: Dict[str, Any] = {}
-    for key in ("dates", "phones", "urls", "addresses"):
-        values = entities.get(key)
-        if values:
-            facets[key] = values
-    facets["has_text"] = bool(entities.get("dates") or entities.get("phones") or entities.get("urls") or entities.get("addresses"))
-    return facets
 
 
 def _copy_attachment_to_temp(source: Path, dest_dir: Path, *, row_id: Any) -> Optional[Path]:
@@ -500,208 +407,6 @@ def _copy_attachment_to_temp(source: Path, dest_dir: Path, *, row_id: Any) -> Op
     return None
 
 
-def _run_imdesc(image_path: Path) -> Optional[Dict[str, Any]]:
-    global _IMDESC_MISSING_LOGGED
-
-    try:
-        completed = subprocess.run(
-            [IMDESC_EXECUTABLE, "--format", "json", str(image_path)],
-            capture_output=True,
-            text=True,
-            timeout=IMDESC_TIMEOUT_SECONDS,
-            check=True,
-        )
-    except FileNotFoundError:
-        if not _IMDESC_MISSING_LOGGED:
-            logger.warning("imdesc_cli_missing", executable=IMDESC_EXECUTABLE)
-            _IMDESC_MISSING_LOGGED = True
-        return None
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "imdesc_cli_timeout", timeout=IMDESC_TIMEOUT_SECONDS, path=str(image_path)
-        )
-        return None
-    except subprocess.CalledProcessError as exc:
-        logger.warning(
-            "imdesc_cli_error",
-            returncode=exc.returncode,
-            stderr=_truncate_text(exc.stderr),
-            path=str(image_path),
-        )
-        return None
-    except Exception:
-        logger.warning("imdesc_cli_failed", path=str(image_path), exc_info=True)
-        return None
-
-    output = (completed.stdout or "").strip()
-    if not output:
-        return None
-
-    try:
-        data = json.loads(output)
-    except json.JSONDecodeError:
-        logger.warning("imdesc_cli_invalid_json", output=_truncate_text(output))
-        return None
-
-    if not isinstance(data, dict):
-        return None
-
-    return data
-
-
-def _request_ollama_caption(image_path: Path) -> Optional[str]:
-    """Request an image caption from Ollama vision model.
-    
-    Returns None if OLLAMA_ENABLED=false or if all attempts fail.
-    """
-    if not OLLAMA_ENABLED:
-        return None
-    
-    global _OLLAMA_CONNECTION_WARNED
-
-    try:
-        image_bytes = image_path.read_bytes()
-    except FileNotFoundError:
-        logger.debug("ollama_image_missing", path=str(image_path))
-        return None
-    except Exception:
-        logger.debug("ollama_image_read_failed", path=str(image_path), exc_info=True)
-        return None
-
-    # Log file info for debugging
-    logger.debug("ollama_image_prepare", path=str(image_path), size_bytes=len(image_bytes), suffix=image_path.suffix.lower())
-
-    # Convert image to PNG format if PIL is available (Ollama doesn't support HEIC/HEIF)
-    if Image is not None:
-        try:
-            import io
-            img = Image.open(io.BytesIO(image_bytes))
-            # Convert to RGB if needed (e.g., RGBA or CMYK)
-            if img.mode not in ('RGB', 'L'):
-                img = img.convert('RGB')
-            # Re-encode as PNG
-            buf = io.BytesIO()
-            img.save(buf, format='PNG')
-            image_bytes = buf.getvalue()
-            logger.debug("ollama_image_converted", original_format=image_path.suffix, size_bytes=len(image_bytes))
-        except Exception as exc:
-            logger.warning("ollama_image_conversion_failed", path=str(image_path), error=str(exc))
-            # Fall back to original bytes (will likely fail with 500)
-
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    payload = {
-        "model": OLLAMA_VISION_MODEL,
-        "prompt": OLLAMA_CAPTION_PROMPT,
-        "images": [image_b64],
-        "stream": False,
-    }
-
-    # Log the minimal request info for diagnostics (don't log full base64 body)
-    logger.debug("ollama_request_prepare", url=OLLAMA_API_URL, model=OLLAMA_VISION_MODEL, prompt=_truncate_text(OLLAMA_CAPTION_PROMPT, 200))
-
-    attempt = 0
-    last_exc: Optional[Exception] = None
-    while attempt <= OLLAMA_MAX_RETRIES:
-        try:
-            attempt += 1
-            logger.debug("ollama_request_send", attempt=attempt, url=OLLAMA_API_URL)
-            response = requests.post(
-                OLLAMA_API_URL, json=payload, timeout=OLLAMA_TIMEOUT_SECONDS
-            )
-            # Record status for debugging
-            logger.debug("ollama_response_status", status_code=response.status_code, attempt=attempt)
-            response.raise_for_status()
-            last_exc = None
-            break
-        except requests.ConnectionError as exc:
-            last_exc = exc
-            if not _OLLAMA_CONNECTION_WARNED:
-                logger.warning("ollama_unreachable", url=OLLAMA_API_URL, error=str(exc))
-                _OLLAMA_CONNECTION_WARNED = True
-            logger.debug("ollama_conn_error", attempt=attempt, error=str(exc))
-        except requests.Timeout as exc:
-            last_exc = exc
-            logger.warning("ollama_timeout", timeout=OLLAMA_TIMEOUT_SECONDS, attempt=attempt)
-        except requests.RequestException as exc:
-            last_exc = exc
-            # Non-retryable HTTP error (4xx/5xx) or other request exception
-            logger.warning("ollama_request_failed", error=str(exc), attempt=attempt)
-            # If response exists, capture body for diagnosis
-            try:
-                resp = getattr(exc, "response", None)
-                if resp is not None:
-                    logger.debug("ollama_response_text", text=_truncate_text(getattr(resp, "text", None)))
-            except Exception:
-                # best-effort logging; don't fail the enrichment flow
-                pass
-            break
-
-        # If we'll retry, sleep with exponential backoff
-        if attempt <= OLLAMA_MAX_RETRIES:
-            backoff = 0.5 * (2 ** (attempt - 1))
-            logger.debug("ollama_retry_backoff", attempt=attempt, backoff=backoff)
-            time.sleep(backoff)
-
-    if last_exc is not None:
-        # Nothing succeeded
-        logger.debug("ollama_all_attempts_failed", attempts=attempt, last_error=str(last_exc))
-        return None
-
-    try:
-        data = response.json()
-    except ValueError:
-        logger.warning("ollama_invalid_json", text=_truncate_text(response.text))
-        return None
-
-    caption = data.get("response")
-    if isinstance(caption, str) and caption.strip():
-        return caption.strip()
-
-    message = data.get("message")
-    if isinstance(message, dict):
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-
-    return None
-
-
-def _sanitize_ocr_result(result: Optional[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]], Dict[str, List[str]]]:
-    if not isinstance(result, dict):
-        return "", [], {}
-
-    ocr_text = ""
-    text_value = result.get("text")
-    if isinstance(text_value, str):
-        ocr_text = text_value.strip()
-
-    boxes: List[Dict[str, Any]] = []
-    boxes_value = result.get("boxes")
-    if isinstance(boxes_value, list):
-        boxes = [box for box in boxes_value if isinstance(box, dict)]
-
-    entities: Dict[str, List[str]] = {}
-    raw_entities = result.get("entities")
-    if isinstance(raw_entities, dict):
-        for key, values in raw_entities.items():
-            if not isinstance(values, list):
-                continue
-            cleaned: List[str] = []
-            for item in values:
-                if isinstance(item, str):
-                    candidate = item.strip()
-                elif isinstance(item, (int, float)):
-                    candidate = str(item)
-                else:
-                    continue
-                if candidate:
-                    cleaned.append(candidate)
-            if cleaned:
-                entities[str(key)] = cleaned
-
-    return ocr_text, boxes, entities
-
-
 def enrich_image_attachment(
     metadata: Dict[str, Any],
     tmp_dir: Path,
@@ -709,10 +414,20 @@ def enrich_image_attachment(
     thread_id: str,
     message_guid: str,
     cache: ImageEnrichmentCache,
-) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], str]:
+    """Enrich an image attachment with OCR and caption.
+    
+    Returns:
+        Tuple of (enriched_attachment, image_event, placeholder_text)
+        - If enrichment succeeds, placeholder_text is empty string and dicts are populated
+        - If image is missing, placeholder_text is IMAGE_MISSING_PLACEHOLDER_TEXT and dicts are None
+        - If enrichment fails, placeholder_text is IMAGE_PLACEHOLDER_TEXT and dicts are None
+        - If not an image, returns (None, None, "")
+    """
     if not _is_image_attachment(metadata):
-        return None
+        return None, None, ""
 
+    # Resolve the attachment path
     source = _resolve_attachment_path(metadata.get("filename"))
     if source is None or not source.exists():
         transfer_name = metadata.get("transfer_name")
@@ -720,55 +435,57 @@ def enrich_image_attachment(
         if alt_source is not None and alt_source.exists():
             source = alt_source
 
+    # Check if image file exists on disk before attempting enrichment
     if source is None or not source.exists():
         logger.debug(
             "attachment_file_missing",
             row_id=metadata.get("row_id"),
             filename=metadata.get("filename"),
         )
-        return None
+        # Return placeholder text instead of None so caller knows to add placeholder
+        return None, None, IMAGE_MISSING_PLACEHOLDER_TEXT
 
+    # Copy to temp directory for processing
+    copied = _copy_attachment_to_temp(
+        source, tmp_dir, row_id=metadata.get("row_id", "attachment")
+    )
+    if copied is None:
+        # File copy failed (shouldn't happen since we checked exists above)
+        logger.debug(
+            "attachment_copy_failed_after_exists_check",
+            row_id=metadata.get("row_id"),
+            filename=metadata.get("filename"),
+        )
+        return None, None, IMAGE_MISSING_PLACEHOLDER_TEXT
+
+    # Use shared enrichment module with persistent cache
+    cache_dict = cache.get_data_dict()
     try:
-        image_bytes = source.read_bytes()
+        result = enrich_image(copied, cache_dict=cache_dict)
+        cache.save()  # Persist any cache updates
     except Exception:
-        logger.debug("attachment_read_failed", path=str(source), exc_info=True)
-        return None
-
-    blob_id = _hash_bytes(image_bytes)
-    cached = cache.get(blob_id) or {}
-
-    caption = cached.get("caption") if isinstance(cached, dict) else None
-    ocr_text = cached.get("ocr_text") if isinstance(cached, dict) else ""
-    ocr_boxes = cached.get("ocr_boxes") if isinstance(cached, dict) else []
-    ocr_entities = cached.get("ocr_entities") if isinstance(cached, dict) else {}
-
-    if not caption and not ocr_text:
-        copied = _copy_attachment_to_temp(
-            source, tmp_dir, row_id=metadata.get("row_id", "attachment")
+        logger.warning(
+            "image_enrichment_exception",
+            row_id=metadata.get("row_id"),
+            path=str(copied),
+            exc_info=True,
         )
-        if copied is None:
-            return None
+        return None, None, IMAGE_PLACEHOLDER_TEXT
 
-        ocr_raw = _run_imdesc(copied)
-        caption = _request_ollama_caption(copied)
-        ocr_text, ocr_boxes, ocr_entities = _sanitize_ocr_result(ocr_raw)
-        caption = _truncate_caption(caption)
-
-        cache.set(
-            blob_id,
-            {
-                "caption": caption,
-                "ocr_text": ocr_text,
-                "ocr_boxes": ocr_boxes,
-                "ocr_entities": ocr_entities,
-            },
+    if result is None:
+        # Enrichment returned None (unexpected but handle gracefully)
+        logger.debug(
+            "image_enrichment_returned_none",
+            row_id=metadata.get("row_id"),
+            path=str(copied),
         )
-    else:
-        caption = _truncate_caption(caption)
-        if not isinstance(ocr_boxes, list):
-            ocr_boxes = []
-        if not isinstance(ocr_entities, dict):
-            ocr_entities = {}
+        return None, None, IMAGE_PLACEHOLDER_TEXT
+
+    blob_id = result["blob_id"]
+    caption = _truncate_caption(result.get("caption"))
+    ocr_text = result.get("ocr_text", "")
+    ocr_boxes = result.get("ocr_boxes", [])
+    ocr_entities = result.get("ocr_entities", {})
 
     image_data = {
         "ocr_text": ocr_text,
@@ -788,7 +505,7 @@ def enrich_image_attachment(
         "image": image_data,
     }
 
-    facets = _build_image_facets(ocr_entities)
+    facets = build_image_facets(ocr_entities)
     image_event = {
         "source": "imessage",
         "kind": "image",
@@ -801,7 +518,7 @@ def enrich_image_attachment(
         "facets": facets,
     }
 
-    return enriched, image_event
+    return enriched, image_event, ""  # Empty placeholder means enrichment succeeded
 
 
 def enrich_image_attachments(
@@ -809,18 +526,26 @@ def enrich_image_attachments(
     *,
     thread_id: str,
     message_guid: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+    """Enrich image attachments and return enriched data plus any placeholder texts.
+    
+    Returns:
+        Tuple of (enriched_attachments, image_events, placeholder_texts)
+        - placeholder_texts contains one entry per attachment that failed/missing
+    """
     if not attachments:
-        return [], []
+        return [], [], []
 
     enriched: List[Dict[str, Any]] = []
     image_events: List[Dict[str, Any]] = []
+    placeholders: List[str] = []
     cache = get_image_cache()
+    
     with tempfile.TemporaryDirectory() as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
         for metadata in attachments:
             try:
-                enriched_attachment = enrich_image_attachment(
+                enriched_data, event_data, placeholder = enrich_image_attachment(
                     metadata,
                     tmp_dir,
                     thread_id=thread_id,
@@ -833,14 +558,21 @@ def enrich_image_attachments(
                     row_id=metadata.get("row_id"),
                     exc_info=True,
                 )
+                # Add generic placeholder on unexpected exception
+                placeholders.append(IMAGE_PLACEHOLDER_TEXT)
                 continue
-            if enriched_attachment:
-                enriched.append(enriched_attachment[0])
-                image_events.append(enriched_attachment[1])
+            
+            if enriched_data is not None and event_data is not None:
+                # Enrichment succeeded
+                enriched.append(enriched_data)
+                image_events.append(event_data)
+            elif placeholder:
+                # Enrichment failed or image missing - add placeholder
+                placeholders.append(placeholder)
 
     cache.save()
 
-    return enriched, image_events
+    return enriched, image_events, placeholders
 
 
 def _build_attachment_chunk_text(attachment: Dict[str, Any]) -> str:
@@ -964,13 +696,25 @@ def normalize_row(
 
     image_events: List[Dict[str, Any]] = []
     enriched_attachments: List[Dict[str, Any]] = []
+    image_placeholders: List[str] = []
 
     if not disable_images:
-        enriched_attachments, image_events = enrich_image_attachments(
+        enriched_attachments, image_events, image_placeholders = enrich_image_attachments(
             attachments,
             thread_id=row["chat_guid"],
             message_guid=row["guid"],
         )
+        
+        # If we have placeholders (images that failed or were missing), add them to text
+        if image_placeholders:
+            placeholder_text = " ".join(image_placeholders)
+            if text and not text.startswith("[") and not text.endswith("attachment(s) omitted]"):
+                text = f"{text} {placeholder_text}"
+            else:
+                # No original text or only placeholder - use placeholders as main text
+                text = placeholder_text
+            # Update first chunk's text
+            chunks[0]["text"] = text
     else:
         # When image handling is disabled, replace any image attachments with
         # a placeholder text. Do not perform enrichment or produce image events.
@@ -985,7 +729,7 @@ def normalize_row(
                     continue
 
             if image_count:
-                placeholders = " ".join(["[image]" for _ in range(image_count)])
+                placeholders = " ".join([IMAGE_PLACEHOLDER_TEXT for _ in range(image_count)])
                 if text and not text.startswith("[") and not text.endswith("attachment(s) omitted]"):
                     text = f"{text} {placeholders}"
                 else:

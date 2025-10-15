@@ -6,12 +6,30 @@ import ImageIO
 @main
 struct Imdesc {
     static func main() throws {
-        guard CommandLine.arguments.count > 1 else {
-            FileHandle.standardError.write(Data("Usage: imdesc <image_path>\n".utf8))
+        // Parse command-line arguments
+        var imagePath: String?
+        var formatJson = false
+        
+        var i = 1
+        while i < CommandLine.arguments.count {
+            let arg = CommandLine.arguments[i]
+            if arg == "--format" && i + 1 < CommandLine.arguments.count {
+                let format = CommandLine.arguments[i + 1]
+                if format == "json" {
+                    formatJson = true
+                }
+                i += 2
+            } else {
+                imagePath = arg
+                i += 1
+            }
+        }
+        
+        guard let imagePath = imagePath else {
+            FileHandle.standardError.write(Data("Usage: imdesc [--format json] <image_path>\n".utf8))
             exit(1)
         }
 
-        let imagePath = CommandLine.arguments[1]
         let imageURL = URL(fileURLWithPath: imagePath)
 
         // Validate image dimensions before processing

@@ -17,8 +17,9 @@ Haven is a personal data plane that turns local iMessage history into a searchab
 ## Repository Layout
 - `services/` – Deployable FastAPI apps and workers (gateway, catalog, embedding service).
 - `scripts/collectors/` – iMessage and Contacts collectors plus the native image description helper.
+- `scripts/backfill_image_enrichment.py` – Utility to backfill image enrichment for already-ingested messages.
 - `src/haven/` – Installable Python package with search pipelines, SDK, and reusable domain logic.
-- `shared/` – Cross-service helpers (logging, Postgres utilities, dependency guards).
+- `shared/` – Cross-service helpers (logging, Postgres utilities, image enrichment module, dependency guards).
 - `schema/` – SQL migrations and initialization scripts.
 - `documentation/` – Architecture findings, runbooks, and reference guides.
 - `tests/` – Pytest suite covering gateway, collector, and search behaviors.
@@ -76,16 +77,42 @@ python scripts/collectors/collector_contacts.py
 - Run manually or via cron/launchd to keep entries synced; the collector stores no local cache beyond `~/.haven` progress files.
 
 ### Optional Image Enrichment
-Image attachments can be enriched with OCR, entity extraction, and captions.
+Image attachments can be enriched with OCR, entity extraction, and captions using the shared enrichment module (`shared/image_enrichment.py`).
 
 1. Build the native helper (macOS vision OCR + entity detection):
    ```bash
    scripts/build-imdesc.sh
    ```
 2. (Optional) Enable captioning via an Ollama vision model:
-   - Ensure an Ollama server with a vision-capable model (e.g., `llava`) is running.
+   - Ensure an Ollama server with a vision-capable model (e.g., `llava:7b` or `qwen2.5vl:3b`) is running.
    - Export `OLLAMA_API_URL` for the collector and `OLLAMA_BASE_URL` for the embedding service when using a remote server or custom port.
 3. The collector falls back gracefully when the helper binary or caption endpoint is unavailable—it logs a warning and continues ingesting messages.
+
+### Backfilling Image Enrichment
+If you've already ingested messages before enabling image enrichment, you can backfill enrichment data:
+
+```bash
+export AUTH_TOKEN="changeme"
+export GATEWAY_URL="http://localhost:8085"  # optional, defaults to localhost:8085
+
+# Dry run to see what would be updated (recommended first step)
+python scripts/backfill_image_enrichment.py --dry-run --limit 10 --use-chat-db
+
+# Process all documents with images (uses chat.db backup for attachment paths)
+python scripts/backfill_image_enrichment.py --use-chat-db
+
+# Custom batch size for processing
+python scripts/backfill_image_enrichment.py --batch-size 25 --use-chat-db
+```
+
+The backfill script:
+- Queries the gateway API for documents with attachments
+- Uses the chat.db backup to resolve attachment file paths (when `--use-chat-db` is provided)
+- Enriches images with OCR, captions, and entity detection via `shared/image_enrichment.py`
+- Updates documents via the gateway PATCH endpoint
+- Automatically triggers re-embedding with the new enriched content
+
+See `AGENTS.md` for detailed backfill usage and prerequisites.
 
 ## Configuration Reference
 - `AUTH_TOKEN` – bearer token enforced on gateway routes (optional in development).
@@ -94,10 +121,14 @@ Image attachments can be enriched with OCR, entity extraction, and captions.
 - `DATABASE_URL` – Postgres DSN; each service overrides this for Docker networking.
 - `EMBEDDING_MODEL` – embedding identifier (`BAAI/bge-m3`).
 - `QDRANT_URL`, `QDRANT_COLLECTION` – vector store configuration.
-- `OLLAMA_ENABLED`, `OLLAMA_API_URL`, `OLLAMA_VISION_MODEL` – configure optional vision captioning for image enrichment.
+- `OLLAMA_ENABLED`, `OLLAMA_API_URL`, `OLLAMA_VISION_MODEL` – configure optional vision captioning for image enrichment (shared module defaults: `llava:7b`).
 - `OLLAMA_BASE_URL` – base URL the embedding service uses when calling the embedding provider.
+- `OLLAMA_CAPTION_PROMPT`, `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_MAX_RETRIES` – fine-tune Ollama caption requests.
+- `IMDESC_CLI_PATH`, `IMDESC_TIMEOUT_SECONDS` – configure the native macOS Vision OCR helper.
+- `IMAGE_PLACEHOLDER_TEXT`, `IMAGE_MISSING_PLACEHOLDER_TEXT` – customize placeholder text when images are disabled or missing.
 - `WORKER_POLL_INTERVAL`, `WORKER_BATCH_SIZE` – embedding service tuning knobs.
 - `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` – collector scheduling controls for incremental sync.
+- `GATEWAY_URL` – used by backfill script to communicate with the gateway API.
 
 ### Using a .env file
 
@@ -127,7 +158,7 @@ curl -s "http://localhost:8085/v1/search?q=MMED" -H "Authorization: Bearer $AUTH
 
 ## Security Notes
 - Only the gateway publishes a host port; other services remain on the Docker network.
-- Collector stores state in `~/.haven/imessage_collector_state.json` and never uploads raw attachments.
+- Collector stores state in `~/.haven/` (state files, chat.db backup, and image enrichment cache) and never uploads raw attachments.
 - Treat `~/Library/Messages/chat.db` and `~/.haven/*` as sensitive; they are ignored by git.
 - Manage tokens through environment variables or `.env` files excluded from version control.
 

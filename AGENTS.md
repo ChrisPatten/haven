@@ -41,16 +41,83 @@ python scripts/collectors/collector_contacts.py
 
 ## Recent Updates
 - iMessage collector enriches image attachments with OCR, entity detection, and optional Ollama-powered captioning.
+- Image enrichment logic is now in `shared/image_enrichment.py` for reusability across collectors.
 - A native Swift helper (`scripts/collectors/imdesc.swift`) plus `scripts/build-imdesc.sh` supports macOS Vision OCR.
 - `tests/test_collector_imessage.py` covers enrichment flows and cache behavior.
 
-### Collector: disable image handling
+### Collector: Image Handling Configuration
 
-- New CLI flag for the iMessage collector: `--no-images` (or `--disable_images` in the args namespace).
-- When set, the collector will skip image enrichment (OCR/captioning/entity extraction) and instead replace image attachments with the text "[image]" in the message content/chunks. This is useful for low-resource environments or when privacy requires skipping binary processing.
+**Disable image handling:**
+- CLI flag: `--no-images` (or `--disable_images` in the args namespace)
+- When set, the collector will skip image enrichment (OCR/captioning/entity extraction) and replace image attachments with placeholder text
+
+**Configurable placeholder text:**
+- `IMAGE_PLACEHOLDER_TEXT`: Text to use when image enrichment is disabled or fails (default: `"[image]"`)
+- `IMAGE_MISSING_PLACEHOLDER_TEXT`: Text to use when image file is not found on disk (default: `"[image not available]"`)
+
+**Image enrichment only happens if:**
+1. `--no-images` flag is NOT set
+2. Image file exists on disk at the resolved path
+3. Image file can be successfully copied to temp directory
+4. Enrichment process completes without exceptions
 
 Example:
 
 ```bash
+# Disable image handling entirely
 python scripts/collectors/collector_imessage.py --no-images
+
+# Customize placeholder text
+export IMAGE_PLACEHOLDER_TEXT="📷"
+export IMAGE_MISSING_PLACEHOLDER_TEXT="[attachment deleted]"
+python scripts/collectors/collector_imessage.py
 ```
+
+## Backfilling Image Enrichment
+
+If you've already ingested messages before image enrichment was enabled, you can backfill enrichment data for existing messages using the backfill script. This script:
+
+1. Queries the gateway API for documents with attachments
+2. Checks if image files still exist on disk
+3. Enriches images with OCR, captions, and entity detection
+4. Updates documents via the gateway API
+5. Automatically triggers re-embedding with the new enriched content
+
+**Prerequisites:**
+- Gateway API must be running at `GATEWAY_URL` (default: `http://localhost:8085`)
+- `AUTH_TOKEN` environment variable must be set
+- Image attachment files must still exist at their original paths in `~/Library/Messages/Attachments/`
+
+**Usage:**
+
+```bash
+export AUTH_TOKEN="changeme"
+export GATEWAY_URL="http://localhost:8085"  # optional, defaults to localhost:8085
+
+# Dry run to see what would be updated (recommended first step)
+python scripts/backfill_image_enrichment.py --dry-run --limit 10
+
+# For messages collected without attachment metadata, use --use-chat-db
+# This queries the chat.db backup to get attachment file paths
+python scripts/backfill_image_enrichment.py --dry-run --limit 10 --use-chat-db
+
+# Process the first 50 documents with images
+python scripts/backfill_image_enrichment.py --limit 50 --use-chat-db
+
+# Process all documents with images (batch size 50)
+python scripts/backfill_image_enrichment.py --use-chat-db
+
+# Custom batch size for processing
+python scripts/backfill_image_enrichment.py --batch-size 25 --use-chat-db
+```
+
+**Output:**
+The script outputs statistics at completion including:
+- Documents scanned and updated
+- Images found vs missing on disk
+- Images already enriched vs newly enriched
+- Chunks re-queued for embedding
+- Any errors encountered during processing
+
+**Note:** The embedding service will automatically pick up re-queued chunks and generate new embeddings that include the enriched image content (captions, OCR text, entities).
+

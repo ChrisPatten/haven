@@ -434,6 +434,95 @@ def get_document_status(doc_id: str, _token: None = Depends(verify_token)) -> Do
     )
 
 
+class DocumentUpdateRequest(BaseModel):
+    metadata: Dict[str, Any]
+    text: str
+    requeue_for_embedding: bool = True
+
+
+class DocumentUpdateResponse(BaseModel):
+    doc_id: str
+    status: str
+    chunks_requeued: int = 0
+
+
+@app.patch("/v1/catalog/documents/{doc_id}", response_model=DocumentUpdateResponse)
+def update_document(
+    doc_id: str,
+    payload: DocumentUpdateRequest,
+    _token: None = Depends(verify_token)
+) -> DocumentUpdateResponse:
+    """Update a document's metadata and text, optionally re-queuing chunks for embedding."""
+    try:
+        doc_uuid = uuid.UUID(doc_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid doc_id") from exc
+
+    with get_connection(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            # Check document exists
+            cur.execute(
+                "SELECT doc_id, status FROM documents WHERE doc_id = %s FOR UPDATE",
+                (doc_uuid,),
+            )
+            doc_row = cur.fetchone()
+            if not doc_row:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+            # Update document
+            cur.execute(
+                """
+                UPDATE documents
+                SET metadata = %s,
+                    text = %s,
+                    updated_at = NOW()
+                WHERE doc_id = %s
+                """,
+                (Json(payload.metadata), payload.text, doc_uuid),
+            )
+
+            chunks_requeued = 0
+            if payload.requeue_for_embedding:
+                # Re-queue all chunks for re-embedding
+                cur.execute(
+                    """
+                    UPDATE chunks
+                    SET status = 'queued',
+                        text = %s,
+                        updated_at = NOW()
+                    WHERE doc_id = %s
+                    RETURNING chunk_id
+                    """,
+                    (payload.text, doc_uuid),
+                )
+                chunk_ids = [str(row["chunk_id"]) for row in cur.fetchall()]
+                chunks_requeued = len(chunk_ids)
+
+                # Reset embed_jobs for all chunks
+                for chunk_id in chunk_ids:
+                    cur.execute(
+                        """
+                        INSERT INTO embed_jobs (chunk_id, tries, last_error, locked_by, locked_at, next_attempt_at)
+                        VALUES (%s, 0, NULL, NULL, NULL, NOW())
+                        ON CONFLICT (chunk_id) DO UPDATE
+                        SET tries = 0,
+                            last_error = NULL,
+                            locked_by = NULL,
+                            locked_at = NULL,
+                            next_attempt_at = NOW()
+                        """,
+                        (chunk_id,),
+                    )
+
+        conn.commit()
+
+    return DocumentUpdateResponse(
+        doc_id=str(doc_uuid),
+        status="updated",
+        chunks_requeued=chunks_requeued,
+    )
+
+
 @app.post("/v1/catalog/embeddings", response_model=EmbeddingSubmitResponse)
 def submit_embedding(payload: EmbeddingSubmitRequest, _token: None = Depends(verify_token)) -> EmbeddingSubmitResponse:
     if not payload.vector:

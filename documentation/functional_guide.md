@@ -1,12 +1,26 @@
 # Haven Platform Functional Guide
 
 ## 1. Core Capabilities
-1. **Hybrid Search & Ask** – Gateway exposes lexical/vector search and answer synthesis over cataloged threads.
+1. **Hybrid Search & Ask** – Gateway exposes lexical/vector search and answer synthesis over cataloged t### 6.5 Contact### 6.7 Troubleshooting
+| Symptom | Checks |
+| --- | --- |
+| Gateway 502 on catalog proxy | Verify `CATALOG_BASE_URL` and catalog container health. |
+| Empty search results | Confirm Qdrant is reachable, the embedding service is running, and chunks marked `ready`. |
+| Collector fails to post | Ensure `CATALOG_ENDPOINT` is correct and `CATALOG_TOKEN` matches gateway configuration. |
+| Attachment enrichment skipped | Check helper binary path (`IMDESC_CLI_PATH`), Ollama availability, and permissions for `~/.haven` cache directory. |
+| Worker stuck pending | Validate Qdrant collection existence and embedding model downloads. |
+| Backfill script fails | Verify `AUTH_TOKEN` is set, gateway is reachable, and image files still exist on disk. Use `--dry-run` first. |tor
+1. Install macOS-specific dependencies: `pip install -r local_requirements.txt`.
+2. Run `python scripts/collectors/collector_contacts.py` (requires GUI permission prompt).
+3. Confirm contacts appear in catalog via `/catalog/contacts/export` or gateway proxy.
+
+### 6.6 Embedding Service Operations.
 2. **Catalog Insights** – Context endpoints surface thread statistics, highlights, and document metadata.
-3. **Document Retrieval** – Clients can fetch full message payloads by document ID.
+3. **Document Retrieval & Management** – Clients can fetch, list, and update document payloads by document ID.
 4. **Ingestion Pipeline** – Collectors stream normalized iMessage events (and optional contacts) into the catalog.
 5. **Embedding Lifecycle** – Background worker keeps Qdrant synchronized so hybrid search remains high quality.
-6. **Attachment Enrichment** – Optional OCR, entity, and caption enrichment makes image content searchable.
+6. **Attachment Enrichment** – Optional OCR, entity, and caption enrichment (via `shared/image_enrichment.py`) makes image content searchable.
+7. **Backfill Operations** – Script to enrich images for already-ingested messages and trigger re-embedding.
 
 ## 2. Primary Workflows
 ### 2.1 Search & Ask
@@ -38,12 +52,30 @@
 4. Hybrid search results combine lexical signals with vector similarity.
 
 ### 2.5 Attachment Enrichment
-1. When the collector encounters image attachments it invokes the optional native helper (`imdesc`) to extract OCR text and entities via macOS Vision.
-2. If an Ollama vision model is configured, the collector requests captions to augment the message body.
-3. Enrichment artifacts are cached locally and appended to the chunk text plus message attributes so that search and context endpoints surface image-derived content.
-4. Missing helpers or caption endpoints trigger warnings; ingestion continues with base message text.
+1. When the collector encounters image attachments it invokes the shared enrichment module (`shared/image_enrichment.py`).
+2. The module runs the optional native helper (`imdesc`) to extract OCR text and entities via macOS Vision.
+3. If an Ollama vision model is configured, the module requests captions to augment the message body.
+4. Enrichment artifacts are cached locally in `~/.haven/imessage_image_cache.json` and appended to chunk text plus message attributes.
+5. Search and context endpoints surface image-derived content (captions, OCR text, entities).
+6. Missing helpers or caption endpoints trigger warnings; ingestion continues with configurable placeholder text.
+7. Configurable placeholders: `IMAGE_PLACEHOLDER_TEXT` (default `"[image]"`) and `IMAGE_MISSING_PLACEHOLDER_TEXT` (default `"[image not available]"`).
 
-### 2.6 Contacts Sync (Optional)
+### 2.6 Document Update & Re-embedding
+1. Client can update a document's metadata and text via `PATCH /v1/documents/{doc_id}`.
+2. Gateway validates the doc_id and forwards the request to catalog.
+3. Catalog updates the document record and optionally requeues all associated chunks for re-embedding.
+4. The embedding worker picks up requeued chunks and generates new embeddings with the updated content.
+5. Use case: backfilling image enrichment data after initial ingestion.
+
+### 2.7 Backfill Image Enrichment
+1. Run `scripts/backfill_image_enrichment.py` with `AUTH_TOKEN` and `GATEWAY_URL` configured.
+2. Script queries gateway `GET /v1/documents?has_attachments=true` for messages with images.
+3. For messages collected without attachment metadata, use `--use-chat-db` to query the chat.db backup.
+4. Script resolves image file paths, enriches images via `shared/image_enrichment.py`, and updates documents via `PATCH /v1/documents/{doc_id}`.
+5. Updated documents are automatically requeued for embedding with enriched content.
+6. Script outputs statistics: documents scanned, images found/missing/enriched, chunks requeued, errors.
+
+### 2.8 Contacts Sync (Optional)
 1. `collector_contacts.py` reads the macOS Contacts store using pyobjc.
 2. Contacts are batched and POSTed to the gateway contact ingest proxy (`POST /catalog/contacts/ingest`).
 3. Catalog stores normalized person records; `GET /catalog/contacts/export` streams them back as NDJSON for downstream consumers.
@@ -57,6 +89,8 @@
 | POST | `/v1/ingest` | Normalize and forward documents to catalog | Bearer `AUTH_TOKEN` |
 | GET | `/v1/ingest/{submission_id}` | Fetch submission + embedding status | Bearer `AUTH_TOKEN` |
 | GET | `/v1/doc/{doc_id}` | Proxy to catalog for message metadata | Bearer `AUTH_TOKEN` |
+| PATCH | `/v1/documents/{doc_id}` | Update document metadata/text and requeue for embedding | Bearer `AUTH_TOKEN` |
+| GET | `/v1/documents` | List documents with optional filtering (source_type, has_attachments) | Bearer `AUTH_TOKEN` |
 | GET | `/v1/context/general` | Aggregate conversation insights | Bearer `AUTH_TOKEN`, forwards `CATALOG_TOKEN` when set |
 | GET | `/catalog/contacts/export` | Stream contacts as NDJSON | Bearer `AUTH_TOKEN` |
 | POST | `/catalog/contacts/ingest` | Ingest normalized contacts | Bearer `AUTH_TOKEN` (+ `CATALOG_TOKEN` if enforced downstream) |
@@ -76,6 +110,7 @@
 | Method | Path | Description |
 | --- | --- | --- |
 | POST | `/v1/catalog/events` | Upsert threads/messages/chunks and enqueue embeddings |
+| PATCH | `/v1/catalog/documents/{doc_id}` | Update document metadata/text and requeue chunks for embedding |
 | GET | `/v1/doc/{doc_id}` | Retrieve catalog document metadata |
 | GET | `/v1/context/general` | Return counts, top threads, recent highlights |
 | GET | `/catalog/contacts/export` | Stream contacts as NDJSON |
@@ -99,7 +134,10 @@
 | `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | Vector configuration shared by search + worker.
 | `WORKER_POLL_INTERVAL`, `WORKER_BATCH_SIZE` | Embedding service tuning knobs.
 | `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE`, `CATALOG_ENDPOINT` | Collector behavior (`CATALOG_ENDPOINT` defaults to gateway `/v1/ingest`).
-| `OLLAMA_ENABLED`, `OLLAMA_API_URL`, `OLLAMA_VISION_MODEL`, `IMDESC_PATH`, `IMAGE_ENRICHMENT_CACHE` | Optional attachment enrichment configuration.
+| `OLLAMA_ENABLED`, `OLLAMA_API_URL`, `OLLAMA_VISION_MODEL`, `OLLAMA_CAPTION_PROMPT`, `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_MAX_RETRIES` | Optional Ollama vision captioning configuration (shared enrichment module).
+| `IMDESC_CLI_PATH`, `IMDESC_TIMEOUT_SECONDS` | macOS Vision OCR helper configuration.
+| `IMAGE_PLACEHOLDER_TEXT`, `IMAGE_MISSING_PLACEHOLDER_TEXT` | Configurable placeholder text for disabled/missing images.
+| `GATEWAY_URL` | Used by backfill script to communicate with the gateway API (default: `http://localhost:8085`).
 
 ## 6. Operational Runbooks
 ### 6.1 Local Development
@@ -117,21 +155,36 @@
 
 ### 6.3 Attachment Enrichment
 1. Build `scripts/collectors/imdesc.swift` via `scripts/build-imdesc.sh` (places the helper binary under `scripts/collectors/bin/imdesc`).
-2. Confirm the collector locates the helper (`IMDESC_PATH` override available) and that `IMAGE_ENRICHMENT_CACHE` is writable.
+2. Confirm the collector locates the helper (`IMDESC_CLI_PATH` override available) and that `~/.haven/imessage_image_cache.json` is writable.
 3. Optional: configure an Ollama vision endpoint (set `OLLAMA_API_URL` and `OLLAMA_VISION_MODEL`; update `OLLAMA_BASE_URL` for the embedding service if it calls a remote provider).
-4. Review collector logs for enrichment warnings; ingestion proceeds even without helpers.
+4. The shared enrichment module (`shared/image_enrichment.py`) handles OCR, captioning, caching, and graceful fallbacks.
+5. Review collector logs for enrichment warnings; ingestion proceeds with configurable placeholders when enrichment fails.
 
-### 6.4 Contacts Collector
+### 6.4 Backfilling Image Enrichment
+1. Ensure gateway API is running at `GATEWAY_URL` (default: `http://localhost:8085`).
+2. Set `AUTH_TOKEN` environment variable for authentication.
+3. Run dry-run first to preview changes:
+   ```bash
+   python scripts/backfill_image_enrichment.py --dry-run --limit 10 --use-chat-db
+   ```
+4. Process documents with `--use-chat-db` flag to query chat.db backup for attachment paths:
+   ```bash
+   python scripts/backfill_image_enrichment.py --use-chat-db
+   ```
+5. Monitor output for statistics: documents scanned, images enriched, chunks requeued, errors.
+6. The embedding service will automatically pick up requeued chunks and generate new embeddings.
+
+### 6.5 Contacts Collector
 1. Install macOS-specific dependencies: `pip install -r local_requirements.txt`.
 2. Run `python scripts/collectors/collector_contacts.py` (requires GUI permission prompt).
 3. Confirm contacts appear in catalog via `/catalog/contacts/export` or gateway proxy.
 
-### 6.5 Embedding Service Operations
+### 6.6 Embedding Service Operations
 1. Ensure the embedding model referenced by `EMBEDDING_MODEL` is available (downloads on first run).
 2. Monitor `embedding.service` logs for successful job completion events; failures leave rows in `embed_jobs` for retry.
 3. If a job stalls, reset `chunks.status` to `queued` or adjust `embed_jobs.next_attempt_at` to trigger immediate retries.
 
-### 6.6 Troubleshooting
+### 6.7 Troubleshooting
 | Symptom | Checks |
 | --- | --- |
 | Gateway 502 on catalog proxy | Verify `CATALOG_BASE_URL` and catalog container health. |
@@ -142,9 +195,10 @@
 
 ## 7. Data Retention & Privacy
 - Collector handles sensitive data from `~/Library/Messages/chat.db`; backups are stored under `~/.haven/chat_backup` and excluded from git.
+- Image enrichment cache is stored in `~/.haven/imessage_image_cache.json` (keyed by image blob hash, contains OCR/captions but not raw images).
 - `.gitignore` excludes `.haven`, `.env`, and other sensitive directories.
 - Manage tokens via environment variables or secrets management tooling.
-- Attachment content is used only for enrichment metadata; raw image bytes are not uploaded.
+- Attachment content is used only for enrichment metadata; raw image bytes are not uploaded to services.
 
 ## 8. Change Management Notes
 - Architectural maps, findings, and change reports live in `documentation/`.

@@ -4,12 +4,13 @@
 Haven is a multi-service platform that ingests personal communication data, normalizes it into Postgres, embeds message chunks into Qdrant, and exposes hybrid search plus summarization through a FastAPI gateway.
 
 Core runtime components:
-- **Gateway API** (`services/gateway_api/app.py`) – public HTTP surface for search, ask/summary, catalog proxying, document retrieval, and contact sync.
+- **Gateway API** (`services/gateway_api/app.py`) – public HTTP surface for search, ask/summary, catalog proxying, document retrieval/update/listing, and contact sync.
 - **Search Service** (`src/haven/search`) – hybrid lexical/vector engine providing ingestion, query, and admin endpoints.
-- **Catalog API** (`services/catalog_api/app.py`) – receives ingestion events, stores normalized threads/messages/chunks, and aggregates context views.
-- **Collector** (`scripts/collectors/collector_imessage.py`) – macOS CLI that extracts iMessage data, enriches attachments, and POSTs normalized text to the gateway ingest endpoint.
+- **Catalog API** (`services/catalog_api/app.py`) – receives ingestion events, stores normalized threads/messages/chunks, provides document update endpoints, and aggregates context views.
+- **Collector** (`scripts/collectors/collector_imessage.py`) – macOS CLI that extracts iMessage data, enriches attachments via shared module, and POSTs normalized text to the gateway ingest endpoint.
 - **Embedding Service** (`services/embedding_service/worker.py`) – polls pending chunks, generates embeddings, and writes vectors to Qdrant.
-- **Shared Library** (`shared/`) – logging bootstrap, dependency checks, Postgres session helpers, and reusable reporting queries.
+- **Shared Library** (`shared/`) – logging bootstrap, dependency checks, Postgres session helpers, image enrichment module, and reusable reporting queries.
+- **Backfill Script** (`scripts/backfill_image_enrichment.py`) – CLI utility to enrich images for already-ingested messages and trigger re-embedding.
 
 ## 2. Deployment Topology
 ### 2.1 Container Orchestration
@@ -41,6 +42,8 @@ All services share the default compose network (`haven_default`). Only the gatew
   - `POST /v1/ingest` – normalizes document payloads and forwards them to catalog.
   - `GET /v1/ingest/{submission_id}` – returns ingest + embedding status for a submission.
   - `GET /v1/doc/{doc_id}` – proxies to catalog and relays status codes verbatim.
+  - `PATCH /v1/documents/{doc_id}` – updates document metadata/text and requeues chunks for re-embedding.
+  - `GET /v1/documents` – lists documents with optional filtering (source_type, has_attachments).
   - `GET /v1/context/general` – proxies to catalog context endpoint while forwarding `CATALOG_TOKEN`.
   - `GET /catalog/contacts/export` & `POST /catalog/contacts/ingest` – contact sync proxy endpoints.
   - `GET /v1/healthz` – readiness probe.
@@ -65,6 +68,7 @@ All services share the default compose network (`haven_default`). Only the gatew
 - **Entrypoint**: `services/catalog_api/app.py` (FastAPI).
 - **Database Access**: Uses synchronous `psycopg` connections via helpers in `shared.database`.
 - **Ingestion**: `POST /v1/catalog/documents` accepts normalized payloads, upserts threads/messages/chunks, and enqueues jobs in `embed_jobs`.
+- **Document Update**: `PATCH /v1/catalog/documents/{doc_id}` updates document metadata/text and optionally requeues chunks for re-embedding.
 - **Submission Status**: `GET /v1/catalog/submissions/{submission_id}` surfaces document + embedding progress to the gateway.
 - **Context Endpoints**: `GET /v1/context/general` runs aggregate queries from `shared.context` to produce thread counts, highlights, and top conversations.
 - **Document Retrieval**: `GET /v1/doc/{doc_id}` returns normalized message metadata and chunk text.
@@ -73,9 +77,11 @@ All services share the default compose network (`haven_default`). Only the gatew
 ### 3.4 Collector
 - **CLI**: `collector_imessage.py` orchestrates chat database backup, delta scanning, message normalization, and HTTP posting to the gateway or catalog.
 - **Attachment Enrichment**:
+  - Uses the shared enrichment module (`shared/image_enrichment.py`) which encapsulates OCR, captioning, caching, and helper invocation.
   - Invokes the optional Swift helper (`imdesc`) for OCR and entity extraction via macOS Vision.
   - Can call an Ollama vision endpoint for captions when configured.
-  - Writes enrichment payloads into chunk text and message attributes; caches results under `~/.haven` to avoid repeat processing.
+  - Writes enrichment payloads into chunk text and message attributes; caches results under `~/.haven/imessage_image_cache.json` to avoid repeat processing.
+  - Falls back to configurable placeholder text when enrichment is disabled or fails.
 - **State Tracking**: Stores last processed row IDs in `~/.haven/imessage_collector_state.json` and can simulate messages via `--simulate` flag.
 
 ### 3.5 Embedding Service
@@ -88,6 +94,25 @@ All services share the default compose network (`haven_default`). Only the gatew
 - `shared/database.py` provides Postgres connection factories and context managers.
 - `shared/context.py` bundles aggregate queries for catalog context routes.
 - `shared/dependencies.py` guards against missing optional extras.
+- `shared/image_enrichment.py` – centralized image enrichment module providing:
+  - `run_imdesc_ocr()` – invokes native macOS Vision OCR helper
+  - `request_ollama_caption()` – calls Ollama vision models for image captions
+  - `sanitize_ocr_result()` – normalizes OCR output (text, boxes, entities)
+  - `build_image_facets()` – creates searchable facets from entities
+  - `enrich_image()` – high-level enrichment function with caching
+  - `ImageEnrichmentCache` – JSON-backed cache keyed by image blob hash
+
+### 3.7 Backfill Script
+- **CLI**: `scripts/backfill_image_enrichment.py` orchestrates enrichment backfill for already-ingested messages.
+- **Workflow**:
+  1. Queries gateway `GET /v1/documents?has_attachments=true` for documents with image attachments.
+  2. Optionally queries chat.db backup (when `--use-chat-db` is provided) to resolve attachment file paths.
+  3. For each document, resolves image file paths on disk and enriches images via `shared/image_enrichment.py`.
+  4. Updates documents via gateway `PATCH /v1/documents/{doc_id}` with enriched metadata and text.
+  5. Sets `requeue_for_embedding=true` to trigger automatic re-embedding via the embedding worker.
+  6. Outputs statistics: documents scanned, images found/missing/enriched, chunks requeued, errors.
+- **Configuration**: Uses `GATEWAY_URL` and `AUTH_TOKEN` environment variables.
+- **Flags**: `--dry-run`, `--limit`, `--batch-size`, `--use-chat-db`, `--chat-db`.
 
 ## 4. Data Model
 - **Threads / Messages / Chunks** – Primary catalog tables storing normalized chat structure and chunked message bodies.
@@ -103,10 +128,14 @@ All services share the default compose network (`haven_default`). Only the gatew
 | `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | Search & worker | Must stay aligned to avoid embedding mismatches. |
 | `AUTH_TOKEN`, `CATALOG_TOKEN`, `SEARCH_TOKEN` | Gateway, catalog, collectors | Enforce ingestion and query auth; collector forwards tokens. |
 | `CATALOG_BASE_URL`, `SEARCH_URL` | Gateway | Service discovery for internal proxies. |
-| `CATALOG_ENDPOINT`, `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE`, `IMDESC_PATH`, `IMAGE_ENRICHMENT_CACHE`, `OLLAMA_ENABLED`, `OLLAMA_API_URL`, `OLLAMA_VISION_MODEL` | Collector | Control ingestion targets and enrichment behavior. |
+| `GATEWAY_URL` | Backfill script | Gateway API endpoint for document queries and updates. |
+| `CATALOG_ENDPOINT`, `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` | Collector | Control ingestion targets and polling behavior. |
+| `IMDESC_CLI_PATH`, `IMDESC_TIMEOUT_SECONDS` | Shared enrichment module | Native macOS Vision OCR helper configuration. |
+| `OLLAMA_ENABLED`, `OLLAMA_API_URL`, `OLLAMA_VISION_MODEL`, `OLLAMA_CAPTION_PROMPT`, `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_MAX_RETRIES` | Shared enrichment module | Ollama vision captioning configuration. |
+| `IMAGE_PLACEHOLDER_TEXT`, `IMAGE_MISSING_PLACEHOLDER_TEXT` | Collector | Configurable placeholder text for disabled/missing images. |
 | `OLLAMA_BASE_URL`, `WORKER_POLL_INTERVAL`, `WORKER_BATCH_SIZE`, `EMBEDDING_REQUEST_TIMEOUT`, `EMBEDDING_MAX_BACKOFF` | Embedding service | Tuning knobs for throughput vs. load. |
 
-Secrets are supplied via environment variables or `.env` files ignored by git. Sensitive local paths (`~/Library/Messages/chat.db`, `~/.haven/*`) remain on-device.
+Secrets are supplied via environment variables or `.env` files ignored by git. Sensitive local paths (`~/Library/Messages/chat.db`, `~/.haven/*` including image cache) remain on-device.
 
 ## 6. Build, Test, and Quality Gates
 - **Dependencies**: Managed via `requirements.txt` or optional extras in `pyproject.toml` (`[project.optional-dependencies]`).
@@ -117,7 +146,7 @@ Secrets are supplied via environment variables or `.env` files ignored by git. S
 
 ## 7. Logging & Observability
 - All services call `shared.logging.setup_logging()` to emit JSON logs with contextual metadata.
-- Key events: `gateway_api_ready`, `ingest_event`, `embedded_chunks`, `collector_enriched_image` (new for attachment enrichment).
+- Key events: `gateway_api_ready`, `ingest_event`, `embedded_chunks`, `collector_enriched_image`, `backfill_complete`.
 - Monitoring strategy relies on Docker logs or central aggregation when deployed beyond local development.
 
 ## 8. Extension Points & Future Work
