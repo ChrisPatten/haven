@@ -42,12 +42,80 @@ class CatalogSettings(BaseModel):
     contacts_default_region: str | None = Field(
         default_factory=lambda: os.getenv("CONTACTS_DEFAULT_REGION", "US")
     )
+    search_url: str = Field(
+        default_factory=lambda: os.getenv("SEARCH_URL", "http://search:8080")
+    )
+    search_token: str | None = Field(
+        default_factory=lambda: os.getenv("SEARCH_TOKEN")
+    )
+    forward_to_search: bool = Field(
+        default_factory=lambda: os.getenv("CATALOG_FORWARD_TO_SEARCH", "true").lower() == "true"
+    )
 
 
 settings = CatalogSettings()
 app = FastAPI(title="Haven Catalog API", version="0.3.0")
 
 _qdrant_client: QdrantClient | None = None
+_search_client = None  # Lazy-loaded SearchServiceClient
+
+
+def get_search_client():
+    """Lazy-load SearchServiceClient to forward documents to search service."""
+    global _search_client
+    if _search_client is None and settings.forward_to_search:
+        try:
+            from haven.search.sdk import SearchServiceClient
+            _search_client = SearchServiceClient(
+                base_url=settings.search_url,
+                auth_token=settings.search_token,
+                timeout=30.0,
+            )
+            logger.info("search_client_initialized", search_url=settings.search_url)
+        except ImportError:
+            logger.warning("search_sdk_not_available", forward_to_search=settings.forward_to_search)
+            _search_client = False  # Marker to not try again
+    return _search_client if _search_client is not False else None
+
+
+async def forward_to_search(doc_id: str, source_type: str, source_id: str, title: str | None, 
+                            canonical_uri: str | None, text: str, metadata: Dict[str, Any]) -> None:
+    """Forward a document to the search service after successful catalog ingestion."""
+    if not settings.forward_to_search:
+        return
+    
+    client = get_search_client()
+    if client is None:
+        return
+    
+    try:
+        from haven.search.models import Acl, DocumentUpsert
+        
+        acl = Acl(org_id="default")
+        doc = DocumentUpsert(
+            document_id=str(doc_id),
+            source_id=source_id,
+            title=title,
+            url=None,  # Search service will handle URL parsing
+            text=text,
+            metadata=metadata or {},
+            facets=[],
+            acl=acl,
+        )
+        
+        result = await client.abatch_upsert([doc])
+        logger.info(
+            "document_forwarded_to_search",
+            doc_id=str(doc_id),
+            result=result,
+        )
+    except Exception as exc:
+        # Don't fail catalog ingestion if search forwarding fails
+        logger.warning(
+            "search_forward_failed",
+            doc_id=str(doc_id),
+            error=str(exc),
+        )
 
 
 def verify_token(request: Request) -> None:
@@ -277,6 +345,7 @@ def register_document(
     normalized_text = _normalize_text(payload.text)
     text_sha = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
     external_id = payload.external_id or payload.source_id
+    is_duplicate = False
 
     with get_connection(autocommit=False) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -468,13 +537,36 @@ def register_document(
             )
         conn.commit()
 
+    # Forward to search service after successful ingestion
+    if not is_duplicate and settings.forward_to_search:
+        import threading
+        def forward_task():
+            import asyncio
+            try:
+                logger.info("search_forward_starting", doc_id=str(doc_id))
+                asyncio.run(forward_to_search(
+                    doc_id=str(doc_id),
+                    source_type=payload.source_type,
+                    source_id=external_id,
+                    title=payload.title,
+                    canonical_uri=payload.canonical_uri,
+                    text=normalized_text,
+                    metadata=payload.metadata,
+                ))
+                logger.info("search_forward_complete", doc_id=str(doc_id))
+            except Exception as exc:
+                logger.warning("search_forward_failed", doc_id=str(doc_id), error=str(exc), exc_info=True)
+        
+        thread = threading.Thread(target=forward_task, daemon=True)
+        thread.start()
+
     response.status_code = status.HTTP_202_ACCEPTED
     return DocumentIngestResponse(
         submission_id=str(submission_id),
         doc_id=str(doc_id),
         status="embedding_pending",
         total_chunks=len(chunk_candidates),
-        duplicate=False,
+        duplicate=is_duplicate,
     )
 
 

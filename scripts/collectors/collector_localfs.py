@@ -20,6 +20,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import requests
 
+from shared.image_enrichment import (
+    ImageEnrichmentCache,
+    build_image_facets,
+    enrich_image,
+)
 from shared.logging import get_logger, setup_logging
 
 DEFAULT_INCLUDE_PATTERNS = [
@@ -40,7 +45,35 @@ AUTH_TOKEN = os.getenv("AUTH_TOKEN")
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8085")
 STATE_FILE = Path.home() / ".haven" / "localfs_collector_state.json"
 
+# Image attachment extensions (matching iMessage collector)
+IMAGE_ATTACHMENT_EXTENSIONS = {
+    ".bmp",
+    ".gif",
+    ".heic",
+    ".heif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
+
+# Configurable placeholder text for image handling
+IMAGE_PLACEHOLDER_TEXT = os.getenv("IMAGE_PLACEHOLDER_TEXT", "[image]")
+IMAGE_MISSING_PLACEHOLDER_TEXT = os.getenv("IMAGE_MISSING_PLACEHOLDER_TEXT", "[image not available]")
+IMAGE_CACHE_FILE = STATE_FILE.parent / "localfs_image_cache.json"
+
 logger = get_logger("collector.localfs")
+
+_image_cache: Optional[ImageEnrichmentCache] = None
+
+
+def get_image_cache() -> ImageEnrichmentCache:
+    global _image_cache
+    if _image_cache is None:
+        _image_cache = ImageEnrichmentCache(IMAGE_CACHE_FILE)
+    return _image_cache
 
 
 def _split_patterns(raw: str, defaults: Iterable[str]) -> List[str]:
@@ -54,6 +87,12 @@ def _split_patterns(raw: str, defaults: Iterable[str]) -> List[str]:
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+def _is_image_file(path: Path) -> bool:
+    """Check if a file is an image based on extension."""
+    suffix = path.suffix.lower()
+    return suffix in IMAGE_ATTACHMENT_EXTENSIONS
 
 
 @dataclass
@@ -226,8 +265,54 @@ class LocalFsCollector:
             )
         return path.read_bytes()
 
+    def _enrich_image(self, path: Path) -> Optional[Dict[str, Any]]:
+        """Enrich an image file with OCR and captioning.
+        
+        Returns:
+            Dict with enriched data (caption, ocr_text, entities, facets, blob_id) or None if enrichment fails
+        """
+        if not _is_image_file(path):
+            return None
+        
+        try:
+            cache = get_image_cache()
+            cache_dict = cache.get_data_dict()
+            result = enrich_image(path, use_cache=True, cache_dict=cache_dict)
+            cache.save()
+            
+            logger.info(
+                "localfs_image_enriched",
+                path=str(path),
+                blob_id=result.get("blob_id"),
+                has_caption=bool(result.get("caption")),
+                has_ocr=bool(result.get("ocr_text")),
+            )
+            return result
+        except Exception as exc:
+            logger.warning(
+                "localfs_image_enrichment_failed",
+                path=str(path),
+                error=str(exc),
+            )
+            return None
+
     def _submit_file(self, path: Path, content: bytes, sha: str, mtime: float) -> bool:
         meta = self._build_meta(path, mtime)
+        
+        # Enrich images before submission
+        enrichment = None
+        if _is_image_file(path):
+            enrichment = self._enrich_image(path)
+            if enrichment:
+                # Add enrichment data to metadata
+                meta["image"] = {
+                    "blob_id": enrichment.get("blob_id"),
+                    "caption": enrichment.get("caption"),
+                    "ocr_text": enrichment.get("ocr_text"),
+                    "ocr_entities": enrichment.get("ocr_entities"),
+                    "facets": enrichment.get("facets"),
+                }
+        
         headers: Dict[str, str] = {}
         if self.config.auth_token:
             headers["Authorization"] = f"Bearer {self.config.auth_token}"

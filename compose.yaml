@@ -66,8 +66,12 @@ services:
       CATALOG_TOKEN: ${CATALOG_TOKEN:-}
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: haven_chunks
+      SEARCH_URL: http://search:8080
+      SEARCH_TOKEN: ${SEARCH_TOKEN:-}
+      CATALOG_FORWARD_TO_SEARCH: ${CATALOG_FORWARD_TO_SEARCH:-true}
     depends_on:
       - postgres
+      - search
 
   embedding_service:
     build:

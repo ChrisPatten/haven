@@ -55,7 +55,6 @@ from shared.people_repository import (
     PeopleRepository,
     PersonIngestRecord,
 )
-from shared.image_enrichment import enrich_image
 
 
 assert_missing_dependencies(["authlib", "redis", "jinja2"], "Gateway API")
@@ -99,6 +98,9 @@ class GatewaySettings(BaseModel):
         default_factory=lambda: os.getenv("SEARCH_URL", "http://search:8080")
     )
     search_token: str | None = Field(default_factory=lambda: os.getenv("SEARCH_TOKEN"))
+    search_timeout: float = Field(
+        default_factory=lambda: float(os.getenv("SEARCH_TIMEOUT", "60.0"))
+    )
     contacts_default_region: str | None = Field(
         default_factory=lambda: os.getenv("CONTACTS_DEFAULT_REGION", "US")
     )
@@ -138,7 +140,9 @@ def on_startup() -> None:
     os.environ.setdefault("DATABASE_URL", settings.database_url)
     global _search_client
     _search_client = SearchServiceClient(
-        base_url=settings.search_url, auth_token=settings.search_token
+        base_url=settings.search_url,
+        auth_token=settings.search_token,
+        timeout=settings.search_timeout,
     )
     logger.info("gateway_api_ready", search_url=settings.search_url)
 
@@ -637,49 +641,11 @@ def _extract_text_for_localfs(
         )
 
     if normalized_suffix in {".png", ".jpg", ".jpeg", ".heic"}:
-        image_path = temp_dir / f"{file_sha}{normalized_suffix or '.img'}"
-        image_path.write_bytes(file_bytes)
-        try:
-            enrichment = enrich_image(image_path, use_cache=False)
-        except Exception as exc:  # pragma: no cover - depends on optional deps
-            logger.warning(
-                "image_enrichment_failed",
-                filename=filename,
-                error=str(exc),
-            )
-            return FileExtractionResult(
-                text=IMAGE_PLACEHOLDER_TEXT,
-                status="failed",
-                metadata={"reason": "image_enrichment_failed"},
-                error={"type": "image_enrichment_failed", "message": str(exc)},
-            )
-
-        ocr_text = (enrichment.get("ocr_text") or "").strip()
-        caption = (enrichment.get("caption") or "").strip()
-        segments: List[str] = []
-        if caption:
-            segments.append(f"Caption: {caption}")
-        if ocr_text:
-            segments.append(f"OCR:\n{ocr_text}")
-
-        combined = "\n\n".join(seg for seg in segments if seg).strip()
-        attachments_text = ocr_text or caption or None
-        status_value: Literal["ready", "failed"] = "ready" if combined else "failed"
-        if not combined:
-            combined = IMAGE_PLACEHOLDER_TEXT
-
-        metadata = {
-            "blob_id": enrichment.get("blob_id"),
-            "has_caption": bool(caption),
-            "has_ocr_text": bool(ocr_text),
-            "ocr_entities": enrichment.get("ocr_entities"),
-            "facets": enrichment.get("facets"),
-        }
+        # Images are now enriched by collectors; gateway just passes through placeholder
         return FileExtractionResult(
-            text=combined,
-            status=status_value,
-            attachment_text=attachments_text,
-            metadata=metadata,
+            text=IMAGE_PLACEHOLDER_TEXT,
+            status="ready",
+            metadata={"reason": "image_handled_by_collector"},
         )
 
     return FileExtractionResult(
@@ -705,6 +671,21 @@ def _build_document_text(
         lines.append(f"Modified: {mtime_iso}")
     if meta.tags:
         lines.append("Tags: " + ", ".join(meta.tags))
+    
+    # Check if collector provided image enrichment
+    image_data = getattr(meta, "image", None) or {}
+    if image_data and isinstance(image_data, dict):
+        caption = (image_data.get("caption") or "").strip()
+        ocr_text = (image_data.get("ocr_text") or "").strip()
+        
+        if caption or ocr_text:
+            lines.append("")
+            if caption:
+                lines.append(f"Caption: {caption}")
+            if ocr_text:
+                lines.append(f"OCR:\n{ocr_text}")
+            return "\n".join(line for line in lines if line).strip()
+    
     lines.append("")
     lines.append(extracted_text.strip() or FILE_PLACEHOLDER_TEXT)
     return "\n".join(line for line in lines if line).strip()
@@ -732,7 +713,7 @@ def _build_localfs_metadata(
     extras = {
         k: v
         for k, v in base_meta.items()
-        if k not in {"source", "path", "filename", "mtime", "tags"}
+        if k not in {"source", "path", "filename", "mtime", "tags", "image"}
     }
     if extras:
         localfs_meta["extra"] = extras
@@ -754,6 +735,16 @@ def _build_localfs_metadata(
     }
     if extraction.error:
         metadata["extraction"]["error"] = extraction.error
+    
+    # Include image enrichment from collector if provided
+    image_data = getattr(meta, "image", None)
+    if image_data and isinstance(image_data, dict):
+        metadata["image"] = {
+            k: v
+            for k, v in image_data.items()
+            if v is not None
+        }
+    
     return metadata
 
 
