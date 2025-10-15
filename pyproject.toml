@@ -15,6 +15,8 @@ dependencies = [
   "pydantic-settings>=2.2",
   "structlog>=23",
   "orjson>=3.9",
+  "minio>=7.2",
+  "pdfminer.six>=20231228",
 ]
 
 [project.optional-dependencies]

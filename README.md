@@ -7,7 +7,8 @@ Haven is a personal data plane that turns local iMessage history into a searchab
 - [`documentation/functional_guide.md`](documentation/functional_guide.md) – user workflows, API behavior, operating runbooks, and troubleshooting.
 
 ## Components
-- **Collector (CLI / optional compose profile)** – `scripts/collectors/collector_imessage.py` copies `~/Library/Messages/chat.db`, normalizes new messages, enriches image attachments, and posts catalog events to the gateway.
+- **iMessage Collector (CLI / optional compose profile)** – `scripts/collectors/collector_imessage.py` copies `~/Library/Messages/chat.db`, normalizes new messages, enriches image attachments, and posts catalog events to the gateway.
+- **Local Files Collector** – `scripts/collectors/collector_localfs.py` watches a directory for supported documents, uploads binaries to the gateway file ingest endpoint, and lets the catalog pipeline handle extraction and embeddings.
 - **Catalog API** – internal FastAPI service that persists threads/messages/chunks, maintains FTS indexes, and tracks embedding status.
 - **Embedding Service** – background worker (`services/embedding_service/worker.py`) that polls pending chunks, calls the embedding provider, and upserts vectors into Qdrant.
 - **Gateway API (`:8085`)** – public FastAPI surface for hybrid search, summarization, document retrieval, and catalog proxying.
@@ -16,7 +17,7 @@ Haven is a personal data plane that turns local iMessage history into a searchab
 
 ## Repository Layout
 - `services/` – Deployable FastAPI apps and workers (gateway, catalog, embedding service).
-- `scripts/collectors/` – iMessage and Contacts collectors plus the native image description helper.
+- `scripts/collectors/` – iMessage, local filesystem, and Contacts collectors plus the native image description helper.
 - `scripts/backfill_image_enrichment.py` – Utility to backfill image enrichment for already-ingested messages.
 - `src/haven/` – Installable Python package with search pipelines, SDK, and reusable domain logic.
 - `shared/` – Cross-service helpers (logging, Postgres utilities, image enrichment module, dependency guards).
@@ -66,6 +67,22 @@ python scripts/collectors/collector_imessage.py --no-images
 # Single-run, no images
 python scripts/collectors/collector_imessage.py --no-images --once
 ```
+
+### Local Files Collector
+Monitor a directory for supported documents (`.txt`, `.md`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.heic`) and ingest them through the gateway file endpoint.
+
+```bash
+export AUTH_TOKEN="changeme"
+python scripts/collectors/collector_localfs.py \
+  --watch ~/HavenInbox \
+  --move-to ~/.haven/localfs/processed \
+  --tag personal
+```
+
+- Use `--include` / `--exclude` for additional glob filters.
+- `--delete-after` removes files after successful ingestion; `--move-to` relocates them.
+- `--dry-run` logs matches without uploading; `--one-shot` processes the current backlog and exits.
+- State is persisted at `~/.haven/localfs_collector_state.json` (override with `--state-file`).
 
 ### Contacts Collector (macOS)
 ```bash
@@ -126,9 +143,11 @@ See `AGENTS.md` for detailed backfill usage and prerequisites.
 - `OLLAMA_CAPTION_PROMPT`, `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_MAX_RETRIES` – fine-tune Ollama caption requests.
 - `IMDESC_CLI_PATH`, `IMDESC_TIMEOUT_SECONDS` – configure the native macOS Vision OCR helper.
 - `IMAGE_PLACEHOLDER_TEXT`, `IMAGE_MISSING_PLACEHOLDER_TEXT` – customize placeholder text when images are disabled or missing.
+- `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `MINIO_SECURE` – gateway object storage target for raw file attachments.
+- `LOCALFS_MAX_FILE_MB`, `LOCALFS_REQUEST_TIMEOUT` – local filesystem collector guardrails for file size and HTTP timeout.
 - `WORKER_POLL_INTERVAL`, `WORKER_BATCH_SIZE` – embedding service tuning knobs.
 - `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` – collector scheduling controls for incremental sync.
-- `GATEWAY_URL` – used by backfill script to communicate with the gateway API.
+- `GATEWAY_URL` – used by the local filesystem collector and backfill utilities to reach the gateway API.
 
 ### Using a .env file
 

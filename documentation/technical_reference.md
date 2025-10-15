@@ -7,7 +7,8 @@ Core runtime components:
 - **Gateway API** (`services/gateway_api/app.py`) – public HTTP surface for search, ask/summary, catalog proxying, document retrieval/update/listing, and contact sync.
 - **Search Service** (`src/haven/search`) – hybrid lexical/vector engine providing ingestion, query, and admin endpoints.
 - **Catalog API** (`services/catalog_api/app.py`) – receives ingestion events, stores normalized threads/messages/chunks, provides document update endpoints, and aggregates context views.
-- **Collector** (`scripts/collectors/collector_imessage.py`) – macOS CLI that extracts iMessage data, enriches attachments via shared module, and POSTs normalized text to the gateway ingest endpoint.
+- **iMessage Collector** (`scripts/collectors/collector_imessage.py`) – macOS CLI that extracts iMessage data, enriches attachments via shared module, and POSTs normalized text to the gateway ingest endpoint.
+- **Local Files Collector** (`scripts/collectors/collector_localfs.py`) – watches a configurable directory, uploads binaries to the gateway‘s file ingest endpoint, and streams metadata/text extraction through the catalog pipeline.
 - **Embedding Service** (`services/embedding_service/worker.py`) – polls pending chunks, generates embeddings, and writes vectors to Qdrant.
 - **Shared Library** (`shared/`) – logging bootstrap, dependency checks, Postgres session helpers, image enrichment module, and reusable reporting queries.
 - **Backfill Script** (`scripts/backfill_image_enrichment.py`) – CLI utility to enrich images for already-ingested messages and trigger re-embedding.
@@ -21,6 +22,7 @@ Core runtime components:
 - `gateway` – builds with `SERVICE=gateway`; publishes `127.0.0.1:8085 -> 8080`.
 - `catalog` – builds with `SERVICE=catalog`; listens on `8081` internally.
 - `embedding_service` – long-running embedding worker that polls catalog and writes vectors to Qdrant.
+- `minio` – object storage backing for raw file attachments; internal only, no host port exposed.
 - `collector` – optional profile running the iMessage collector against the gateway ingest endpoint.
 
 ### 2.2 Dockerfile Build Pipeline
@@ -40,9 +42,10 @@ All services share the default compose network (`haven_default`). Only the gatew
   - `GET /v1/search` – forwards to search service and adapts the response into gateway models.
   - `POST /v1/ask` – performs a follow-up search and synthesizes a text answer with citations.
   - `POST /v1/ingest` – normalizes document payloads and forwards them to catalog.
+  - `POST /v1/ingest/file` – accepts multipart uploads, stores raw binaries in MinIO, extracts text, and creates catalog documents with attachment metadata.
   - `GET /v1/ingest/{submission_id}` – returns ingest + embedding status for a submission.
   - `GET /v1/doc/{doc_id}` – proxies to catalog and relays status codes verbatim.
-  - `PATCH /v1/documents/{doc_id}` – updates document metadata/text and requeues chunks for re-embedding.
+  - `PATCH /v1/catalog/documents/{doc_id}` – updates document metadata/text, attachment extraction status, and requeues chunks for re-embedding.
   - `GET /v1/documents` – lists documents with optional filtering (source_type, has_attachments).
   - `GET /v1/context/general` – proxies to catalog context endpoint while forwarding `CATALOG_TOKEN`.
   - `GET /catalog/contacts/export` & `POST /catalog/contacts/ingest` – contact sync proxy endpoints.
@@ -128,6 +131,8 @@ All services share the default compose network (`haven_default`). Only the gatew
 | `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | Search & worker | Must stay aligned to avoid embedding mismatches. |
 | `AUTH_TOKEN`, `CATALOG_TOKEN`, `SEARCH_TOKEN` | Gateway, catalog, collectors | Enforce ingestion and query auth; collector forwards tokens. |
 | `CATALOG_BASE_URL`, `SEARCH_URL` | Gateway | Service discovery for internal proxies. |
+| `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `MINIO_SECURE` | Gateway | S3-compatible object store configuration for raw file attachments. |
+| `GATEWAY_URL`, `LOCALFS_MAX_FILE_MB`, `LOCALFS_REQUEST_TIMEOUT` | Local files collector | Determines gateway target, file size guardrails, and HTTP timeout. |
 | `GATEWAY_URL` | Backfill script | Gateway API endpoint for document queries and updates. |
 | `CATALOG_ENDPOINT`, `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` | Collector | Control ingestion targets and polling behavior. |
 | `IMDESC_CLI_PATH`, `IMDESC_TIMEOUT_SECONDS` | Shared enrichment module | Native macOS Vision OCR helper configuration. |

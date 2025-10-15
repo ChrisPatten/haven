@@ -2,21 +2,45 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
+import json
+import mimetypes
 import os
+import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Union, Literal
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from minio import Minio
+from minio.error import S3Error
+from pdfminer.high_level import extract_text as pdf_extract_text
+from pydantic import BaseModel, Field, ConfigDict, ValidationError, model_validator
+
 try:  # pragma: no cover - optional dependency for tests
     from psycopg.rows import dict_row
 except ImportError:  # pragma: no cover
+
     def dict_row(*_args, **_kwargs):  # type: ignore[misc]
-        raise RuntimeError("psycopg is required for gateway database access; install haven-platform[common]")
+        raise RuntimeError(
+            "psycopg is required for gateway database access; install haven-platform[common]"
+        )
+
 
 from haven.search.models import PageCursor, SearchHit as SearchServiceHit, SearchRequest
 from haven.search.sdk import SearchServiceClient
@@ -31,6 +55,7 @@ from shared.people_repository import (
     PeopleRepository,
     PersonIngestRecord,
 )
+from shared.image_enrichment import enrich_image
 
 
 assert_missing_dependencies(["authlib", "redis", "jinja2"], "Gateway API")
@@ -40,23 +65,71 @@ logger = get_logger("gateway.api")
 CONTACT_SOURCE_DEFAULT = "macos_contacts"
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true", "yes", "on")
+
+
+SUPPORTED_LOCALFS_EXTENSIONS: dict[str, str] = {
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".heic": "image/heic",
+}
+
+IMAGE_PLACEHOLDER_TEXT = os.getenv("IMAGE_PLACEHOLDER_TEXT", "[image]")
+FILE_PLACEHOLDER_TEXT = os.getenv("FILE_PLACEHOLDER_TEXT", "[file]")
+
+
 class GatewaySettings(BaseModel):
     database_url: str = Field(default_factory=get_conn_str)
     api_token: str = Field(default_factory=lambda: os.getenv("AUTH_TOKEN", ""))
-    catalog_base_url: str = Field(default_factory=lambda: os.getenv("CATALOG_BASE_URL", "http://catalog:8081"))
-    catalog_token: str | None = Field(default_factory=lambda: os.getenv("CATALOG_TOKEN"))
-    search_url: str = Field(default_factory=lambda: os.getenv("SEARCH_URL", "http://search:8080"))
+    catalog_base_url: str = Field(
+        default_factory=lambda: os.getenv("CATALOG_BASE_URL", "http://catalog:8081")
+    )
+    catalog_token: str | None = Field(
+        default_factory=lambda: os.getenv("CATALOG_TOKEN")
+    )
+    search_url: str = Field(
+        default_factory=lambda: os.getenv("SEARCH_URL", "http://search:8080")
+    )
     search_token: str | None = Field(default_factory=lambda: os.getenv("SEARCH_TOKEN"))
-    contacts_default_region: str | None = Field(default_factory=lambda: os.getenv("CONTACTS_DEFAULT_REGION", "US"))
+    contacts_default_region: str | None = Field(
+        default_factory=lambda: os.getenv("CONTACTS_DEFAULT_REGION", "US")
+    )
     # Helper service that exposes contact export (NDJSON). Gateway will proxy export requests to it.
-    contacts_helper_url: str | None = Field(default_factory=lambda: os.getenv("CONTACTS_HELPER_URL"))
-    contacts_helper_token: str | None = Field(default_factory=lambda: os.getenv("CONTACTS_HELPER_TOKEN"))
+    contacts_helper_url: str | None = Field(
+        default_factory=lambda: os.getenv("CONTACTS_HELPER_URL")
+    )
+    contacts_helper_token: str | None = Field(
+        default_factory=lambda: os.getenv("CONTACTS_HELPER_TOKEN")
+    )
+    minio_endpoint: str = Field(
+        default_factory=lambda: os.getenv("MINIO_ENDPOINT", "minio:9000")
+    )
+    minio_access_key: str = Field(
+        default_factory=lambda: os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+    )
+    minio_secret_key: str = Field(
+        default_factory=lambda: os.getenv("MINIO_SECRET_KEY", "minioadmin")
+    )
+    minio_bucket: str = Field(
+        default_factory=lambda: os.getenv("MINIO_BUCKET", "haven-files")
+    )
+    minio_secure: bool = Field(default_factory=lambda: _env_bool("MINIO_SECURE", False))
 
 
 settings = GatewaySettings()
 app = FastAPI(title="Haven Gateway API", version="0.2.0")
 
 _search_client: SearchServiceClient | None = None
+_minio_client: Minio | None = None
+_minio_bucket_checked = False
 
 
 @app.on_event("startup")
@@ -64,7 +137,9 @@ def on_startup() -> None:
     setup_logging()
     os.environ.setdefault("DATABASE_URL", settings.database_url)
     global _search_client
-    _search_client = SearchServiceClient(base_url=settings.search_url, auth_token=settings.search_token)
+    _search_client = SearchServiceClient(
+        base_url=settings.search_url, auth_token=settings.search_token
+    )
     logger.info("gateway_api_ready", search_url=settings.search_url)
 
 
@@ -265,6 +340,25 @@ class MessageDoc:
     text: str
 
 
+@dataclass
+class FileExtractionResult:
+    text: str
+    status: Literal["ready", "failed"]
+    attachment_text: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[Dict[str, Any]] = None
+
+
+class LocalFileMeta(BaseModel):
+    source: str = "localfs"
+    path: str
+    filename: Optional[str] = None
+    mtime: Optional[float] = None
+    tags: List[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="allow")
+
+
 class IngestContentModel(BaseModel):
     mime_type: str = "text/plain"
     data: str
@@ -297,6 +391,12 @@ class IngestStatusResponse(BaseModel):
     embedded_chunks: int = 0
     pending_chunks: int = 0
     error: Optional[Dict[str, Any]] = None
+
+
+class FileIngestResponse(IngestSubmissionResponse):
+    file_sha256: str
+    object_key: str
+    extraction_status: Literal["ready", "failed"]
 
 
 class ErrorEnvelope(BaseModel):
@@ -345,7 +445,11 @@ def _error_response(
         correlation_id=correlation_id,
         details=details or {},
     )
-    return JSONResponse(status_code=status_code, content=envelope.model_dump(), headers={"X-Correlation-ID": correlation_id})
+    return JSONResponse(
+        status_code=status_code,
+        content=envelope.model_dump(),
+        headers={"X-Correlation-ID": correlation_id},
+    )
 
 
 def _extract_text(content: IngestContentModel) -> str:
@@ -363,7 +467,8 @@ def _extract_text(content: IngestContentModel) -> str:
                 return decoded.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST, detail="Base64 payload is not valid UTF-8"
+                    status.HTTP_400_BAD_REQUEST,
+                    detail="Base64 payload is not valid UTF-8",
                 ) from exc
         return content.data
     raise HTTPException(
@@ -389,15 +494,282 @@ async def _catalog_request(
         return await client.request(method, path, json=json_payload, headers=headers)
 
 
+def _get_minio_client() -> Minio:
+    global _minio_client
+    if _minio_client is None:
+        if not settings.minio_endpoint:
+            raise RuntimeError("MINIO_ENDPOINT not configured")
+        if not settings.minio_access_key or not settings.minio_secret_key:
+            raise RuntimeError("MINIO credentials not configured")
+        _minio_client = Minio(
+            settings.minio_endpoint,
+            access_key=settings.minio_access_key,
+            secret_key=settings.minio_secret_key,
+            secure=settings.minio_secure,
+        )
+    return _minio_client
+
+
+def _ensure_minio_bucket(client: Minio) -> None:
+    global _minio_bucket_checked
+    if _minio_bucket_checked:
+        return
+    try:
+        if not client.bucket_exists(settings.minio_bucket):
+            client.make_bucket(settings.minio_bucket)
+    except S3Error as exc:
+        if exc.code not in {"BucketAlreadyOwnedByYou", "BucketAlreadyExists"}:
+            raise
+    _minio_bucket_checked = True
+
+
+def _build_object_key(file_sha: str, suffix: str) -> str:
+    suffix_clean = suffix.lower().lstrip(".")
+    if suffix_clean:
+        return f"{file_sha}/{file_sha}.{suffix_clean}"
+    return f"{file_sha}/{file_sha}"
+
+
+def _resolve_filename(meta: LocalFileMeta, upload_name: Optional[str]) -> str:
+    if meta.filename:
+        return meta.filename
+    if upload_name:
+        return upload_name
+    if meta.path:
+        return Path(meta.path).name or "document"
+    return "document"
+
+
+def _resolve_suffix(filename: str, path_value: str) -> str:
+    for candidate in (filename, path_value):
+        if not candidate:
+            continue
+        suffix = Path(candidate).suffix
+        if suffix:
+            return suffix.lower()
+    return ""
+
+
+def _guess_content_type(filename: str, provided: Optional[str]) -> str:
+    if provided:
+        return provided
+    mime, _ = mimetypes.guess_type(filename)
+    if mime:
+        return mime
+    return "application/octet-stream"
+
+
+def _format_mtime(value: Optional[Any]) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=UTC).isoformat()
+        except (ValueError, OSError):
+            return None
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC).isoformat()
+        except ValueError:
+            return value
+    return None
+
+
+def _extract_text_for_localfs(
+    file_sha: str,
+    suffix: str,
+    file_bytes: bytes,
+    temp_dir: Path,
+    filename: str,
+) -> FileExtractionResult:
+    normalized_suffix = suffix.lower()
+    if normalized_suffix in {".txt", ".md"}:
+        try:
+            decoded = file_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            decoded = file_bytes.decode("utf-8", errors="replace")
+        text = decoded.strip()
+        if text:
+            return FileExtractionResult(
+                text=text,
+                status="ready",
+                metadata={"detected_encoding": "utf-8"},
+            )
+        return FileExtractionResult(
+            text=f"{FILE_PLACEHOLDER_TEXT}\n\nNo extractable text found.",
+            status="failed",
+            metadata={"reason": "empty_text"},
+        )
+
+    if normalized_suffix == ".pdf":
+        pdf_path = temp_dir / f"{file_sha}.pdf"
+        pdf_path.write_bytes(file_bytes)
+        try:
+            extracted = pdf_extract_text(str(pdf_path))
+        except Exception as exc:  # pragma: no cover - depends on pdfminer internals
+            logger.warning(
+                "pdf_extract_failed",
+                filename=filename,
+                error=str(exc),
+            )
+            return FileExtractionResult(
+                text=f"{FILE_PLACEHOLDER_TEXT}\n\nUnable to extract text from PDF.",
+                status="failed",
+                metadata={"reason": "pdf_extract_failed"},
+                error={"type": "pdf_extract_failed", "message": str(exc)},
+            )
+        pages = extracted.count("\f") + 1 if extracted else 0
+        cleaned = extracted.replace("\f", "\n").strip()
+        if cleaned:
+            metadata = {"pages": pages if pages > 0 else None}
+            return FileExtractionResult(
+                text=cleaned,
+                status="ready",
+                metadata=metadata,
+            )
+        return FileExtractionResult(
+            text=f"{FILE_PLACEHOLDER_TEXT}\n\nNo extractable text found in PDF.",
+            status="failed",
+            metadata={"reason": "pdf_no_text"},
+        )
+
+    if normalized_suffix in {".png", ".jpg", ".jpeg", ".heic"}:
+        image_path = temp_dir / f"{file_sha}{normalized_suffix or '.img'}"
+        image_path.write_bytes(file_bytes)
+        try:
+            enrichment = enrich_image(image_path, use_cache=False)
+        except Exception as exc:  # pragma: no cover - depends on optional deps
+            logger.warning(
+                "image_enrichment_failed",
+                filename=filename,
+                error=str(exc),
+            )
+            return FileExtractionResult(
+                text=IMAGE_PLACEHOLDER_TEXT,
+                status="failed",
+                metadata={"reason": "image_enrichment_failed"},
+                error={"type": "image_enrichment_failed", "message": str(exc)},
+            )
+
+        ocr_text = (enrichment.get("ocr_text") or "").strip()
+        caption = (enrichment.get("caption") or "").strip()
+        segments: List[str] = []
+        if caption:
+            segments.append(f"Caption: {caption}")
+        if ocr_text:
+            segments.append(f"OCR:\n{ocr_text}")
+
+        combined = "\n\n".join(seg for seg in segments if seg).strip()
+        attachments_text = ocr_text or caption or None
+        status_value: Literal["ready", "failed"] = "ready" if combined else "failed"
+        if not combined:
+            combined = IMAGE_PLACEHOLDER_TEXT
+
+        metadata = {
+            "blob_id": enrichment.get("blob_id"),
+            "has_caption": bool(caption),
+            "has_ocr_text": bool(ocr_text),
+            "ocr_entities": enrichment.get("ocr_entities"),
+            "facets": enrichment.get("facets"),
+        }
+        return FileExtractionResult(
+            text=combined,
+            status=status_value,
+            attachment_text=attachments_text,
+            metadata=metadata,
+        )
+
+    return FileExtractionResult(
+        text=f"{FILE_PLACEHOLDER_TEXT}\n\nNo automated extraction available for {normalized_suffix or 'binary'} files.",
+        status="failed",
+        metadata={
+            "reason": "unsupported_type",
+            "extension": normalized_suffix or "unknown",
+        },
+    )
+
+
+def _build_document_text(
+    meta: LocalFileMeta, extracted_text: str, filename: str
+) -> str:
+    lines: List[str] = []
+    display_name = filename or "document"
+    lines.append(f"Filename: {display_name}")
+    if meta.path:
+        lines.append(f"Source Path: {meta.path}")
+    mtime_iso = _format_mtime(meta.mtime)
+    if mtime_iso:
+        lines.append(f"Modified: {mtime_iso}")
+    if meta.tags:
+        lines.append("Tags: " + ", ".join(meta.tags))
+    lines.append("")
+    lines.append(extracted_text.strip() or FILE_PLACEHOLDER_TEXT)
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _build_localfs_metadata(
+    meta: LocalFileMeta,
+    filename: str,
+    file_sha: str,
+    object_key: str,
+    size_bytes: int,
+    content_type: str,
+    extraction: FileExtractionResult,
+) -> Dict[str, Any]:
+    base_meta = meta.model_dump(exclude_none=True)
+    localfs_meta = {
+        "path": meta.path,
+        "filename": filename,
+        "tags": meta.tags,
+    }
+    mtime_iso = _format_mtime(meta.mtime)
+    if mtime_iso:
+        localfs_meta["mtime"] = mtime_iso
+
+    extras = {
+        k: v
+        for k, v in base_meta.items()
+        if k not in {"source", "path", "filename", "mtime", "tags"}
+    }
+    if extras:
+        localfs_meta["extra"] = extras
+
+    metadata: Dict[str, Any] = {
+        "source": meta.source or "localfs",
+        "localfs": localfs_meta,
+        "file": {
+            "sha256": file_sha,
+            "object_key": object_key,
+            "size_bytes": size_bytes,
+            "content_type": content_type,
+        },
+        "extraction": {
+            "status": extraction.status,
+            **(extraction.metadata or {}),
+        },
+        "ingested_at": datetime.now(tz=UTC).isoformat(),
+    }
+    if extraction.error:
+        metadata["extraction"]["error"] = extraction.error
+    return metadata
+
+
 def require_token(request: Request) -> None:
     if not settings.api_token:
         return
     header = request.headers.get("Authorization")
     if not header or not header.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token"
+        )
     token = header.split(" ", 1)[1]
     if token != settings.api_token:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token"
+        )
 
 
 def require_catalog_token(request: Request) -> None:
@@ -406,10 +778,14 @@ def require_catalog_token(request: Request) -> None:
         return
     header = request.headers.get("Authorization")
     if not header or not header.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing catalog token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing catalog token"
+        )
     token = header.split(" ", 1)[1]
     if token != catalog_token:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid catalog token")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid catalog token"
+        )
 
 
 @app.get("/catalog/contacts/export")
@@ -418,14 +794,17 @@ def proxy_contacts_export(
     since_token: Optional[str] = Query(default=None),
     full: Optional[bool] = Query(default=False),
     _: None = Depends(require_token),
- ) -> StreamingResponse:
+) -> StreamingResponse:
     """Proxy the contacts export NDJSON from the helper service through the gateway.
 
     This keeps the collector from needing direct access to the helper.
     """
     helper_base = settings.contacts_helper_url
     if not helper_base:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Contacts helper not configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Contacts helper not configured",
+        )
 
     params: Dict[str, Union[str, bool]] = {}
     if since_token:
@@ -440,10 +819,13 @@ def proxy_contacts_export(
     url = helper_base.rstrip("/") + "/contacts/export"
 
     try:
+
         def _stream_generator() -> Iterator[bytes]:
             # Open the httpx stream inside the generator so it remains open
             # for the duration of iteration by StreamingResponse.
-            with httpx.stream("GET", url, params=params, headers=headers, timeout=30.0) as resp:
+            with httpx.stream(
+                "GET", url, params=params, headers=headers, timeout=30.0
+            ) as resp:
                 resp.raise_for_status()
                 for chunk in resp.iter_bytes():
                     yield chunk
@@ -455,7 +837,10 @@ def proxy_contacts_export(
         raise HTTPException(status_code=exc.response.status_code, detail=str(exc))
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("contacts_export_proxy_failed", error=str(exc))
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to proxy contacts export")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to proxy contacts export",
+        )
 
 
 @app.post("/catalog/contacts/ingest", response_model=ContactIngestResponse)
@@ -489,7 +874,9 @@ def ingest_contacts(
             conn.commit()
         except Exception:
             conn.rollback()
-            logger.exception("contacts_ingest_failed", source=source, device_id=payload.device_id)
+            logger.exception(
+                "contacts_ingest_failed", source=source, device_id=payload.device_id
+            )
             raise
 
     return ContactIngestResponse(
@@ -566,7 +953,9 @@ async def ingest_document(
         )
 
     text_hash = _compute_sha256(text_normalized)
-    idempotency_key = _build_idempotency_key(payload.source_type, payload.source_id, text_hash)
+    idempotency_key = _build_idempotency_key(
+        payload.source_type, payload.source_id, text_hash
+    )
 
     catalog_payload = {
         "idempotency_key": idempotency_key,
@@ -582,7 +971,10 @@ async def ingest_document(
 
     try:
         catalog_resp = await _catalog_request(
-            "POST", "/v1/catalog/documents", correlation_id, json_payload=catalog_payload
+            "POST",
+            "/v1/catalog/documents",
+            correlation_id,
+            json_payload=catalog_payload,
         )
     except httpx.HTTPError as exc:
         logger.error(
@@ -623,6 +1015,245 @@ async def ingest_document(
     response.status_code = catalog_resp.status_code
     response.headers["X-Content-SHA256"] = text_hash
     return IngestSubmissionResponse(**payload_json)
+
+
+@app.post(
+    "/v1/ingest/file",
+    response_model=FileIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ingest_file(
+    response: Response,
+    meta: str = Form(...),
+    upload: UploadFile = File(...),
+    _: None = Depends(require_token),
+) -> FileIngestResponse | JSONResponse:
+    correlation_id = _make_correlation_id("gw_file_ingest")
+    response.headers["X-Correlation-ID"] = correlation_id
+
+    try:
+        meta_payload = LocalFileMeta.model_validate_json(meta)
+    except ValidationError as exc:
+        logger.warning("localfs_meta_invalid", errors=exc.errors())
+        return _error_response(
+            status.HTTP_400_BAD_REQUEST,
+            "INGEST.INVALID_META",
+            "Invalid meta payload",
+            correlation_id,
+            details={"errors": exc.errors()},
+        )
+
+    try:
+        file_bytes = await upload.read()
+    except Exception as exc:
+        logger.error("localfs_file_read_failed", error=str(exc))
+        return _error_response(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "INGEST.FILE_READ_FAILED",
+            "Failed to read uploaded file",
+            correlation_id,
+        )
+
+    if not file_bytes:
+        return _error_response(
+            status.HTTP_400_BAD_REQUEST,
+            "INGEST.EMPTY_FILE",
+            "Uploaded file is empty",
+            correlation_id,
+        )
+
+    file_sha = hashlib.sha256(file_bytes).hexdigest()
+    source_type = "localfs"
+    filename = _resolve_filename(meta_payload, upload.filename)
+    suffix = _resolve_suffix(filename, meta_payload.path)
+    lower_suffix = suffix.lower()
+    if lower_suffix and lower_suffix not in SUPPORTED_LOCALFS_EXTENSIONS:
+        logger.info(
+            "localfs_unsupported_extension",
+            suffix=lower_suffix,
+            filename=filename,
+        )
+
+    content_type = _guess_content_type(filename, upload.content_type)
+    object_key = _build_object_key(file_sha, suffix)
+
+    try:
+        client = _get_minio_client()
+        _ensure_minio_bucket(client)
+        object_exists = False
+        try:
+            client.stat_object(settings.minio_bucket, object_key)
+            object_exists = True
+        except S3Error as exc:
+            if (
+                exc.code not in {"NoSuchKey", "NoSuchObject", "NoSuchEntity"}
+                and exc.status != 404
+            ):
+                logger.error(
+                    "minio_stat_failed",
+                    bucket=settings.minio_bucket,
+                    object_key=object_key,
+                    error=exc.code or str(exc),
+                )
+                return _error_response(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "INGEST.OBJECT_STORE_UNAVAILABLE",
+                    "Object store unavailable",
+                    correlation_id,
+                    retryable=True,
+                    details={"error": exc.code or str(exc)},
+                )
+
+        if not object_exists:
+            try:
+                stream = io.BytesIO(file_bytes)
+                stream.seek(0)
+                client.put_object(
+                    settings.minio_bucket,
+                    object_key,
+                    stream,
+                    length=len(file_bytes),
+                    content_type=content_type,
+                )
+                logger.info(
+                    "gateway_minio_put",
+                    object_key=object_key,
+                    bucket=settings.minio_bucket,
+                    size=len(file_bytes),
+                )
+            except S3Error as exc:
+                logger.error(
+                    "minio_put_failed",
+                    bucket=settings.minio_bucket,
+                    object_key=object_key,
+                    error=exc.code or str(exc),
+                )
+                return _error_response(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "INGEST.OBJECT_STORE_WRITE_FAILED",
+                    "Failed to store file",
+                    correlation_id,
+                    retryable=True,
+                    details={"error": exc.code or str(exc)},
+                )
+    except Exception as exc:
+        logger.error("minio_client_error", error=str(exc))
+        return _error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "INGEST.OBJECT_STORE_UNAVAILABLE",
+            "Object store unavailable",
+            correlation_id,
+            retryable=True,
+            details={"error": str(exc)},
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        extraction = _extract_text_for_localfs(
+            file_sha=file_sha,
+            suffix=suffix,
+            file_bytes=file_bytes,
+            temp_dir=Path(tmpdir),
+            filename=filename,
+        )
+
+    document_text = _build_document_text(meta_payload, extraction.text, filename)
+    metadata = _build_localfs_metadata(
+        meta=meta_payload,
+        filename=filename,
+        file_sha=file_sha,
+        object_key=object_key,
+        size_bytes=len(file_bytes),
+        content_type=content_type,
+        extraction=extraction,
+    )
+
+    attachment_payload: Dict[str, Any] = {
+        "object_key": object_key,
+        "filename": filename,
+        "content_type": content_type,
+        "size": len(file_bytes),
+        "sha256": file_sha,
+        "extraction_status": extraction.status,
+    }
+    if extraction.attachment_text and extraction.status == "ready":
+        attachment_payload["extracted_text"] = extraction.attachment_text
+    if extraction.error:
+        attachment_payload["error_json"] = extraction.error
+
+    catalog_payload = {
+        "idempotency_key": f"localfs:{file_sha}",
+        "source_type": source_type,
+        "source_id": file_sha,
+        "external_id": file_sha,
+        "content_sha256": file_sha,
+        "mime_type": content_type,
+        "text": document_text,
+        "title": filename,
+        "metadata": metadata,
+        "attachments": [attachment_payload],
+    }
+
+    try:
+        catalog_resp = await _catalog_request(
+            "POST",
+            "/v1/catalog/documents",
+            correlation_id,
+            json_payload=catalog_payload,
+        )
+    except httpx.HTTPError as exc:
+        logger.error(
+            "catalog_request_failed",
+            correlation_id=correlation_id,
+            error=str(exc),
+        )
+        return _error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "INGEST.CATALOG_UNAVAILABLE",
+            "Catalog service unavailable",
+            correlation_id,
+            retryable=True,
+            details={"error": str(exc)},
+        )
+
+    if catalog_resp.status_code not in (status.HTTP_200_OK, status.HTTP_202_ACCEPTED):
+        try:
+            body = catalog_resp.json()
+        except Exception:
+            body = catalog_resp.text
+        logger.warning(
+            "catalog_rejected_ingest",
+            correlation_id=correlation_id,
+            status_code=catalog_resp.status_code,
+            body=body,
+        )
+        return _error_response(
+            catalog_resp.status_code,
+            "INGEST.CATALOG_ERROR",
+            "Catalog rejected ingest request",
+            correlation_id,
+            retryable=catalog_resp.status_code >= 500,
+            details={"status_code": catalog_resp.status_code, "body": body},
+        )
+
+    payload_json = catalog_resp.json()
+    response.status_code = catalog_resp.status_code
+    response.headers["X-File-SHA256"] = file_sha
+    response.headers["X-Object-Key"] = object_key
+
+    submission = FileIngestResponse(
+        **payload_json,
+        file_sha256=file_sha,
+        object_key=object_key,
+        extraction_status=extraction.status,
+    )
+    logger.info(
+        "localfs_ingest_submitted",
+        doc_id=submission.doc_id,
+        submission_id=submission.submission_id,
+        duplicate=submission.duplicate,
+        extraction_status=extraction.status,
+    )
+    return submission
 
 
 @app.get("/v1/ingest/{submission_id}", response_model=IngestStatusResponse)
@@ -787,7 +1418,7 @@ async def list_documents(
         with conn.cursor(row_factory=dict_row) as cur:
             conditions = []
             params: List[Any] = []
-            
+
             if source_type:
                 # Support both direct source_type field and thread.kind field (for iMessage)
                 if source_type == "imessage":
@@ -795,17 +1426,19 @@ async def list_documents(
                 else:
                     conditions.append("metadata->>'source_type' = %s")
                 params.append(source_type)
-            
+
             if has_attachments:
-                conditions.append("""
+                conditions.append(
+                    """
                     metadata->'message'->'attrs'->'attachment_count' IS NOT NULL
                     AND (metadata->'message'->'attrs'->>'attachment_count')::int > 0
-                """)
-            
+                """
+                )
+
             where_clause = ""
             if conditions:
                 where_clause = "WHERE " + " AND ".join(conditions)
-            
+
             query = f"""
                 SELECT doc_id, metadata, text
                 FROM documents
@@ -814,10 +1447,10 @@ async def list_documents(
                 LIMIT %s OFFSET %s
             """
             params.extend([limit, offset])
-            
+
             cur.execute(query, params)
             rows = cur.fetchall()
-            
+
             documents = [
                 DocumentListItem(
                     doc_id=str(row["doc_id"]),
@@ -826,7 +1459,7 @@ async def list_documents(
                 )
                 for row in rows
             ]
-    
+
     return DocumentListResponse(documents=documents, count=len(documents))
 
 
@@ -965,7 +1598,9 @@ def search_people(
     order_clause = "ORDER BY p.display_name ASC"
     order_params: List[Any] = []
     if q:
-        order_clause = "ORDER BY similarity(p.display_name, %s) DESC, p.display_name ASC"
+        order_clause = (
+            "ORDER BY similarity(p.display_name, %s) DESC, p.display_name ASC"
+        )
         order_params.append(q)
 
     sql = f"{base_query} {order_clause} LIMIT %s OFFSET %s"
@@ -1029,6 +1664,7 @@ def _parse_facets(request: Request) -> Dict[str, List[str]]:
             facets.setdefault(facet_key, []).append(value)
     return facets
 
+
 @app.get("/v1/search", response_model=SearchResponse)
 async def search_endpoint(
     q: str = Query(..., min_length=1),
@@ -1085,12 +1721,20 @@ def build_summary_text(query: str, docs: Sequence[SummaryInput]) -> str:
     for doc in docs[:3]:
         if isinstance(doc, MessageDoc):
             ts_str = doc.ts.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
-            summary_sentences.append(f"{doc.sender} mentioned '{doc.text}' on {ts_str} UTC.")
+            summary_sentences.append(
+                f"{doc.sender} mentioned '{doc.text}' on {ts_str} UTC."
+            )
         else:
             title = doc.title or doc.metadata.get("title") or doc.document_id
-            snippet = (doc.snippet or doc.metadata.get("snippet", "")).strip().replace("\n", " ")
+            snippet = (
+                (doc.snippet or doc.metadata.get("snippet", ""))
+                .strip()
+                .replace("\n", " ")
+            )
             snippet = snippet[:160] + ("…" if len(snippet) > 160 else "")
-            summary_sentences.append(f"Document '{title}' scored {doc.score:.2f}: {snippet}")
+            summary_sentences.append(
+                f"Document '{title}' scored {doc.score:.2f}: {snippet}"
+            )
 
     intro = f"Summary for query '{query}':"
     return intro + " " + " ".join(summary_sentences)
@@ -1107,11 +1751,15 @@ async def doc_endpoint(doc_id: str, _: None = Depends(require_token)) -> Dict[st
     if settings.catalog_token:
         headers["Authorization"] = f"Bearer {settings.catalog_token}"
 
-    async with httpx.AsyncClient(base_url=settings.catalog_base_url, timeout=10.0) as client:
+    async with httpx.AsyncClient(
+        base_url=settings.catalog_base_url, timeout=10.0
+    ) as client:
         response = await client.get(f"/v1/doc/{doc_id}", headers=headers)
 
     if response.status_code == 404:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
+        )
     if response.status_code >= 400:
         try:
             detail: Any = response.json()
@@ -1128,7 +1776,9 @@ async def context_general(_: None = Depends(require_token)) -> Dict[str, Any]:
     if settings.catalog_token:
         headers["Authorization"] = f"Bearer {settings.catalog_token}"
 
-    async with httpx.AsyncClient(base_url=settings.catalog_base_url, timeout=10.0) as client:
+    async with httpx.AsyncClient(
+        base_url=settings.catalog_base_url, timeout=10.0
+    ) as client:
         response = await client.get("/v1/context/general", headers=headers)
 
     if response.status_code >= 400:

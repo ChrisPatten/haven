@@ -67,6 +67,43 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AskResponse'
+  /v1/ingest/file:
+    post:
+      tags:
+        - ingest
+      summary: Ingest a local filesystem file
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                meta:
+                  type: string
+                  description: JSON metadata describing the file (source/path/filename/mtime/tags)
+                upload:
+                  type: string
+                  format: binary
+                  description: File contents to ingest
+              required:
+                - meta
+                - upload
+      responses:
+        '202':
+          description: File ingestion accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileIngestResponse'
+        '200':
+          description: Duplicate submission (existing document reused)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileIngestResponse'
   /v1/doc/{doc_id}:
     get:
       tags:
@@ -187,6 +224,39 @@ components:
               ts:
                 type: string
                 format: date-time
+    FileIngestResponse:
+      type: object
+      properties:
+        submission_id:
+          type: string
+        doc_id:
+          type: string
+          nullable: true
+        status:
+          type: string
+        total_chunks:
+          type: integer
+        duplicate:
+          type: boolean
+        file_sha256:
+          type: string
+          description: SHA256 of the uploaded file contents
+        object_key:
+          type: string
+          description: MinIO object key storing the raw file
+        extraction_status:
+          type: string
+          enum:
+            - ready
+            - failed
+      required:
+        - submission_id
+        - status
+        - total_chunks
+        - duplicate
+        - file_sha256
+        - object_key
+        - extraction_status
     Document:
       type: object
       properties:

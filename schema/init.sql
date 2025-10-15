@@ -72,12 +72,41 @@ CREATE TABLE IF NOT EXISTS documents (
     text TEXT NOT NULL,
     text_sha256 TEXT NOT NULL,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    source_type TEXT,
+    external_id TEXT,
     status TEXT NOT NULL DEFAULT 'submitted',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_submission ON documents(submission_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_external
+    ON documents(source_type, external_id)
+    WHERE external_id IS NOT NULL;
+
+ALTER TABLE documents
+    ADD COLUMN IF NOT EXISTS source_type TEXT,
+    ADD COLUMN IF NOT EXISTS external_id TEXT;
+
+CREATE TABLE IF NOT EXISTS attachments (
+    attachment_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    doc_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    object_key TEXT NOT NULL,
+    filename TEXT,
+    content_type TEXT,
+    size BIGINT,
+    sha256 TEXT,
+    extraction_status TEXT NOT NULL DEFAULT 'queued',
+    extracted_text TEXT,
+    error_json JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attachments_doc_object
+    ON attachments(doc_id, object_key);
+CREATE INDEX IF NOT EXISTS idx_attachments_object_key
+    ON attachments(object_key);
 
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

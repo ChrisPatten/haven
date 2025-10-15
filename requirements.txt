@@ -13,6 +13,8 @@ numpy==1.26.4
 scikit-learn==1.4.1.post1
 Pillow>=10.0.0
 pillow-heif>=0.13.0
+minio==7.2.5
+pdfminer.six==20231228
 ruff==0.3.4
 black==24.2.0
 mypy==1.8.0
