@@ -8,7 +8,7 @@ from .config import get_settings
 from .routes import admin, indexes, ingest, search, tools
 
 
-assert_missing_dependencies(["qdrant-client", "sentence-transformers"], "Search Service")
+assert_missing_dependencies(["qdrant-client"], "Search Service")
 
 
 def create_app() -> FastAPI:

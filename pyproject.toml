@@ -31,13 +31,10 @@ common = [
 ]
 search = [
   "qdrant-client>=1.7",
-  "rank-bm25>=0.2",
   "numpy>=1.26",
-  "scikit-learn>=1.4",
-  "sentence-transformers>=2.3",
+  # embeddings are now produced by an Ollama service; sentence-transformers is no longer required
 ]
 gateway = ["authlib", "redis", "jinja2"]
-collector = ["beautifulsoup4", "pypdf", "tika", "pytesseract"]
 catalog = ["qdrant-client>=1.8"]
 contacts = [
   "phonenumberslite>=8.13",
