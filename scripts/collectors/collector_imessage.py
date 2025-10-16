@@ -1794,6 +1794,7 @@ def run_poll_loop(args: argparse.Namespace) -> None:
                     # Scan backwards from ceiling to floor
                     scan_cursor = scan_ceiling
                     total_processed = 0
+                    batch_events = []
                     
                     while scan_cursor > scan_floor:
                         # Fetch batch: messages with ROWID > scan_floor AND <= scan_cursor
@@ -1919,6 +1920,7 @@ def run_poll_loop(args: argparse.Namespace) -> None:
                         # Scan backwards from new max to old max
                         scan_cursor = scan_ceiling
                         total_processed = 0
+                        batch_events = []
                         
                         while scan_cursor > scan_floor:
                             conn.row_factory = sqlite3.Row
@@ -2137,7 +2139,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--once",
         action="store_true",
-        help="Run a single poll iteration and exit (automatically enabled when using --lookback)",
+        help="Run a single poll iteration and exit (use with --lookback for single-batch behavior)",
     )
     parser.add_argument(
         "--clear-last-seen",
@@ -2266,11 +2268,9 @@ def main() -> None:
     setup_logging()
     args = parse_args()
     
-    # If lookback is provided, automatically enable --once mode
-    if hasattr(args, 'lookback') and args.lookback:
-        if not args.once:
-            logger.info("lookback_enables_once_mode", lookback=args.lookback)
-        args.once = True
+    # Note: --lookback no longer automatically enables --once mode
+    # This allows the collector to scan through all batches within the lookback period
+    # If you want single-batch behavior, explicitly pass --once along with --lookback
 
     # Administration flags: clearing state or nuking DB should run and exit
     if getattr(args, "clear_last_seen", False):
