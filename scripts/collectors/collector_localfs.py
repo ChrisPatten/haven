@@ -363,6 +363,10 @@ class LocalFsCollector:
             "filename": path.name,
             "mtime": mtime,
         }
+        try:
+            meta["ctime"] = path.stat().st_ctime
+        except OSError:
+            pass
         if self.config.tags:
             meta["tags"] = self.config.tags
         return meta

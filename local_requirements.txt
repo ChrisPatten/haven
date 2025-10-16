@@ -1,32 +1,42 @@
 # Packages required to run the local (host) collector scripts on macOS
-# These are separate from container/service dependencies in requirements.txt
+# These are separate from container/service dependencies in pyproject.toml
 # Install: pip install -r local_requirements.txt
 
-# macOS Contacts bindings for collector_contacts.py
+# === macOS / platform-specific ===
+# PyObjC Contacts bindings (required for `collector_contacts.py` on macOS)
 pyobjc-framework-Contacts
 
-# HTTP clients
-httpx  # used by collector_contacts.py
-requests  # used by collector_imessage.py
+# === HTTP / networking ===
+# Used by collectors to post payloads to the gateway and call external services
+httpx  # used by collector_contacts.py (preferred client for contacts collector)
+requests  # used by imessage/localfs/image_enrichment for uploads and Ollama
 
-# JSON serialization
-orjson
+# === JSON / serialization / retry ===
+orjson  # faster JSON used by collectors when posting
+backoff  # retry helpers used by collectors (contacts, image enrichment)
 
-# Retry/backoff logic
-backoff
-
-# Database access (used by collector_imessage.py for --nuke-db and shared modules)
-psycopg[binary]
-
-# Phone number normalization (used by shared.people_normalization)
+# === Identifier normalization ===
+# shared.people_normalization expects these
 phonenumbers
-
-# Email domain validation (used by shared.people_normalization)
 idna
 
-# Testing utilities (optional, for local development)
+# === Image enrichment / OCR / vision ===
+# Used by `shared/image_enrichment.py` and the collectors that enrich images
+Pillow>=10.0.0
+pillow-heif>=0.13.0  # HEIC/HEIF support for Pillow
+python-dotenv  # environment variable loading for local runs (helps collectors)
+
+
+# === File format helpers / parsers ===
+biplist  # Apple plist parsing (collectors may read plists)
+
+# === Testing / development ===
 pytest
 
-# Note: Standard library modules used by collectors (no install needed):
-# - sqlite3, argparse, json, plistlib, hashlib, platform, pathlib, dataclasses, typing, uuid, datetime, time, tempfile, os, sys, re
+# Notes:
+# - The file intentionally includes some optional tooling (Tika, pytesseract)
+#   because local image/document enrichment and backfill scripts may use them.
+# - Keep this file for host/desktop development only. Service/container
+#   dependencies are governed by the project's service requirements and
+#   pyproject.toml / requirements.txt for reproducible deployments.
 

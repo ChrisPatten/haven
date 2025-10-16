@@ -1,161 +1,153 @@
-# Haven Platform Technical Reference
+# Haven Platform Technical Reference (Unified Schema v2)
 
 ## 1. System Overview
-Haven is a multi-service platform that ingests personal communication data, normalizes it into Postgres, embeds message chunks into Qdrant, and exposes hybrid search plus summarization through a FastAPI gateway.
 
-Core runtime components:
-- **Gateway API** (`services/gateway_api/app.py`) – public HTTP surface for search, ask/summary, catalog proxying, document retrieval/update/listing, and contact sync.
-- **Search Service** (`src/haven/search`) – hybrid lexical/vector engine providing ingestion, query, and admin endpoints.
-- **Catalog API** (`services/catalog_api/app.py`) – receives ingestion events, stores normalized threads/messages/chunks, provides document update endpoints, and aggregates context views.
-- **iMessage Collector** (`scripts/collectors/collector_imessage.py`) – macOS CLI that extracts iMessage data, enriches attachments via shared module, and POSTs normalized text to the gateway ingest endpoint.
-- **Local Files Collector** (`scripts/collectors/collector_localfs.py`) – watches a configurable directory, uploads binaries to the gateway‘s file ingest endpoint, and streams metadata/text extraction through the catalog pipeline.
-- **Embedding Service** (`services/embedding_service/worker.py`) – polls pending chunks, generates embeddings, and writes vectors to Qdrant.
-- **Shared Library** (`shared/`) – logging bootstrap, dependency checks, Postgres session helpers, image enrichment module, and reusable reporting queries.
-- **Backfill Script** (`scripts/backfill_image_enrichment.py`) – CLI utility to enrich images for already-ingested messages and trigger re-embedding.
+Haven ingests heterogeneous personal content (messages, local files, notes) into a unified Postgres schema, enriches binary artefacts, generates semantic embeddings, and exposes hybrid search plus summarisation through a FastAPI gateway. The core services are:
 
-## 2. Deployment Topology
-### 2.1 Container Orchestration
-`compose.yaml` defines the stack and optional profiles:
-- `postgres` – `postgres:15`, volume `pg_data`, initialized via `schema/init.sql`.
-- `qdrant` – `qdrant/qdrant:latest`, volume `qdrant_data`.
-- `search` – builds repo root with `SERVICE=search`; exposes port `8080` inside the network.
-- `gateway` – builds with `SERVICE=gateway`; publishes `127.0.0.1:8085 -> 8080`.
-- `catalog` – builds with `SERVICE=catalog`; listens on `8081` internally.
-- `embedding_service` – long-running embedding worker that polls catalog and writes vectors to Qdrant.
-- `minio` – object storage backing for raw file attachments; internal only, no host port exposed.
-- `collector` – optional profile running the iMessage collector against the gateway ingest endpoint.
-
-### 2.2 Dockerfile Build Pipeline
-1. **builder** stage installs service-specific optional dependencies declared in `pyproject.toml`.
-2. **runtime** stage copies wheels and the source tree.
-3. Entrypoint dispatches on `$SERVICE` (gateway, catalog, search, embedding_service, collector).
-4. Wheels are prebuilt per-service (`pip wheel .[<service>,common]`) to keep runtime images slim.
-
-### 2.3 Networks & Ports
-All services share the default compose network (`haven_default`). Only the gateway publishes a host port (8085). Other services communicate over the internal network using service names (`http://catalog:8081`, `http://search:8080`, `http://qdrant:6333`).
-
-## 3. Service Internals
-### 3.1 Gateway API
-- **Framework**: FastAPI with dependency-injected settings (`GatewaySettings`).
-- **Key Modules**: token enforcement middleware, `SearchServiceClient`, catalog proxy utilities, summarization helpers (`gateway_api/search/ask.py`).
-- **Routes**:
-  - `GET /v1/search` – forwards to search service and adapts the response into gateway models.
-  - `POST /v1/ask` – performs a follow-up search and synthesizes a text answer with citations.
-  - `POST /v1/ingest` – normalizes document payloads and forwards them to catalog.
-  - `POST /v1/ingest/file` – accepts multipart uploads, stores raw binaries in MinIO, extracts text, and creates catalog documents with attachment metadata.
-  - `GET /v1/ingest/{submission_id}` – returns ingest + embedding status for a submission.
-  - `GET /v1/doc/{doc_id}` – proxies to catalog and relays status codes verbatim.
-  - `PATCH /v1/catalog/documents/{doc_id}` – updates document metadata/text, attachment extraction status, and requeues chunks for re-embedding.
-  - `GET /v1/documents` – lists documents with optional filtering (source_type, has_attachments).
-  - `GET /v1/context/general` – proxies to catalog context endpoint while forwarding `CATALOG_TOKEN`.
-  - `GET /catalog/contacts/export` & `POST /catalog/contacts/ingest` – contact sync proxy endpoints.
-  - `GET /v1/healthz` – readiness probe.
-- **Environment**:
-  - `AUTH_TOKEN` (optional development guard), `CATALOG_BASE_URL` (`http://catalog:8081` default), `SEARCH_URL`, `CATALOG_TOKEN`, `SEARCH_TOKEN`.
-  - Database parameters used only for health/diagnostics when direct queries are needed.
-- **Error Handling**: Raises FastAPI HTTP exceptions on proxy failures; logs enriched request metadata via `shared.logging`.
-
-### 3.2 Search Service
-- **Entrypoint**: `haven.search.main:cli` (Typer). `serve` command boots uvicorn with lifespan events.
-- **Configuration**: `src/haven/search/config.py` uses `pydantic-settings` to gather Postgres DSN, Qdrant address, embedding metadata, and batching parameters.
-- **Persistence Layer**: `src/haven/search/db.py` manages async `psycopg` connections. Repositories under `repository/` encapsulate document/chunk CRUD.
-- **Pipelines**: `pipeline/ingestion.py` normalizes documents into chunks via `normalize_document` and `default_chunker`, writes records to Postgres, and marks chunks pending embedding.
-- **Search Flow**:
-  1. Query requests map to `SearchRequest` models (query text, filters, vector payloads).
-  2. Lexical search uses Postgres full-text search functions.
-  3. Vector search uses `QdrantClient.search` with configured collection and payload filters.
-  4. Results merge lexical and vector scores before returning ranked hits.
-- **Admin Operations**: `routes/admin.py` exposes health checks and maintenance utilities (e.g., clearing indexes, warm-up calls).
-
-### 3.3 Catalog API
-- **Entrypoint**: `services/catalog_api/app.py` (FastAPI).
-- **Database Access**: Uses synchronous `psycopg` connections via helpers in `shared.database`.
-- **Ingestion**: `POST /v1/catalog/documents` accepts normalized payloads, upserts threads/messages/chunks, and enqueues jobs in `embed_jobs`.
-- **Document Update**: `PATCH /v1/catalog/documents/{doc_id}` updates document metadata/text and optionally requeues chunks for re-embedding.
-- **Submission Status**: `GET /v1/catalog/submissions/{submission_id}` surfaces document + embedding progress to the gateway.
-- **Context Endpoints**: `GET /v1/context/general` runs aggregate queries from `shared.context` to produce thread counts, highlights, and top conversations.
-- **Document Retrieval**: `GET /v1/doc/{doc_id}` returns normalized message metadata and chunk text.
-- **Contacts**: Exposes contact ingest/export surfaces reused by gateway proxies.
-
-### 3.4 Collector
-- **CLI**: `collector_imessage.py` orchestrates chat database backup, delta scanning, message normalization, and HTTP posting to the gateway or catalog.
-- **Attachment Enrichment**:
-  - Uses the shared enrichment module (`shared/image_enrichment.py`) which encapsulates OCR, captioning, caching, and helper invocation.
-  - Invokes the optional Swift helper (`imdesc`) for OCR and entity extraction via macOS Vision.
-  - Can call an Ollama vision endpoint for captions when configured.
-  - Writes enrichment payloads into chunk text and message attributes; caches results under `~/.haven/imessage_image_cache.json` to avoid repeat processing.
-  - Falls back to configurable placeholder text when enrichment is disabled or fails.
-- **State Tracking**: Stores last processed row IDs in `~/.haven/imessage_collector_state.json` and can simulate messages via `--simulate` flag.
-
-### 3.5 Embedding Service
-- **Worker Loop**: `services/embedding_service/worker.py` polls `embed_jobs` for ready rows, fetches chunk bodies, and calls the configured embedding provider (`BAAI/bge-m3` by default).
-- **Vector Storage**: Uses `qdrant-client` to upsert embeddings into the configured collection (default `haven_chunks`).
-- **Error Handling**: Applies exponential backoff via `embed_jobs.next_attempt_at`, records JSON errors, and leaves jobs queued for retry.
-
-### 3.6 Shared Utilities
-- `shared/logging.py` configures structlog + JSON logging.
-- `shared/database.py` provides Postgres connection factories and context managers.
-- `shared/context.py` bundles aggregate queries for catalog context routes.
-- `shared/dependencies.py` guards against missing optional extras.
-- `shared/image_enrichment.py` – centralized image enrichment module providing:
-  - `run_imdesc_ocr()` – invokes native macOS Vision OCR helper
-  - `request_ollama_caption()` – calls Ollama vision models for image captions
-  - `sanitize_ocr_result()` – normalizes OCR output (text, boxes, entities)
-  - `build_image_facets()` – creates searchable facets from entities
-  - `enrich_image()` – high-level enrichment function with caching
-  - `ImageEnrichmentCache` – JSON-backed cache keyed by image blob hash
-
-### 3.7 Backfill Script
-- **CLI**: `scripts/backfill_image_enrichment.py` orchestrates enrichment backfill for already-ingested messages.
-- **Workflow**:
-  1. Queries gateway `GET /v1/documents?has_attachments=true` for documents with image attachments.
-  2. Optionally queries chat.db backup (when `--use-chat-db` is provided) to resolve attachment file paths.
-  3. For each document, resolves image file paths on disk and enriches images via `shared/image_enrichment.py`.
-  4. Updates documents via gateway `PATCH /v1/documents/{doc_id}` with enriched metadata and text.
-  5. Sets `requeue_for_embedding=true` to trigger automatic re-embedding via the embedding worker.
-  6. Outputs statistics: documents scanned, images found/missing/enriched, chunks requeued, errors.
-- **Configuration**: Uses `GATEWAY_URL` and `AUTH_TOKEN` environment variables.
-- **Flags**: `--dry-run`, `--limit`, `--batch-size`, `--use-chat-db`, `--chat-db`.
-
-## 4. Data Model
-- **Threads / Messages / Chunks** – Primary catalog tables storing normalized chat structure and chunked message bodies.
-- **ingest_submissions / documents** – Track ingestion deduplication, status, and metadata for each document.
-- **embed_jobs** – Queue state for embedding attempts, including retry counters and scheduling.
-- **search_documents / search_chunks** – Search service schema mirroring ingestion inputs; chunk table stores lexical metadata and embedding status.
-- **contacts** – Optional catalog table for normalized people records (populated by contacts collector).
-
-## 5. Configuration & Secrets
-| Variable | Scope | Notes |
+| Service | Responsibility | Entry Point |
 | --- | --- | --- |
-| `DATABASE_URL`, `DB_DSN` | Services & worker | Postgres DSN; search service uses async driver, others sync. |
-| `QDRANT_URL`, `QDRANT_COLLECTION`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` | Search & worker | Must stay aligned to avoid embedding mismatches. |
-| `AUTH_TOKEN`, `CATALOG_TOKEN`, `SEARCH_TOKEN` | Gateway, catalog, collectors | Enforce ingestion and query auth; collector forwards tokens. |
-| `CATALOG_BASE_URL`, `SEARCH_URL` | Gateway | Service discovery for internal proxies. |
-| `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `MINIO_SECURE` | Gateway | S3-compatible object store configuration for raw file attachments. |
-| `GATEWAY_URL`, `LOCALFS_MAX_FILE_MB`, `LOCALFS_REQUEST_TIMEOUT` | Local files collector | Determines gateway target, file size guardrails, and HTTP timeout. |
-| `GATEWAY_URL` | Backfill script | Gateway API endpoint for document queries and updates. |
-| `CATALOG_ENDPOINT`, `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` | Collector | Control ingestion targets and polling behavior. |
-| `IMDESC_CLI_PATH`, `IMDESC_TIMEOUT_SECONDS` | Shared enrichment module | Native macOS Vision OCR helper configuration. |
-| `OLLAMA_ENABLED`, `OLLAMA_API_URL`, `OLLAMA_VISION_MODEL`, `OLLAMA_CAPTION_PROMPT`, `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_MAX_RETRIES` | Shared enrichment module | Ollama vision captioning configuration. |
-| `IMAGE_PLACEHOLDER_TEXT`, `IMAGE_MISSING_PLACEHOLDER_TEXT` | Collector | Configurable placeholder text for disabled/missing images. |
-| `OLLAMA_BASE_URL`, `WORKER_POLL_INTERVAL`, `WORKER_BATCH_SIZE`, `EMBEDDING_REQUEST_TIMEOUT`, `EMBEDDING_MAX_BACKOFF` | Embedding service | Tuning knobs for throughput vs. load. |
+| **Gateway API** | Public HTTP surface for ingestion, search, ask/summarise, document retrieval/updates, contact sync | `services/gateway_api/app.py` |
+| **Catalog API** | Persists unified schema entities, manages document versioning, threads, file dedupe, chunk creation, and search forwarding | `services/catalog_api/app.py` |
+| **Search Service** | Hybrid lexical/vector search over `documents` + `chunks`; exposes ingestion/query/admin endpoints | `src/haven/search` |
+| **Embedding Worker** | Polls pending chunks, produces vectors, records embedding status, posts results to catalog | `services/embedding_service/worker.py` |
+| **Collectors** | Stream source-specific payloads into the gateway (`collector_imessage.py`, `collector_localfs.py`, plus optional contacts collector) | `scripts/collectors/` |
 
-Secrets are supplied via environment variables or `.env` files ignored by git. Sensitive local paths (`~/Library/Messages/chat.db`, `~/.haven/*` including image cache) remain on-device.
+Support components include Qdrant for vector storage and MinIO for raw binary attachments.
 
-## 6. Build, Test, and Quality Gates
-- **Dependencies**: Managed via `requirements.txt` or optional extras in `pyproject.toml` (`[project.optional-dependencies]`).
-- **Lint & Format**: `ruff` and `black` configured; repository still contains baseline violations noted in reports.
-- **Type Checking**: `mypy services shared` (search package currently excluded until stubs are updated).
-- **Tests**: Pytest suite under `tests/` covers gateway summarization, collector utilities (including image enrichment), and search models.
-- **Continuous Validation Suggestion**: `pytest`, `mypy services shared`, `ruff check .`, `docker compose config`.
+## 2. Data Model Summary
 
-## 7. Logging & Observability
-- All services call `shared.logging.setup_logging()` to emit JSON logs with contextual metadata.
-- Key events: `gateway_api_ready`, `ingest_event`, `embedded_chunks`, `collector_enriched_image`, `backfill_complete`.
-- Monitoring strategy relies on Docker logs or central aggregation when deployed beyond local development.
+The unified schema is defined in `schema/init.sql` and documented in `documentation/SCHEMA_unified_v2.md`. Key tables:
 
-## 8. Extension Points & Future Work
-- Replace FastAPI `on_event` startup hooks with lifespan context managers (per FastAPI deprecation notices).
-- Consolidate gateway `/v1/doc/{doc_id}` handling entirely within catalog when consumers can follow redirects.
-- Expand automated tests for catalog endpoints, embedding service failure scenarios, and collector end-to-end flows.
-- Introduce lint/type cleanups to enable strict gating on `ruff`, `black`, and `mypy`.
+| Table | Purpose | Highlights |
+| --- | --- | --- |
+| `documents` | Atomic content with versioning | `external_id`, `version_number`, `previous_version_id`, timeline fields, `people` JSONB, facet flags, workflow status |
+| `threads` | Conversation metadata | `external_id`, participants array, `first_message_at`, `last_message_at` |
+| `files` | Deduplicated binary objects | `content_sha256`, storage backend, enrichment payload (`ocr`, `caption`, `entities`) |
+| `document_files` | Document ↔ file mapping | Role (`attachment`, `extracted_from`), order, caption, filename override |
+| `chunks` | Text segments for lexical/vector search | `embedding_status` (`pending`, `processing`, `embedded`, `failed`), optional vector |
+| `chunk_documents` | Many-to-many chunk mapping | Supports multi-document chunks, stores ordinal & weight |
+| `ingest_submissions` | Idempotency tracker | Stores submission metadata, result doc ID, failure details |
+| `source_change_tokens` | Collector sync state | Stores last change token per source/device (used by contacts collector) |
+
+Active-document views (`active_documents`, `documents_with_files`, `thread_summary`) simplify read queries.
+
+## 3. Ingestion Pipeline
+
+1. **Collectors** generate source-specific payloads:
+   * iMessage collector normalises chat.db rows, enriches attachments, builds people/thread metadata, deduplicates via SHA256, and tracks per-message versions to avoid duplicates.
+   * Localfs collector uploads binaries to MinIO, extracts text, attaches image enrichment, and forwards v2 document payloads.
+   * Contacts collector converts address book entries into `contact` documents (metadata stored under `metadata.contact`, phone/email identifiers in the `people` array) and tracks change tokens.
+2. **Gateway** validates/normalises payloads (`/v1/ingest`, `/v1/ingest/file`), computes idempotency keys, adds timestamps and facet overrides, then forwards them to catalog.
+3. **Catalog** inserts into `ingest_submissions`, `documents`, `document_files`, `chunks`, `chunk_documents`, updates thread metadata, and returns `DocumentIngestResponse` with submission & version info.
+4. **Embedding worker** polls `chunks` with `embedding_status='pending'`, marks them `processing`, generates vectors, posts to `/v1/catalog/embeddings`, which sets `embedding_status='embedded'` and updates document workflow status.
+5. **Search service** queries `documents` / `chunks` for combined lexical/vector search and exposes timeline/facet filters.
+
+Versioning: `PATCH /v1/catalog/documents/{doc_id}/version` clones document state with incremental `version_number`, marks prior version inactive, and rebuilds chunks/file links.
+
+## 4. Gateway API Reference
+
+| Endpoint | Description |
+| --- | --- |
+| `POST /v1/ingest` | Accepts text documents; forwards v2 payload with timestamps, people, thread info, facet overrides |
+| `POST /v1/ingest/file` | Handles multipart uploads; stores in MinIO, extracts text, populates file descriptors (`content_sha256`, `object_key`, enrichment) |
+| `GET /v1/ingest/{submission_id}` | Returns catalog submission status: chunk counts, document status, errors |
+| `GET /v1/search` | Hybrid search; supports filters `has_attachments`, `source_type`, `person`, `thread_id`, `start_date`, `end_date`, `context_window` |
+| `POST /v1/ask` | Executes search & builds summarised answer with citations |
+| `GET /v1/doc/{doc_id}` / `PATCH /v1/documents/{doc_id}` | Document retrieval and metadata/text updates |
+| `GET /v1/context/general` | Returns aggregated timeline highlights & top threads (via catalog proxy) |
+| `GET /catalog/contacts/export` / `POST /catalog/contacts/ingest` | Contact synchronisation proxy (gateway now posts unified contact documents and handles deletions) |
+| `GET /v1/documents` | Simple listing (legacy) |
+| `GET /v1/healthz` | Gateway health probe |
+
+### Gateway Settings
+* `AUTH_TOKEN` – optional ingest/search guard.
+* `CATALOG_BASE_URL`, `CATALOG_TOKEN` – downstream credentials.
+* `SEARCH_URL`, `SEARCH_TOKEN` – search service proxy.
+* `MINIO_*` – object store for file uploads.
+
+## 5. Catalog API Reference
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /v1/catalog/documents` | Idempotent document insertion; handles threads, files, chunks, facet flags |
+| `PATCH /v1/catalog/documents/{doc_id}/version` | Creates a new version, copies/updates file links, rebuilds chunks |
+| `GET /v1/catalog/submissions/{submission_id}` | Submission state (catalog + embedding progress) |
+| `GET /v1/catalog/documents/{doc_id}/status` | Per-document chunk counts and status |
+| `POST /v1/catalog/embeddings` | Accepts embedding vectors, updates chunk + document workflow status |
+| `DELETE /v1/catalog/documents/{doc_id}` | Soft delete: removes file links, chunk associations, sets `is_active_version=false` |
+| `GET /v1/context/general` | Thread/document summary derived from unified schema |
+| `GET /v1/healthz` | Health probe |
+
+Logging binds `doc_id`, `external_id`, `source_type`, `version_number` for traceability.
+
+## 6. Search Service
+
+* **Config:** `SearchSettings` (defaults `postgresql://.../haven_v2`, `QDRANT_URL`, `EMBEDDING_MODEL`).
+* **Hybrid Logic:** `_build_where_clauses` translates request filters to SQL; downstream filters also run post-load (people, due dates). Thread context windows fetch neighbouring documents for thread queries.
+* **Ranking:** Recency boost (`content_timestamp`), attachment boost, source weighting (email > imessage > sms > others).
+* **Metadata:** Each `SearchHit` includes facets (`source_type`, `has_attachments`, `person`), timeline (UTC ISO), people array, and thread ID.
+* **Vector Search:** Uses Qdrant `Filter` with payload fields; fallback to lexical only when vector text absent.
+
+## 7. Embedding Worker
+
+* Polls `chunks` where `embedding_status = 'pending'`.
+* Marks chunk `processing`, loads text, skips empty chunks (sets `embedded` with no vector).
+* Calls Ollama (or configured provider) to generate embeddings then posts to catalog `/v1/catalog/embeddings` with chunk ID, model, dimensions.
+* Failures mark chunk `failed` (logs doc associations via `chunk_documents` table) – no automatic retry; manual intervention can reset `embedding_status` to `pending` if retry required.
+* Configuration via `WORKER_POLL_INTERVAL`, `WORKER_BATCH_SIZE`, `EMBEDDING_REQUEST_TIMEOUT`.
+* Note: The worker no longer uses an `embed_jobs` table or exponential backoff retry logic; it processes chunks directly from the `chunks` table.
+
+## 8. Collectors
+
+### iMessage
+* Backs up `chat.db`, tracks state in `~/.haven/imessage_collector_state.json`.
+* Version tracker (`imessage_versions.json`) stores message signatures (text hash, attachment hashes) to skip re-ingestion of unchanged events.
+* Enrichment includes OCR, caption, entities; attachments include SHA256, path, enrichment status.
+* Payload fields: `source_type="imessage"`, `source_provider="apple_messages"`, `people` array, thread metadata, facet overrides.
+* Supports `--disable-images` to skip enrichment and insert placeholders (`IMAGE_PLACEHOLDER_TEXT`, `IMAGE_MISSING_PLACEHOLDER_TEXT`).
+
+### Localfs
+* Watches configured directory, respects include/exclude patterns, dedupes by SHA256.
+* Uploads file to MinIO, extracts text (pdfminer for PDF, raw decode for text), attaches enrichment data for images.
+* Metadata includes mtime (`content_timestamp`), ctime (`content_created_at`), and tags; attachments use `content_sha256`, `object_key`, `storage_backend="minio"`.
+
+## 9. Backfill & Enrichment
+
+`python scripts/backfill_image_enrichment.py --use-chat-db` enriches historical images by fetching document metadata from gateway, locating files on disk, re-running OCR/captioning, and posting updates. Catalog updates file enrichment JSONB and requeues affected chunks, triggering new embeddings.
+
+## 10. Environment & Secrets
+
+| Variable | Used By | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | Catalog, gateway, embedding worker | Postgres DSN (`haven_v2` by default) |
+| `DB_DSN` | Search service (async) | Alternative DSN override (also defaults to `haven_v2`) |
+| `QDRANT_URL`, `QDRANT_COLLECTION` | Search service, embedding worker | Vector storage endpoint & collection |
+| `EMBEDDING_MODEL`, `EMBEDDING_DIM` | Search service, embedding worker | Model identifier and vector dimensionality |
+| `AUTH_TOKEN` | Gateway, collectors | Bearer auth for public endpoints |
+| `CATALOG_TOKEN` | Gateway, collectors | Downstream auth for catalog |
+| `MINIO_ENDPOINT` / `MINIO_*` | Gateway | Attachment object store configuration |
+| `CATALOG_ENDPOINT` | iMessage collector | Gateway ingest endpoint |
+| `GATEWAY_URL` | Localfs collector, backfill script | Gateway base URL |
+| `IMAGE_PLACEHOLDER_TEXT`, `IMAGE_MISSING_PLACEHOLDER_TEXT` | Collectors | Placeholder strings for disabled/missing images |
+| `IMDESC_CLI_PATH`, `OLLAMA_*` | Image enrichment | Optional OCR/caption settings |
+
+Secrets should be provided via `.env` files (gitignored), shell exports, or secret management tooling. Sensitive local files (`~/.haven`, chat.db backups) remain outside version control.
+
+## 11. Testing & Quality Gates
+
+* **Linting:** `ruff check .` (progressively enforce), `black .`.
+* **Typing:** `mypy services shared` (search service pending strict coverage).
+* **Testing:** `pytest` (gateway + shared modules) — extend coverage for catalog/search/worker flows.
+* **Smoke:** `docker compose up --build`, ingest sample data via collectors (`--simulate` for iMessage), verify `GET /v1/search` and embedding logs.
+
+## 12. Troubleshooting
+
+| Symptom | Diagnosis |
+| --- | --- |
+| `POST /v1/ingest` returns 409 | Submission idempotency – payload matches existing text hash/version; check version tracker for collector |
+| Chunks stuck `processing` | Embedding worker crash; reset `chunks.embedding_status` to `pending` |
+| Vector search returns zero results | Ensure `chunks.embedding_vector` populated (embedding worker running, `EMBEDDING_MODEL` aligned) |
+| Attachments missing enrichment | Validate local files still exist, OCR helper configured, Ollama reachable |
+| Search facet mismatch | Verify gateway forwards filters and search service logs processed filters |
+
+Refer to `documentation/unified_schema_v2_overview.md` for a high-level migration summary and to the functional guide for user-facing workflows.

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 import os
 import socket
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 import psycopg
@@ -27,7 +26,6 @@ class WorkerSettings(BaseModel):
     poll_interval: float = Field(default_factory=lambda: float(os.getenv("WORKER_POLL_INTERVAL", "2.0")))
     batch_size: int = Field(default_factory=lambda: int(os.getenv("WORKER_BATCH_SIZE", "8")))
     request_timeout: float = Field(default_factory=lambda: float(os.getenv("EMBEDDING_REQUEST_TIMEOUT", "15.0")))
-    max_backoff_seconds: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_MAX_BACKOFF", "300")))
 
 
 settings = WorkerSettings()
@@ -36,9 +34,8 @@ settings = WorkerSettings()
 @dataclass
 class PendingJob:
     chunk_id: str
-    doc_id: str
+    doc_ids: List[str]
     text: str
-    attempt: int
 
 
 class EmbeddingError(Exception):
@@ -51,73 +48,77 @@ def _worker_id() -> str:
     return f"{hostname}:{pid}"
 
 
-def dequeue_jobs(conn: psycopg.Connection, limit: int, worker_id: str) -> List[PendingJob]:
+def dequeue_jobs(conn: psycopg.Connection, limit: int) -> List[PendingJob]:
     jobs: List[PendingJob] = []
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             WITH candidates AS (
                 SELECT chunk_id
-                  FROM embed_jobs
-                 WHERE next_attempt_at <= NOW()
-                 ORDER BY next_attempt_at ASC
+                  FROM chunks
+                 WHERE embedding_status = 'pending'
+                 ORDER BY created_at ASC
                  FOR UPDATE SKIP LOCKED
                  LIMIT %(limit)s
             ),
-            locked AS (
-                UPDATE embed_jobs ej
-                   SET locked_by = %(worker_id)s,
-                       locked_at = NOW(),
-                       tries = ej.tries + 1
-                 WHERE ej.chunk_id IN (SELECT chunk_id FROM candidates)
-             RETURNING ej.chunk_id, ej.tries
-            ),
-            marked AS (
+            updated AS (
                 UPDATE chunks c
-                   SET status = 'embedding',
+                   SET embedding_status = 'processing',
                        updated_at = NOW()
-                 WHERE c.chunk_id IN (SELECT chunk_id FROM locked)
-             RETURNING c.chunk_id, c.doc_id, c.text
+                 WHERE c.chunk_id IN (SELECT chunk_id FROM candidates)
+             RETURNING c.chunk_id, c.text
             )
-            SELECT m.chunk_id, m.doc_id, m.text, l.tries
-              FROM marked m
-              JOIN locked l ON l.chunk_id = m.chunk_id
+            SELECT u.chunk_id, u.text, cd.doc_id
+              FROM updated u
+              LEFT JOIN chunk_documents cd ON cd.chunk_id = u.chunk_id
             """,
-            {"limit": limit, "worker_id": worker_id},
+            {"limit": limit},
         )
-        for row in cur.fetchall():
-            jobs.append(
-                PendingJob(
-                    chunk_id=str(row["chunk_id"]),
-                    doc_id=str(row["doc_id"]),
-                    text=row["text"],
-                    attempt=int(row["tries"]),
+        rows = cur.fetchall()
+
+    chunk_map: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        chunk_id = str(row["chunk_id"])
+        record = chunk_map.setdefault(chunk_id, {"text": row["text"], "doc_ids": []})
+        doc_id = row.get("doc_id")
+        if doc_id:
+            record.setdefault("doc_ids", []).append(str(doc_id))
+
+    for chunk_id, payload in chunk_map.items():
+        text = payload.get("text") or ""
+        if not text.strip():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE chunks
+                       SET embedding_status = 'embedded',
+                           embedding_model = NULL,
+                           embedding_vector = NULL,
+                           updated_at = NOW()
+                     WHERE chunk_id = %s
+                    """,
+                    (chunk_id,),
                 )
+            continue
+        jobs.append(
+            PendingJob(
+                chunk_id=chunk_id,
+                doc_ids=list({*payload.get("doc_ids", [])}),
+                text=text,
             )
+        )
+
     conn.commit()
     return jobs
 
 
 def mark_job_failed(conn: psycopg.Connection, job: PendingJob, error_message: str) -> None:
-    backoff_seconds = min(settings.max_backoff_seconds, max(2 ** min(job.attempt, 6), 1))
-    # Serialize error as JSON object for JSONB column
-    error_json = json.dumps({"message": error_message[:512], "attempt": job.attempt})
     with conn.cursor() as cur:
         cur.execute(
             """
-            UPDATE embed_jobs
-               SET last_error = %s::jsonb,
-                   locked_by = NULL,
-                   locked_at = NULL,
-                   next_attempt_at = NOW() + (%s * INTERVAL '1 second')
-             WHERE chunk_id = %s
-            """,
-            (error_json, backoff_seconds, job.chunk_id),
-        )
-        cur.execute(
-            """
             UPDATE chunks
-               SET status = 'queued',
+               SET embedding_status = 'failed',
+                   embedding_model = NULL,
                    updated_at = NOW()
              WHERE chunk_id = %s
             """,
@@ -171,7 +172,7 @@ def run_worker() -> None:
         try:
             with psycopg.connect(settings.database_url) as conn:
                 conn.autocommit = False
-                jobs = dequeue_jobs(conn, settings.batch_size, worker_id)
+                jobs = dequeue_jobs(conn, settings.batch_size)
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.error("embedding_job_dequeue_failed", error=str(exc))
             time.sleep(settings.poll_interval)
@@ -190,12 +191,13 @@ def run_worker() -> None:
                 try:
                     vector = request_embedding(ollama_client, job.text)
                     submit_embedding(catalog_client, job.chunk_id, vector)
-                    logger.info("embedding_job_completed", chunk_id=job.chunk_id, doc_id=job.doc_id)
+                    primary_doc = job.doc_ids[0] if job.doc_ids else None
+                    logger.info("embedding_job_completed", chunk_id=job.chunk_id, doc_id=primary_doc)
                 except Exception as exc:  # pragma: no cover - error path
                     logger.error(
                         "embedding_job_failed",
                         chunk_id=job.chunk_id,
-                        doc_id=job.doc_id,
+                        doc_ids=job.doc_ids,
                         error=str(exc),
                     )
                     try:
@@ -206,6 +208,7 @@ def run_worker() -> None:
                         logger.error(
                             "embedding_job_failure_mark_failed",
                             chunk_id=job.chunk_id,
+                            doc_ids=job.doc_ids,
                             error=str(db_exc),
                         )
                         # last resort: sleep briefly to avoid hot loop

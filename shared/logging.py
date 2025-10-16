@@ -19,16 +19,21 @@ def _coerce_level(level: str | int) -> int:
 class _StructlogShim:
     """Minimal structlog-like interface backed by stdlib logging."""
 
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, context: Dict[str, Any] | None = None):
         self._logger = logger
+        self._context: Dict[str, Any] = context or {}
 
-    def bind(self, **_: Any) -> "_StructlogShim":  # structlog compatibility
-        return self
+    def bind(self, **kwargs: Any) -> "_StructlogShim":  # structlog compatibility
+        new_context = self._context.copy()
+        new_context.update(kwargs)
+        return _StructlogShim(self._logger, new_context)
 
     def _log(self, level: int, event: str, **kwargs: Any) -> None:
+        payload: Dict[str, Any] = self._context.copy()
+        payload.update(kwargs)
         parts = [event]
-        if kwargs:
-            kv = " ".join(f"{key}={value!r}" for key, value in kwargs.items())
+        if payload:
+            kv = " ".join(f"{key}={value!r}" for key, value in payload.items())
             parts.append(kv)
         self._logger.log(level, " | ".join(parts))
 
@@ -83,5 +88,15 @@ def setup_logging(level: str | int = "INFO") -> None:
 
 def get_logger(name: str):
     if structlog is None:
-        return _StructlogShim(logging.getLogger(name))
-    return structlog.get_logger(name)
+        return _StructlogShim(logging.getLogger(name)).bind(
+            doc_id=None,
+            external_id=None,
+            source_type=None,
+            version_number=None,
+        )
+    return structlog.get_logger(name).bind(
+        doc_id=None,
+        external_id=None,
+        source_type=None,
+        version_number=None,
+    )

@@ -8,7 +8,7 @@ import mimetypes
 import os
 import tempfile
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Union, Literal
@@ -42,17 +42,22 @@ except ImportError:  # pragma: no cover
         )
 
 
-from haven.search.models import PageCursor, SearchHit as SearchServiceHit, SearchRequest
+from haven.search.models import (
+    PageCursor,
+    QueryFilter,
+    RangeFilter,
+    SearchHit as SearchServiceHit,
+    SearchRequest,
+)
 from haven.search.sdk import SearchServiceClient
 
-from shared.db import get_conn_str, get_connection
+from shared.db import get_conn_str, get_connection, get_active_document
 from shared.deps import assert_missing_dependencies
 from shared.logging import get_logger, setup_logging
 from shared.people_repository import (
     ContactAddress,
     ContactUrl,
     ContactValue,
-    PeopleRepository,
     PersonIngestRecord,
 )
 
@@ -309,6 +314,169 @@ class ContactIngestResponse(BaseModel):
     since_token_next: Optional[str] = None
 
 
+def _contact_external_id(source: str, record: PersonIngestRecord) -> str:
+    return f"contact:{source}:{record.external_id}"
+
+
+def _contact_people_entries(record: PersonIngestRecord) -> List[Dict[str, Any]]:
+    people: List[Dict[str, Any]] = []
+    for email in record.emails:
+        if email.value:
+            people.append(
+                {
+                    "identifier": email.value,
+                    "identifier_type": "email",
+                    "role": "contact",
+                    "label": email.label,
+                }
+            )
+    for phone in record.phones:
+        if phone.value:
+            people.append(
+                {
+                    "identifier": phone.value,
+                    "identifier_type": "phone",
+                    "role": "contact",
+                    "label": phone.label,
+                }
+            )
+    if record.display_name:
+        people.append(
+            {
+                "identifier": record.display_name,
+                "identifier_type": "name",
+                "role": "contact",
+            }
+        )
+    return people
+
+
+def _contact_metadata(record: PersonIngestRecord, text_sha: str) -> Dict[str, Any]:
+    def _values_to_dict(values: Sequence[ContactValue]) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        for value in values:
+            results.append(
+                {
+                    "value": value.value,
+                    "value_raw": value.value_raw,
+                    "label": value.label,
+                    "priority": value.priority,
+                    "verified": value.verified,
+                }
+            )
+        return results
+
+    contact_dict: Dict[str, Any] = {
+        "display_name": record.display_name,
+        "given_name": record.given_name,
+        "family_name": record.family_name,
+        "organization": record.organization,
+        "nicknames": list(record.nicknames),
+        "notes": record.notes,
+        "photo_hash": record.photo_hash,
+        "version": record.version,
+        "deleted": record.deleted,
+        "emails": _values_to_dict(record.emails),
+        "phones": _values_to_dict(record.phones),
+        "addresses": [asdict(addr) for addr in record.addresses],
+        "urls": [asdict(url) for url in record.urls],
+    }
+    return {
+        "source": "contacts",
+        "text_sha256": text_sha,
+        "contact": contact_dict,
+        "change_token": record.change_token,
+        "ingested_at": datetime.now(tz=UTC).isoformat(),
+    }
+
+
+def _contact_text(record: PersonIngestRecord) -> str:
+    lines: List[str] = []
+    if record.display_name:
+        lines.append(record.display_name)
+    if record.given_name or record.family_name:
+        parts = [part for part in (record.given_name, record.family_name) if part]
+        if parts:
+            lines.append("Name: " + " ".join(parts))
+    if record.organization:
+        lines.append(f"Organization: {record.organization}")
+    if record.nicknames:
+        lines.append("Nicknames: " + ", ".join(record.nicknames))
+    if record.emails:
+        lines.extend(f"Email: {value.value}" for value in record.emails if value.value)
+    if record.phones:
+        lines.extend(f"Phone: {value.value}" for value in record.phones if value.value)
+    if record.addresses:
+        for address in record.addresses:
+            parts = [
+                getattr(address, "street", None),
+                getattr(address, "city", None),
+                getattr(address, "region", None),
+                getattr(address, "postal_code", None),
+                getattr(address, "country", None),
+            ]
+            formatted = ", ".join(part for part in parts if part)
+            if formatted:
+                lines.append(f"Address: {formatted}")
+    if record.urls:
+        lines.extend(f"URL: {getattr(url, 'url', None)}" for url in record.urls if getattr(url, "url", None))
+    if record.notes:
+        lines.append("Notes: " + record.notes)
+    if not lines:
+        return f"Contact {record.external_id}"
+    return "\n".join(line.strip() for line in lines if line and line.strip())
+
+
+def _build_contact_document_payload(source: str, record: PersonIngestRecord) -> Dict[str, Any]:
+    external_id = _contact_external_id(source, record)
+    text = _contact_text(record)
+    text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    people = _contact_people_entries(record)
+    metadata = _contact_metadata(record, text_sha)
+    idempotency_key = hashlib.sha256(
+        f"{external_id}:{text_sha}:{record.version}:{record.deleted}".encode("utf-8")
+    ).hexdigest()
+    timestamp = datetime.now(tz=UTC).isoformat()
+    payload: Dict[str, Any] = {
+        "idempotency_key": idempotency_key,
+        "source_type": "contact",
+        "source_provider": source,
+        "source_id": external_id,
+        "external_id": external_id,
+        "title": record.display_name or record.organization or external_id,
+        "content_sha256": text_sha,
+        "content_timestamp": timestamp,
+        "content_timestamp_type": "modified",
+        "content_created_at": timestamp,
+        "text": text,
+        "mime_type": "text/plain",
+        "metadata": metadata,
+        "people": people,
+        "facet_overrides": {
+            "has_attachments": False,
+            "attachment_count": 0,
+        },
+    }
+    return payload
+
+
+def _catalog_sync_request(
+    method: str,
+    path: str,
+    correlation_id: str,
+    *,
+    json_payload: Optional[Dict[str, Any]] = None,
+) -> httpx.Response:
+    headers: Dict[str, str] = {"X-Correlation-ID": correlation_id}
+    if settings.catalog_token:
+        headers["Authorization"] = f"Bearer {settings.catalog_token}"
+    with httpx.Client(
+        base_url=settings.catalog_base_url,
+        timeout=CATALOG_TIMEOUT_SECONDS,
+    ) as client:
+        return client.request(method, path, json=json_payload, headers=headers)
+
+
 class ContactAddressSummary(BaseModel):
     label: Optional[str] = None
     city: Optional[str] = None
@@ -358,6 +526,7 @@ class LocalFileMeta(BaseModel):
     path: str
     filename: Optional[str] = None
     mtime: Optional[float] = None
+    ctime: Optional[float] = None
     tags: List[str] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="allow")
@@ -369,21 +538,55 @@ class IngestContentModel(BaseModel):
     encoding: Optional[str] = None
 
 
+class DocumentPerson(BaseModel):
+    identifier: str
+    identifier_type: Optional[str] = None
+    role: Optional[str] = None
+    display_name: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ThreadPayloadModel(BaseModel):
+    external_id: str
+    source_type: Optional[str] = None
+    source_provider: Optional[str] = None
+    title: Optional[str] = None
+    participants: List[DocumentPerson] = Field(default_factory=list)
+    thread_type: Optional[str] = None
+    is_group: Optional[bool] = None
+    participant_count: Optional[int] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    first_message_at: Optional[datetime] = None
+    last_message_at: Optional[datetime] = None
+
+
 class IngestRequestModel(BaseModel):
     source_type: str
     source_id: str
+    source_provider: Optional[str] = None
     title: Optional[str] = None
     canonical_uri: Optional[str] = None
     content: IngestContentModel
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    content_timestamp: Optional[datetime] = None
+    content_timestamp_type: Optional[str] = None
+    content_created_at: Optional[datetime] = None
+    content_modified_at: Optional[datetime] = None
+    people: List[DocumentPerson] = Field(default_factory=list)
+    thread_id: Optional[uuid.UUID] = None
+    thread: Optional[ThreadPayloadModel] = None
 
 
 class IngestSubmissionResponse(BaseModel):
     submission_id: str
+    doc_id: str
+    external_id: str
+    version_number: int
     status: str
-    doc_id: Optional[str] = None
-    total_chunks: int = 0
+    thread_id: Optional[str] = None
+    file_ids: List[str] = Field(default_factory=list)
     duplicate: bool = False
+    total_chunks: int = 0  # maintained for backward compatibility
 
 
 class IngestStatusResponse(BaseModel):
@@ -428,6 +631,63 @@ def _build_idempotency_key(source_type: str, source_id: str, text_hash: str) -> 
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
+def _ensure_utc(ts: Optional[datetime]) -> Optional[datetime]:
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC)
+
+
+def _timestamp_from_epoch(epoch: Optional[float]) -> Optional[datetime]:
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=UTC)
+
+
+def _serialize_people(people: Sequence[DocumentPerson]) -> List[Dict[str, Any]]:
+    return [person.model_dump(mode='json', exclude_none=True) for person in people]
+
+
+def _serialize_thread(thread: Optional[ThreadPayloadModel]) -> Optional[Dict[str, Any]]:
+    if thread is None:
+        return None
+    payload = thread.model_dump(mode='json', exclude_none=True)
+    if participants := payload.get("participants"):
+        payload["participants"] = [
+            participant for participant in participants if participant  # already dict
+        ]
+    return payload
+
+
+def _map_catalog_ingest_response(data: Dict[str, Any]) -> IngestSubmissionResponse:
+    file_ids = [str(fid) for fid in data.get("file_ids", [])]
+    return IngestSubmissionResponse(
+        submission_id=str(data["submission_id"]),
+        doc_id=str(data["doc_id"]),
+        external_id=data.get("external_id", ""),
+        version_number=int(data.get("version_number", 1)),
+        status=data.get("status", "submitted"),
+        thread_id=str(data["thread_id"]) if data.get("thread_id") else None,
+        file_ids=file_ids,
+        duplicate=bool(data.get("duplicate", False)),
+        total_chunks=int(data.get("total_chunks") or 0),
+    )
+
+
+def _parse_iso_datetime(value: Optional[str], *, param: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {param} value; expected ISO-8601",
+        ) from exc
+    return _ensure_utc(dt)
+
+
 def _make_correlation_id(prefix: str) -> str:
     now = datetime.now(tz=UTC).isoformat()
     return f"{prefix}_{now}_{uuid.uuid4().hex[:8]}"
@@ -454,6 +714,16 @@ def _error_response(
         content=envelope.model_dump(),
         headers={"X-Correlation-ID": correlation_id},
     )
+
+
+def _truncate_response(response: httpx.Response, limit: int = 200) -> str:
+    try:
+        text = response.text
+    except Exception:
+        return "<unavailable>"
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 
 def _extract_text(content: IngestContentModel) -> str:
@@ -844,38 +1114,96 @@ def ingest_contacts(
     records = [person.to_record() for person in payload.people]
     next_token = _resolve_next_token(payload.since_token, records)
 
+    accepted = 0
+    upserts = 0
+    deletes = 0
+    conflicts = 0
+    skipped = 0
+
     if not records:
         with get_connection(autocommit=False) as conn:
             _update_change_token(conn, source, payload.device_id, next_token)
             conn.commit()
         return ContactIngestResponse(
-            accepted=0,
-            upserts=0,
-            deletes=0,
-            conflicts=0,
-            skipped=0,
+            accepted=accepted,
+            upserts=upserts,
+            deletes=deletes,
+            conflicts=conflicts,
+            skipped=skipped,
             since_token_next=next_token,
         )
 
-    with get_connection(autocommit=False) as conn:
-        repo = PeopleRepository(conn, default_region=settings.contacts_default_region)
+    for record in records:
+        accepted += 1
+        external_id = _contact_external_id(source, record)
+        correlation_id = _make_correlation_id("gw_contact")
+        if record.deleted:
+            doc = get_active_document(external_id)
+            if not doc:
+                skipped += 1
+                continue
+            response = _catalog_sync_request(
+                "DELETE",
+                f"/v1/catalog/documents/{doc.doc_id}",
+                correlation_id,
+            )
+            if response.status_code in (status.HTTP_200_OK, status.HTTP_202_ACCEPTED):
+                deletes += 1
+            else:
+                conflicts += 1
+                logger.warning(
+                    "contact_delete_failed",
+                    doc_id=str(doc.doc_id),
+                    status_code=response.status_code,
+                    body=_truncate_response(response),
+                )
+            continue
+
+        payload_dict = _build_contact_document_payload(source, record)
+        response = _catalog_sync_request(
+            "POST",
+            "/v1/catalog/documents",
+            correlation_id,
+            json_payload=payload_dict,
+        )
+        if response.status_code not in (status.HTTP_200_OK, status.HTTP_202_ACCEPTED):
+            conflicts += 1
+            logger.warning(
+                "contact_upsert_failed",
+                external_id=external_id,
+                status_code=response.status_code,
+                body=_truncate_response(response),
+            )
+            continue
+
         try:
-            stats = repo.upsert_batch(source, records)
+            body = response.json()
+        except Exception:
+            body = {}
+        if body.get("duplicate"):
+            skipped += 1
+        else:
+            upserts += 1
+
+    with get_connection(autocommit=False) as conn:
+        try:
             _update_change_token(conn, source, payload.device_id, next_token)
             conn.commit()
         except Exception:
             conn.rollback()
             logger.exception(
-                "contacts_ingest_failed", source=source, device_id=payload.device_id
+                "contacts_token_update_failed",
+                source=source,
+                device_id=payload.device_id,
             )
             raise
 
     return ContactIngestResponse(
-        accepted=stats.accepted,
-        upserts=stats.upserts,
-        deletes=stats.deletes,
-        conflicts=stats.conflicts,
-        skipped=stats.skipped,
+        accepted=accepted,
+        upserts=upserts,
+        deletes=deletes,
+        conflicts=conflicts,
+        skipped=skipped,
         since_token_next=next_token,
     )
 
@@ -948,9 +1276,38 @@ async def ingest_document(
         payload.source_type, payload.source_id, text_hash
     )
 
-    catalog_payload = {
+    content_timestamp = _ensure_utc(payload.content_timestamp) or datetime.now(tz=UTC)
+    if payload.content_timestamp_type:
+        content_timestamp_type = payload.content_timestamp_type.lower()
+    else:
+        default_sent_sources = {"imessage", "sms", "email"}
+        content_timestamp_type = (
+            "sent" if payload.source_type in default_sent_sources else "created"
+        )
+    allowed_timestamp_types = {
+        "sent",
+        "received",
+        "modified",
+        "created",
+        "event_start",
+        "event_end",
+        "due",
+        "completed",
+    }
+    if content_timestamp_type not in allowed_timestamp_types:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="Invalid content_timestamp_type",
+        )
+    content_created_at = _ensure_utc(payload.content_created_at)
+    content_modified_at = _ensure_utc(payload.content_modified_at)
+    people_payload = _serialize_people(payload.people)
+    thread_payload = _serialize_thread(payload.thread)
+
+    catalog_payload: Dict[str, Any] = {
         "idempotency_key": idempotency_key,
         "source_type": payload.source_type,
+        "source_provider": payload.source_provider,
         "source_id": payload.source_id,
         "content_sha256": text_hash,
         "mime_type": payload.content.mime_type,
@@ -958,7 +1315,22 @@ async def ingest_document(
         "title": payload.title,
         "canonical_uri": payload.canonical_uri,
         "metadata": payload.metadata,
+        "content_timestamp": content_timestamp.isoformat(),
+        "content_timestamp_type": content_timestamp_type,
+        "people": people_payload,
     }
+    if payload.content_created_at or content_created_at:
+        catalog_payload["content_created_at"] = (
+            content_created_at or content_timestamp
+        ).isoformat()
+    if payload.content_modified_at or content_modified_at:
+        catalog_payload["content_modified_at"] = (
+            content_modified_at or content_timestamp
+        ).isoformat()
+    if payload.thread_id:
+        catalog_payload["thread_id"] = str(payload.thread_id)
+    if thread_payload:
+        catalog_payload["thread"] = thread_payload
 
     try:
         catalog_resp = await _catalog_request(
@@ -1005,7 +1377,15 @@ async def ingest_document(
     payload_json = catalog_resp.json()
     response.status_code = catalog_resp.status_code
     response.headers["X-Content-SHA256"] = text_hash
-    return IngestSubmissionResponse(**payload_json)
+    submission = _map_catalog_ingest_response(payload_json)
+    logger.info(
+        "ingest_submitted",
+        submission_id=submission.submission_id,
+        doc_id=submission.doc_id,
+        source_type=payload.source_type,
+        duplicate=submission.duplicate,
+    )
+    return submission
 
 
 @app.post(
@@ -1158,31 +1538,56 @@ async def ingest_file(
         extraction=extraction,
     )
 
-    attachment_payload: Dict[str, Any] = {
-        "object_key": object_key,
-        "filename": filename,
-        "content_type": content_type,
-        "size": len(file_bytes),
-        "sha256": file_sha,
-        "extraction_status": extraction.status,
-    }
-    if extraction.attachment_text and extraction.status == "ready":
-        attachment_payload["extracted_text"] = extraction.attachment_text
-    if extraction.error:
-        attachment_payload["error_json"] = extraction.error
+    content_timestamp = _timestamp_from_epoch(meta_payload.mtime) or datetime.now(tz=UTC)
+    content_created_at = _timestamp_from_epoch(meta_payload.ctime)
 
-    catalog_payload = {
+    file_descriptor: Dict[str, Any] = {
+        "content_sha256": file_sha,
+        "object_key": object_key,
+        "storage_backend": "minio",
+        "filename": filename,
+        "mime_type": content_type,
+        "size_bytes": len(file_bytes),
+        "enrichment_status": "pending",
+    }
+    if extraction.metadata:
+        file_descriptor["enrichment"] = extraction.metadata
+    if extraction.status == "failed":
+        file_descriptor["enrichment_status"] = "failed"
+
+    attachments: List[Dict[str, Any]] = [
+        {
+            "role": "attachment",
+            "attachment_index": 0,
+            "filename": filename,
+            "file": file_descriptor,
+        }
+    ]
+
+    catalog_payload: Dict[str, Any] = {
         "idempotency_key": f"localfs:{file_sha}",
         "source_type": source_type,
-        "source_id": file_sha,
-        "external_id": file_sha,
+        "source_provider": "filesystem",
+        "source_id": meta_payload.path,
+        "external_id": f"localfs:{file_sha}",
         "content_sha256": file_sha,
         "mime_type": content_type,
         "text": document_text,
         "title": filename,
         "metadata": metadata,
-        "attachments": [attachment_payload],
+        "content_timestamp": content_timestamp.isoformat(),
+        "content_timestamp_type": "modified",
+        "content_created_at": content_created_at.isoformat() if content_created_at else None,
+        "content_modified_at": content_timestamp.isoformat(),
+        "people": [],
+        "attachments": attachments,
+        "facet_overrides": {
+            "has_attachments": True,
+            "attachment_count": len(attachments),
+        },
     }
+    if catalog_payload.get("content_created_at") is None:
+        catalog_payload.pop("content_created_at")
 
     try:
         catalog_resp = await _catalog_request(
@@ -1227,24 +1632,26 @@ async def ingest_file(
         )
 
     payload_json = catalog_resp.json()
+    submission = _map_catalog_ingest_response(payload_json)
     response.status_code = catalog_resp.status_code
     response.headers["X-File-SHA256"] = file_sha
+    response.headers["X-Content-SHA256"] = file_sha
     response.headers["X-Object-Key"] = object_key
 
-    submission = FileIngestResponse(
-        **payload_json,
+    file_response = FileIngestResponse(
+        **submission.model_dump(),
         file_sha256=file_sha,
         object_key=object_key,
         extraction_status=extraction.status,
     )
     logger.info(
         "localfs_ingest_submitted",
-        doc_id=submission.doc_id,
-        submission_id=submission.submission_id,
-        duplicate=submission.duplicate,
+        doc_id=file_response.doc_id,
+        submission_id=file_response.submission_id,
+        duplicate=file_response.duplicate,
         extraction_status=extraction.status,
     )
-    return submission
+    return file_response
 
 
 @app.get("/v1/ingest/{submission_id}", response_model=IngestStatusResponse)
@@ -1302,7 +1709,17 @@ async def get_ingest_status(
         )
 
     payload_json = catalog_resp.json()
-    return IngestStatusResponse(**payload_json)
+    status_payload = IngestStatusResponse(
+        submission_id=str(payload_json.get("submission_id")),
+        status=payload_json.get("status", ""),
+        document_status=payload_json.get("document_status"),
+        doc_id=str(payload_json["doc_id"]) if payload_json.get("doc_id") else None,
+        total_chunks=int(payload_json.get("total_chunks") or 0),
+        embedded_chunks=int(payload_json.get("embedded_chunks") or 0),
+        pending_chunks=int(payload_json.get("pending_chunks") or 0),
+        error=payload_json.get("error"),
+    )
+    return status_payload
 
 
 class DocumentUpdateRequest(BaseModel):
@@ -1463,7 +1880,7 @@ def search_people(
     _: None = Depends(require_token),
 ) -> PeopleSearchResponse:
     facets = _parse_facets(request)
-    conditions: List[str] = ["p.deleted = FALSE"]
+    conditions: List[str] = ["d.source_type = 'contact'", "d.is_active_version = true"]
     params: List[Any] = []
 
     if q:
@@ -1471,50 +1888,58 @@ def search_people(
         conditions.append(
             """
             (
-                p.display_name ILIKE %s OR
-                p.given_name ILIKE %s OR
-                p.family_name ILIKE %s OR
-                p.organization ILIKE %s OR
-                %s = ANY(p.nicknames)
+                d.title ILIKE %s OR
+                d.text ILIKE %s OR
+                d.metadata->'contact'->>'organization' ILIKE %s
             )
             """
         )
-        params.extend([like, like, like, like, q])
+        params.extend([like, like, like])
 
     labels = [value.lower() for value in facets.get("label", [])]
     if labels:
         conditions.append(
             """
-            EXISTS (
-                SELECT 1 FROM person_identifiers pi_label
-                WHERE pi_label.person_id = p.person_id
-                  AND pi_label.label = ANY(%s)
+            (
+                EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(COALESCE(d.metadata->'contact'->'emails', '[]'::jsonb)) email
+                    WHERE email->>'label' = ANY(%s)
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(COALESCE(d.metadata->'contact'->'phones', '[]'::jsonb)) phone
+                    WHERE phone->>'label' = ANY(%s)
+                )
             )
             """
         )
-        params.append(tuple(labels))
+        label_tuple = tuple(labels)
+        params.extend([label_tuple, label_tuple])
 
     kinds = [value for value in facets.get("kind", [])]
     if kinds:
-        conditions.append(
-            """
-            EXISTS (
-                SELECT 1 FROM person_identifiers pi_kind
-                WHERE pi_kind.person_id = p.person_id
-                  AND pi_kind.kind = ANY(%s)
+        if "email" in kinds:
+            conditions.append(
+                """
+                jsonb_array_length(COALESCE(d.metadata->'contact'->'emails', '[]'::jsonb)) > 0
+                """
             )
-            """
-        )
-        params.append(tuple(kinds))
+        if "phone" in kinds:
+            conditions.append(
+                """
+                jsonb_array_length(COALESCE(d.metadata->'contact'->'phones', '[]'::jsonb)) > 0
+                """
+            )
 
     cities = facets.get("city", [])
     if cities:
         conditions.append(
             """
             EXISTS (
-                SELECT 1 FROM person_addresses pa_city
-                WHERE pa_city.person_id = p.person_id
-                  AND pa_city.city = ANY(%s)
+                SELECT 1
+                FROM jsonb_array_elements(COALESCE(d.metadata->'contact'->'addresses', '[]'::jsonb)) addr
+                WHERE addr->>'city' = ANY(%s)
             )
             """
         )
@@ -1525,9 +1950,9 @@ def search_people(
         conditions.append(
             """
             EXISTS (
-                SELECT 1 FROM person_addresses pa_region
-                WHERE pa_region.person_id = p.person_id
-                  AND pa_region.region = ANY(%s)
+                SELECT 1
+                FROM jsonb_array_elements(COALESCE(d.metadata->'contact'->'addresses', '[]'::jsonb)) addr
+                WHERE addr->>'region' = ANY(%s)
             )
             """
         )
@@ -1538,9 +1963,9 @@ def search_people(
         conditions.append(
             """
             EXISTS (
-                SELECT 1 FROM person_addresses pa_country
-                WHERE pa_country.person_id = p.person_id
-                  AND pa_country.country = ANY(%s)
+                SELECT 1
+                FROM jsonb_array_elements(COALESCE(d.metadata->'contact'->'addresses', '[]'::jsonb)) addr
+                WHERE addr->>'country' = ANY(%s)
             )
             """
         )
@@ -1548,54 +1973,24 @@ def search_people(
 
     orgs = facets.get("organization", [])
     if orgs:
-        conditions.append("p.organization = ANY(%s)")
+        conditions.append("d.metadata->'contact'->>'organization' = ANY(%s)")
         params.append(tuple(orgs))
 
-    conditions_sql = " AND ".join(conditions) if conditions else "TRUE"
+    where_clause = " AND ".join(conditions) if conditions else "TRUE"
 
-    base_query = f"""
+    sql = f"""
         SELECT
-            p.person_id,
-            p.display_name,
-            p.given_name,
-            p.family_name,
-            p.organization,
-            p.nicknames,
-            COALESCE(
-                jsonb_agg(DISTINCT jsonb_build_object(
-                    'kind', pi.kind,
-                    'value_raw', pi.value_raw,
-                    'value_canonical', pi.value_canonical,
-                    'label', pi.label
-                )) FILTER (WHERE pi.person_id IS NOT NULL),
-                '[]'::jsonb
-            ) AS identifiers,
-            COALESCE(
-                jsonb_agg(DISTINCT jsonb_build_object(
-                    'label', pa.label,
-                    'city', pa.city,
-                    'region', pa.region,
-                    'country', pa.country
-                )) FILTER (WHERE pa.person_id IS NOT NULL),
-                '[]'::jsonb
-            ) AS addresses
-        FROM people p
-        LEFT JOIN person_identifiers pi ON pi.person_id = p.person_id
-        LEFT JOIN person_addresses pa ON pa.person_id = p.person_id
-        WHERE {conditions_sql}
-        GROUP BY p.person_id
+            d.doc_id,
+            d.title,
+            d.metadata,
+            d.people,
+            d.text
+        FROM documents d
+        WHERE {where_clause}
+        ORDER BY d.title ASC
+        LIMIT %s OFFSET %s
     """
-
-    order_clause = "ORDER BY p.display_name ASC"
-    order_params: List[Any] = []
-    if q:
-        order_clause = (
-            "ORDER BY similarity(p.display_name, %s) DESC, p.display_name ASC"
-        )
-        order_params.append(q)
-
-    sql = f"{base_query} {order_clause} LIMIT %s OFFSET %s"
-    query_params = params + order_params + [limit, offset]
+    query_params = params + [limit, offset]
 
     with get_connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -1604,35 +1999,40 @@ def search_people(
 
     results: List[PeopleSearchHit] = []
     for row in rows:
-        identifiers = row.get("identifiers") or []
+        metadata = row.get("metadata") or {}
+        contact_meta = metadata.get("contact") or {}
         emails = [
-            ident.get("value_canonical") or ident.get("value_raw")
-            for ident in identifiers
-            if ident.get("kind") == "email"
+            entry.get("value")
+            for entry in contact_meta.get("emails", [])
+            if isinstance(entry, dict) and entry.get("value")
         ]
         phones = [
-            ident.get("value_canonical") or ident.get("value_raw")
-            for ident in identifiers
-            if ident.get("kind") == "phone"
+            entry.get("value")
+            for entry in contact_meta.get("phones", [])
+            if isinstance(entry, dict) and entry.get("value")
         ]
-        address_entries = [
-            ContactAddressSummary(
-                label=item.get("label"),
-                city=item.get("city"),
-                region=item.get("region"),
-                country=item.get("country"),
+        addresses_meta = contact_meta.get("addresses", [])
+        address_entries = []
+        for addr in addresses_meta:
+            if not isinstance(addr, dict):
+                continue
+            address_entries.append(
+                ContactAddressSummary(
+                    label=addr.get("label"),
+                    city=addr.get("city"),
+                    region=addr.get("region"),
+                    country=addr.get("country"),
+                )
             )
-            for item in (row.get("addresses") or [])
-        ]
 
         results.append(
             PeopleSearchHit(
-                person_id=str(row["person_id"]),
-                display_name=row.get("display_name"),
-                given_name=row.get("given_name"),
-                family_name=row.get("family_name"),
-                organization=row.get("organization"),
-                nicknames=row.get("nicknames") or [],
+                person_id=str(row["doc_id"]),
+                display_name=contact_meta.get("display_name") or row.get("title"),
+                given_name=contact_meta.get("given_name"),
+                family_name=contact_meta.get("family_name"),
+                organization=contact_meta.get("organization"),
+                nicknames=contact_meta.get("nicknames") or [],
                 emails=emails,
                 phones=phones,
                 addresses=address_entries,
@@ -1660,10 +2060,53 @@ def _parse_facets(request: Request) -> Dict[str, List[str]]:
 async def search_endpoint(
     q: str = Query(..., min_length=1),
     k: int = Query(20, ge=1, le=50),
+    has_attachments: Optional[bool] = Query(None),
+    source_type: Optional[str] = Query(None),
+    person: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    thread_id: Optional[str] = Query(None),
+    context_window: int = Query(0, ge=0, le=20),
     _: None = Depends(require_token),
     client: SearchServiceClient = Depends(get_search_client),
 ) -> SearchResponse:
-    request = SearchRequest(query=q, page=PageCursor(size=k))
+    filters: List[QueryFilter] = []
+    if has_attachments is not None:
+        filters.append(
+            QueryFilter(
+                term="has_attachments",
+                value="true" if has_attachments else "false",
+            )
+        )
+    if source_type:
+        filters.append(QueryFilter(term="source_type", value=source_type))
+    if person:
+        filters.append(QueryFilter(term="person", value=person))
+
+    start_dt = _parse_iso_datetime(start_date, param="start_date")
+    end_dt = _parse_iso_datetime(end_date, param="end_date")
+    if start_dt or end_dt:
+        filters.append(
+            QueryFilter(
+                range=RangeFilter(
+                    field="content_timestamp",
+                    gte=start_dt,
+                    lte=end_dt,
+                )
+            )
+        )
+
+    if thread_id:
+        filters.append(QueryFilter(term="thread_id", value=thread_id))
+        if context_window:
+            filters.append(QueryFilter(term="context_window", value=str(context_window)))
+
+    request = SearchRequest(
+        query=q,
+        page=PageCursor(size=k),
+        filter=filters,
+        facets=["source_type", "has_attachments", "person"],
+    )
     result = await client.asearch(request)
     hits = [convert_hit(hit) for hit in result.hits]
     return SearchResponse(query=q, results=hits)

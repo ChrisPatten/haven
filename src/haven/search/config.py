@@ -7,7 +7,10 @@ from pydantic import BaseModel, Field
 
 
 def _default_database_url() -> str:
-    return os.getenv("DB_DSN", os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/haven"))
+    return os.getenv(
+        "DB_DSN",
+        os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/haven_v2"),
+    )
 
 
 def _default_qdrant_url() -> str:

@@ -330,10 +330,14 @@ class BatchPoster:
             return {}
 
 
-def sync_contacts() -> None:
-    """Fetch contacts from macOS and POST them to the gateway ingest endpoint."""
+def sync_contacts(limit: Optional[int] = None) -> None:
+    """Fetch contacts from macOS and POST them to the gateway ingest endpoint.
+    
+    Args:
+        limit: Optional maximum number of contacts to process. If None, process all contacts.
+    """
     setup_logging()
-    logger.info("contacts_sync_start", source=SOURCE_NAME, device_id=DEVICE_ID)
+    logger.info("contacts_sync_start", source=SOURCE_NAME, device_id=DEVICE_ID, limit=limit)
 
     try:
         contacts = fetch_contacts()
@@ -344,6 +348,12 @@ def sync_contacts() -> None:
     if not contacts:
         logger.info("contacts_sync_complete", count=0)
         return
+
+    # Apply limit if specified
+    if limit is not None and limit > 0:
+        original_count = len(contacts)
+        contacts = contacts[:limit]
+        logger.info("contacts_limited", original_count=original_count, limited_to=len(contacts))
 
     # Convert contacts to PersonIngestRecord shape for the gateway
     people = []
@@ -399,12 +409,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run a single sync and exit (default behavior)",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of contacts to process (default: process all)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
-    parse_args()  # parse for help/validation but we always run once by default
-    sync_contacts()
+    args = parse_args()
+    sync_contacts(limit=args.limit)
 
 
 if __name__ == "__main__":

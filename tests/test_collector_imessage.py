@@ -373,3 +373,75 @@ def test_image_enrichment_cache_round_trip(tmp_path):
 
     cache_reload = collector.ImageEnrichmentCache(cache_path)
     assert cache_reload.get("abc") == {"caption": "hello"}
+
+
+def test_parse_time_bound_hours():
+    from datetime import timedelta
+    result = collector.parse_time_bound("12h")
+    assert result == timedelta(hours=12)
+
+
+def test_parse_time_bound_days():
+    from datetime import timedelta
+    result = collector.parse_time_bound("5d")
+    assert result == timedelta(days=5)
+
+
+def test_parse_time_bound_minutes():
+    from datetime import timedelta
+    result = collector.parse_time_bound("30m")
+    assert result == timedelta(minutes=30)
+
+
+def test_parse_time_bound_seconds():
+    from datetime import timedelta
+    result = collector.parse_time_bound("3600s")
+    assert result == timedelta(seconds=3600)
+
+
+def test_parse_time_bound_decimal():
+    from datetime import timedelta
+    result = collector.parse_time_bound("1.5h")
+    assert result == timedelta(hours=1.5)
+
+
+def test_parse_time_bound_invalid_unit():
+    import pytest
+    with pytest.raises(ValueError, match="Invalid time unit"):
+        collector.parse_time_bound("12x")
+
+
+def test_parse_time_bound_invalid_format():
+    import pytest
+    with pytest.raises(ValueError, match="Invalid time bound format"):
+        collector.parse_time_bound("abch")
+
+
+def test_parse_time_bound_negative():
+    import pytest
+    with pytest.raises(ValueError, match="Time bound must be positive"):
+        collector.parse_time_bound("-5d")
+
+
+def test_parse_time_bound_empty():
+    import pytest
+    with pytest.raises(ValueError, match="Time bound cannot be empty"):
+        collector.parse_time_bound("")
+
+
+def test_datetime_to_apple_epoch():
+    from datetime import datetime, timezone
+    # Test with a known date: 2001-01-02 (one day after Apple epoch)
+    dt = datetime(2001, 1, 2, 0, 0, 0, tzinfo=timezone.utc)
+    result = collector.datetime_to_apple_epoch(dt)
+    # One day in nanoseconds = 24 * 60 * 60 * 1_000_000_000
+    expected = 86400 * 1_000_000_000
+    assert result == expected
+
+
+def test_datetime_to_apple_epoch_at_epoch():
+    from datetime import datetime, timezone
+    # Test at Apple epoch
+    dt = datetime(2001, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    result = collector.datetime_to_apple_epoch(dt)
+    assert result == 0

@@ -3,43 +3,50 @@ from __future__ import annotations
 from contextlib import contextmanager
 from uuid import uuid4
 
+from fastapi import status
 from fastapi.testclient import TestClient
 
 import services.gateway_api.app as gateway_module
 from services.gateway_api.app import app as gateway_app
-from shared.people_repository import PersonIngestRecord, UpsertStats
 
 
-def test_contacts_ingest_invokes_repository(monkeypatch):
+def test_contacts_ingest_posts_documents(monkeypatch):
     gateway_module.settings.catalog_token = None
-    called: dict[str, object] = {}
+    captured: dict[str, object] = {"requests": []}
 
-    class DummyRepo:
-        def __init__(self, conn, *, default_region=None) -> None:
-            called["default_region"] = default_region
+    class DummyResponse:
+        def __init__(self, status_code: int, payload: dict[str, object]):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = ""
 
-        def upsert_batch(self, source: str, records: list[PersonIngestRecord]) -> UpsertStats:
-            called["source"] = source
-            called["records"] = records
-            return UpsertStats(accepted=len(records), upserts=len(records), deletes=0, conflicts=0, skipped=0)
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    def fake_catalog_sync_request(method: str, path: str, correlation_id: str, *, json_payload=None):
+        captured["requests"].append(
+            {"method": method, "path": path, "payload": json_payload, "correlation_id": correlation_id}
+        )
+        return DummyResponse(status.HTTP_202_ACCEPTED, {"duplicate": False})
 
     @contextmanager
     def fake_connection(*args, **kwargs):
         class DummyConn:
             def commit(self) -> None:
-                called["committed"] = True
+                captured["committed"] = True
 
             def rollback(self) -> None:
-                called["rolled_back"] = True
+                captured["rolled_back"] = True
 
         yield DummyConn()
 
     def fake_update_change_token(conn, source, device_id, token):
-        called["token"] = token
+        captured["token"] = token
 
-    monkeypatch.setattr(gateway_module, "PeopleRepository", DummyRepo)
+    monkeypatch.setattr(gateway_module, "_catalog_sync_request", fake_catalog_sync_request)
     monkeypatch.setattr(gateway_module, "get_connection", fake_connection)
     monkeypatch.setattr(gateway_module, "_update_change_token", fake_update_change_token)
+    monkeypatch.setattr(gateway_module, "get_active_document", lambda external_id: None)
 
     client = TestClient(gateway_app)
 
@@ -74,43 +81,38 @@ def test_contacts_ingest_invokes_repository(monkeypatch):
         "skipped": 0,
         "since_token_next": "cursor-1",
     }
-    assert called["source"] == "macos_contacts"
-    assert called["token"] == "cursor-1"
-    assert called.get("committed") is True
-    records = called["records"]
-    assert len(records) == 1
-    assert records[0].change_token == "cursor-1"
+    assert captured["token"] == "cursor-1"
+    assert captured.get("committed") is True
+    request_payload = captured["requests"][0]["payload"]
+    assert request_payload["source_type"] == "contact"
+    assert request_payload["people"][0]["identifier_type"] == "email"
+    assert request_payload["metadata"]["contact"]["display_name"] == "Alice Smith"
 
 
-def test_people_search_uses_facets(monkeypatch):
+def test_people_search_reads_contact_documents(monkeypatch):
     gateway_module.settings.api_token = ""
 
-    person_id = uuid4()
-    rows = [
-        {
-            "person_id": person_id,
+    doc_id = uuid4()
+    metadata = {
+        "contact": {
             "display_name": "Alice Smith",
             "given_name": "Alice",
             "family_name": "Smith",
             "organization": "Acme",
             "nicknames": ["Al"],
-            "identifiers": [
-                {
-                    "kind": "email",
-                    "value_canonical": "alice@example.com",
-                    "value_raw": "Alice@Example.com",
-                    "label": "work",
-                },
-                {
-                    "kind": "phone",
-                    "value_canonical": "+15085551234",
-                    "value_raw": "(508) 555-1234",
-                    "label": "mobile",
-                },
-            ],
-            "addresses": [
-                {"label": "home", "city": "Boston", "region": "MA", "country": "US"}
-            ],
+            "emails": [{"value": "alice@example.com", "label": "work"}],
+            "phones": [{"value": "+15085551234", "label": "mobile"}],
+            "addresses": [{"label": "home", "city": "Boston", "region": "MA", "country": "US"}],
+        }
+    }
+
+    rows = [
+        {
+            "doc_id": doc_id,
+            "title": "Alice Smith",
+            "metadata": metadata,
+            "people": [],
+            "text": "Alice Smith\nEmail: alice@example.com",
         }
     ]
 
@@ -151,4 +153,4 @@ def test_people_search_uses_facets(monkeypatch):
     assert data["results"][0]["emails"] == ["alice@example.com"]
     assert data["results"][0]["phones"] == ["+15085551234"]
     assert executed["row_factory"].__name__ == "dict_row"
-    assert "person_identifiers" in executed["sql"]
+    assert "FROM documents" in executed["sql"]

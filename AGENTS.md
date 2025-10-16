@@ -1,5 +1,67 @@
 # Repository Guidelines
 
+## Architecture: Host vs. Container Execution
+
+**IMPORTANT**: Haven uses a hybrid architecture:
+
+### **Services (Containerized)**
+The following run inside Docker containers via `docker compose`:
+- **gateway_api** (`:8085`) – Public HTTP API for ingestion, search, and retrieval
+- **catalog_api** (`:8081`) – Internal API for document/thread persistence (not exposed to host)
+- **search_service** (`:8080`) – Internal hybrid search engine (not exposed to host)
+- **embedding_service** – Background worker processing chunks (no HTTP interface)
+- **postgres** (`:5432`) – Database server
+- **qdrant** (`:6333`) – Vector database
+- **minio** (`:9000/:9001`) – Object storage for file attachments
+
+### **Collectors (Host Python Environment)**
+The following run on your **host machine** (macOS) using a local Python 3.11+ virtualenv:
+- `scripts/collectors/collector_imessage.py` – Reads `~/Library/Messages/chat.db`, posts to gateway API
+- `scripts/collectors/collector_localfs.py` – Watches filesystem, uploads files via gateway API
+- `scripts/collectors/collector_contacts.py` – Reads macOS Contacts.app, posts to gateway API
+- `scripts/backfill_image_enrichment.py` – Backfill utility, calls gateway API
+
+**Why this split?**
+- Collectors need **host filesystem access** (`~/Library/Messages/`, `~/Documents/`, etc.)
+- Collectors need **macOS-specific APIs** (Contacts.app via pyobjc, native Vision framework)
+- Services need **network isolation** and **reproducible deployment** (Docker)
+
+### **Interacting with Services**
+
+There are **only two ways** to interact with containerized services:
+
+#### Option 1: Via Gateway API (Recommended)
+All external interactions should go through the gateway on `http://localhost:8085`:
+```bash
+# Collectors automatically use this
+export AUTH_TOKEN="changeme"
+export GATEWAY_URL="http://localhost:8085"
+python scripts/collectors/collector_imessage.py
+
+# Manual API calls
+curl -H "Authorization: Bearer $AUTH_TOKEN" \
+  "http://localhost:8085/v1/search?q=dinner"
+```
+
+#### Option 2: Exec into Container (Debugging/Admin)
+For direct service interaction or database queries:
+```bash
+# Run commands inside the postgres container
+docker compose exec -T postgres psql -U postgres -d haven_v2 -f - < schema/init.sql
+docker compose exec postgres psql -U postgres -d haven_v2 -c "SELECT COUNT(*) FROM documents;"
+
+# Run Python commands inside the gateway container
+docker compose exec gateway python -c "from shared.db import get_connection; print('ok')"
+
+# View embedding worker logs
+docker compose logs -f embedding_service
+
+# Restart a specific service
+docker compose restart catalog
+```
+
+**Never** try to run service code directly on your host machine for production workflows – dependencies, database connections, and network assumptions differ.
+
 ## Layout & Ownership
 - `services/` houses deployable FastAPI apps and workers: `catalog_api`, `gateway_api`, and `embedding_service`.
 - Shared helpers live in `shared/`; reusable domain code (search pipelines, SDK) is packaged under `src/haven/`.
@@ -7,21 +69,46 @@
 - Tests reside in `tests/`, mirroring service names (e.g., `test_gateway_summary.py`).
 
 ## Day-to-Day Development
+
+### Starting Services (Containerized)
 ```bash
 export AUTH_TOKEN="changeme"      # required by gateway endpoints
-docker compose up --build          # start Postgres, Qdrant, and API stack
+docker compose up --build          # start all services (Postgres, Qdrant, APIs)
 
 # Postgres applies schema/init.sql on first boot; rerun manually if needed
-docker compose exec -T postgres psql -U postgres -d haven -f - < schema/init.sql
+docker compose exec -T postgres psql -U postgres -d haven_v2 -f - < schema/init.sql
 
+# Optional: run collector inside Docker (not recommended, use host-based instead)
+COMPOSE_PROFILES=collector docker compose up --build collector
+```
+
+### Running Collectors (Host Machine)
+Collectors run on your **host macOS system** with a local Python environment:
+
+```bash
+# Create and activate a Python 3.11+ virtualenv
+python3.11 -m venv env
+source env/bin/activate
+pip install -r requirements.txt
+
+# Run iMessage collector (reads ~/Library/Messages/chat.db)
+export AUTH_TOKEN="changeme"
+export GATEWAY_URL="http://localhost:8085"  # gateway running in Docker
 python scripts/collectors/collector_imessage.py [--simulate "Hi"]
 
-# macOS Contacts collector (pyobjc requirement)
+# Run macOS Contacts collector (requires pyobjc and Contacts.app permission)
 pip install -r local_requirements.txt
 python scripts/collectors/collector_contacts.py
+
+# Run local filesystem collector
+python scripts/collectors/collector_localfs.py --watch ~/Documents
 ```
-- Use `requirements.txt` with a Python 3.11 virtualenv when running services outside Docker.
-- To run the collector in Docker, enable the optional profile: `COMPOSE_PROFILES=collector docker compose up --build collector`.
+
+**Key Points:**
+- Collectors communicate with services **only via the gateway API** on `localhost:8085`
+- Collectors have direct filesystem access to your macOS home directory
+- Use `requirements.txt` for host Python dependencies (includes API clients, not service code)
+- Services run in Docker and are accessed via HTTP APIs or container exec commands
 
 ## Coding Style & Naming
 - Python 3.11, 4-space indentation, and type hints across services.
