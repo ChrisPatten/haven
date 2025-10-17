@@ -50,6 +50,13 @@ let package = Package(
             path: "Sources/Entity"
         ),
         
+        // Face: Vision framework face detection
+        .target(
+            name: "Face",
+            dependencies: ["HavenCore"],
+            path: "Sources/Face"
+        ),
+        
         // IMessages: Messages.app database collector
         .target(
             name: "IMessages",
@@ -75,6 +82,7 @@ let package = Package(
                 "HavenCore",
                 "OCR",
                 "Entity",
+                "Face",
                 "IMessages",
                 "FSWatch",
                 .product(name: "NIOCore", package: "swift-nio"),

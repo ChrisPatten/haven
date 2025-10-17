@@ -47,7 +47,7 @@ public struct ModulesHandler {
             reminders: SimpleModuleInfo(enabled: config.modules.reminders.enabled),
             mail: SimpleModuleInfo(enabled: config.modules.mail.enabled),
             notes: SimpleModuleInfo(enabled: config.modules.notes.enabled),
-            faces: SimpleModuleInfo(enabled: config.modules.faces.enabled)
+            face: SimpleModuleInfo(enabled: config.modules.face.enabled)
         )
         
         return HTTPResponse.ok(json: modules)
@@ -99,7 +99,7 @@ struct ModulesListResponse: Codable {
     let reminders: SimpleModuleInfo
     let mail: SimpleModuleInfo
     let notes: SimpleModuleInfo
-    let faces: SimpleModuleInfo
+    let face: SimpleModuleInfo
 }
 
 struct IMessageModuleInfo: Codable {

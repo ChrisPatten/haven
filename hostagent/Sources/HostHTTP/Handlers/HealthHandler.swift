@@ -58,14 +58,21 @@ public struct HealthHandler {
             extraInfo: ["watches_count": config.modules.fswatch.watches.count]
         ))
         
+        // Face detection module
+        summaries.append(ModuleSummary(
+            name: "face",
+            enabled: config.modules.face.enabled,
+            status: config.modules.face.enabled ? "ready" : "disabled",
+            extraInfo: nil
+        ))
+        
         // Stub modules
         for (name, moduleConfig) in [
             ("contacts", config.modules.contacts),
             ("calendar", config.modules.calendar),
             ("reminders", config.modules.reminders),
             ("mail", config.modules.mail),
-            ("notes", config.modules.notes),
-            ("faces", config.modules.faces)
+            ("notes", config.modules.notes)
         ] {
             summaries.append(ModuleSummary(
                 name: name,

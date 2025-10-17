@@ -477,6 +477,86 @@ modules:
 
 **Estimated Complexity:** Medium (3-4 hours)
 
+**Status:** ✅ **COMPLETED** (2025-10-17)
+
+**Implementation Summary:**
+
+The face detection module has been successfully implemented with the following features:
+
+* **Face Detection Service:** Core `FaceService` actor using Vision framework's `VNDetectFaceRectanglesRequest` and `VNDetectFaceLandmarksRequest`
+* **Bounding Box Detection:** Returns normalized coordinates (0-1 range) with automatic conversion from Vision's bottom-left origin to standard top-left coordinates
+* **Quality Scoring:** Calculates quality scores based on face size, confidence, and position (edge detection)
+* **Facial Landmarks:** Optional extraction of eye, nose, mouth, and pupil positions when `include_landmarks=true`
+* **HTTP Endpoint:** `POST /v1/face/detect` accepting both `image_path` and `image_data` (base64) inputs
+* **Configuration:** Full `FaceModuleConfig` with settings for:
+  * `min_face_size` - Minimum face size as fraction of image (default: 0.05)
+  * `min_confidence` - Minimum detection confidence (default: 0.8)
+  * `include_landmarks` - Toggle landmark extraction (default: false)
+* **Face ID Generation:** UUID placeholder for future face recognition integration
+
+**Files Created:**
+* `hostagent/Sources/Face/FaceService.swift` - Core face detection service
+* `hostagent/Sources/HostHTTP/Handlers/FaceHandler.swift` - HTTP handler for /v1/face/detect
+* `scripts/test_face_detection.py` - Comprehensive test script
+
+**Files Modified:**
+* `hostagent/Sources/HavenCore/Config.swift` - Added FaceModuleConfig
+* `hostagent/Sources/HostAgent/main.swift` - Registered face endpoint and service
+* `hostagent/Package.swift` - Added Face module target
+* `hostagent/Resources/default-config.yaml` - Added face configuration
+* `hostagent/Sources/HostHTTP/Handlers/HealthHandler.swift` - Added face module status
+* `hostagent/Sources/HostHTTP/Handlers/CapabilitiesHandler.swift` - Added FaceModuleCapability
+* `hostagent/Sources/HostHTTP/Handlers/ModulesHandler.swift` - Updated module listing
+
+**Testing:**
+
+A comprehensive test script has been provided at `scripts/test_face_detection.py`:
+
+```bash
+# Run hostagent
+cd hostagent && swift run hostagent
+
+# Test face detection (in another terminal)
+python3 scripts/test_face_detection.py /path/to/image.jpg
+python3 scripts/test_face_detection.py /path/to/image.jpg true  # with landmarks
+```
+
+**API Example:**
+
+```bash
+# Detect faces in an image
+curl -X POST http://localhost:7090/v1/face/detect \
+  -H "Content-Type: application/json" \
+  -H "x-auth: change-me" \
+  -d '{
+    "image_path": "/path/to/image.jpg",
+    "include_landmarks": false
+  }'
+
+# Response with detected faces
+{
+  "status": "success",
+  "data": {
+    "faces": [
+      {
+        "boundingBox": {"x": 0.3, "y": 0.2, "width": 0.15, "height": 0.2},
+        "confidence": 0.97,
+        "qualityScore": 0.85,
+        "landmarks": null,
+        "faceId": "550e8400-e29b-41d4-a716-446655440000"
+      }
+    ],
+    "imageSize": {"width": 1920, "height": 1080}
+  }
+}
+```
+
+**Future Enhancements:**
+* Integrate with Photos library for face recognition
+* Add face similarity/matching endpoint
+* Support face tracking across multiple images
+* Add age/emotion/attribute detection
+
 ---
 
 ### Unit 3.4 – FileWatcher Module
@@ -831,5 +911,6 @@ Each time the coding agent performs implementation or refactoring work on HostAg
 | 2025-10-16 | Initial Consolidation | Merged PRP, implementation guide, scaffolding summary, and status docs into unified plan |
 | 2025-10-16 | GitHub Copilot        | **Unit 3.1 Complete**: Enhanced OCR with layout extraction, language detection, recognition levels, bounding box coordinates, and HTTP endpoint. Added test script and updated configuration. |
 | 2025-10-17 | GitHub Copilot        | **Unit 3.2 Complete**: Natural language entity extraction using NaturalLanguage framework with NLTagger. Supports person, organization, and place entity types. Added standalone `/v1/entities` endpoint and integrated with OCR pipeline via `extract_entities` parameter. Includes test script and full configuration support. |
+| 2025-10-17 | GitHub Copilot        | **Unit 3.3 Complete**: Face detection module using Vision framework with `VNDetectFaceRectanglesRequest` and `VNDetectFaceLandmarksRequest`. Supports bounding boxes, quality scoring, optional facial landmarks. Added `POST /v1/face/detect` endpoint with both file path and base64 image support. Includes comprehensive test script and full configuration integration. |
 | (next)     | (agent)               | Document updates as development progresses                                               |
 

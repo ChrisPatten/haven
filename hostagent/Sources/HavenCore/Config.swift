@@ -55,34 +55,34 @@ public struct ModulesConfig: Codable {
     public var imessage: IMessageModuleConfig
     public var ocr: OCRModuleConfig
     public var entity: EntityModuleConfig
+    public var face: FaceModuleConfig
     public var fswatch: FSWatchModuleConfig
     public var contacts: StubModuleConfig
     public var calendar: StubModuleConfig
     public var reminders: StubModuleConfig
     public var mail: StubModuleConfig
     public var notes: StubModuleConfig
-    public var faces: StubModuleConfig
     
     public init(imessage: IMessageModuleConfig = IMessageModuleConfig(),
                 ocr: OCRModuleConfig = OCRModuleConfig(),
                 entity: EntityModuleConfig = EntityModuleConfig(),
+                face: FaceModuleConfig = FaceModuleConfig(),
                 fswatch: FSWatchModuleConfig = FSWatchModuleConfig(),
                 contacts: StubModuleConfig = StubModuleConfig(),
                 calendar: StubModuleConfig = StubModuleConfig(),
                 reminders: StubModuleConfig = StubModuleConfig(),
                 mail: StubModuleConfig = StubModuleConfig(),
-                notes: StubModuleConfig = StubModuleConfig(),
-                faces: StubModuleConfig = StubModuleConfig()) {
+                notes: StubModuleConfig = StubModuleConfig()) {
         self.imessage = imessage
         self.ocr = ocr
         self.entity = entity
+        self.face = face
         self.fswatch = fswatch
         self.contacts = contacts
         self.calendar = calendar
         self.reminders = reminders
         self.mail = mail
         self.notes = notes
-        self.faces = faces
     }
     
     public init(from decoder: Decoder) throws {
@@ -91,8 +91,9 @@ public struct ModulesConfig: Codable {
         imessage = try container.decode(IMessageModuleConfig.self, forKey: .imessage)
         ocr = try container.decode(OCRModuleConfig.self, forKey: .ocr)
         
-        // New field with default for backward compatibility
+        // New fields with defaults for backward compatibility
         entity = try container.decodeIfPresent(EntityModuleConfig.self, forKey: .entity) ?? EntityModuleConfig()
+        face = try container.decodeIfPresent(FaceModuleConfig.self, forKey: .face) ?? FaceModuleConfig()
         
         fswatch = try container.decode(FSWatchModuleConfig.self, forKey: .fswatch)
         contacts = try container.decode(StubModuleConfig.self, forKey: .contacts)
@@ -100,7 +101,6 @@ public struct ModulesConfig: Codable {
         reminders = try container.decode(StubModuleConfig.self, forKey: .reminders)
         mail = try container.decode(StubModuleConfig.self, forKey: .mail)
         notes = try container.decode(StubModuleConfig.self, forKey: .notes)
-        faces = try container.decode(StubModuleConfig.self, forKey: .faces)
     }
 }
 
@@ -189,6 +189,30 @@ public struct EntityModuleConfig: Codable {
         
         // New field with defaults for backward compatibility
         minConfidence = try container.decodeIfPresent(Float.self, forKey: .minConfidence) ?? 0.0
+    }
+}
+
+public struct FaceModuleConfig: Codable {
+    public var enabled: Bool
+    public var minFaceSize: Double
+    public var minConfidence: Double
+    public var includeLandmarks: Bool
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case minFaceSize = "min_face_size"
+        case minConfidence = "min_confidence"
+        case includeLandmarks = "include_landmarks"
+    }
+    
+    public init(enabled: Bool = true,
+                minFaceSize: Double = 0.01,
+                minConfidence: Double = 0.7,
+                includeLandmarks: Bool = false) {
+        self.enabled = enabled
+        self.minFaceSize = minFaceSize
+        self.minConfidence = minConfidence
+        self.includeLandmarks = includeLandmarks
     }
 }
 

@@ -71,10 +71,11 @@ public struct CapabilitiesHandler {
                     permissions: [:],
                     status: "stub"
                 ),
-                faces: StubModuleCapability(
-                    enabled: config.modules.faces.enabled,
-                    permissions: [:],
-                    status: "stub"
+                face: FaceModuleCapability(
+                    enabled: config.modules.face.enabled,
+                    minFaceSize: config.modules.face.minFaceSize,
+                    minConfidence: config.modules.face.minConfidence,
+                    includeLandmarks: config.modules.face.includeLandmarks
                 )
             )
         )
@@ -100,7 +101,7 @@ struct ModulesCapabilities: Codable {
     let reminders: StubModuleCapability
     let mail: StubModuleCapability
     let notes: StubModuleCapability
-    let faces: StubModuleCapability
+    let face: FaceModuleCapability
 }
 
 struct ModuleCapability<T: Codable>: Codable {
@@ -113,6 +114,20 @@ struct StubModuleCapability: Codable {
     let enabled: Bool
     let permissions: [String: Bool]
     let status: String
+}
+
+struct FaceModuleCapability: Codable {
+    let enabled: Bool
+    let minFaceSize: Double
+    let minConfidence: Double
+    let includeLandmarks: Bool
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case minFaceSize = "min_face_size"
+        case minConfidence = "min_confidence"
+        case includeLandmarks = "include_landmarks"
+    }
 }
 
 struct IMessageConfigInfo: Codable {

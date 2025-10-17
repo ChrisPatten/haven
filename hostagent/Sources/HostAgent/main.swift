@@ -2,6 +2,7 @@ import Foundation
 import ArgumentParser
 import HavenCore
 import HostHTTP
+import Face
 
 @main
 struct HavenHostAgent: AsyncParsableCommand {
@@ -78,6 +79,14 @@ struct HavenHostAgent: AsyncParsableCommand {
         let ocrHandler = OCRHandler(config: config)
         let entityHandler = EntityHandler(config: config)
         
+        // Initialize face service and handler
+        let faceService = FaceService(
+            minFaceSize: config.modules.face.minFaceSize,
+            minConfidence: config.modules.face.minConfidence,
+            includeLandmarks: config.modules.face.includeLandmarks
+        )
+        let faceHandler = FaceHandler(faceService: faceService, config: config.modules.face)
+        
         let handlers: [RouteHandler] = [
             // Core endpoints
             PatternRouteHandler(method: "GET", pattern: "/v1/health") { req, ctx in
@@ -103,6 +112,11 @@ struct HavenHostAgent: AsyncParsableCommand {
                 await entityHandler.handle(request: req, context: ctx)
             },
             
+            // Face detection endpoint
+            PatternRouteHandler(method: "POST", pattern: "/v1/face/detect") { req, ctx in
+                await faceHandler.handle(request: req)
+            },
+            
             // TODO: Add more handlers
             // - POST /v1/collectors/imessage:run (IMessageHandler)
             // - GET /v1/collectors/imessage/state (IMessageHandler)
@@ -115,39 +129,49 @@ struct HavenHostAgent: AsyncParsableCommand {
     }
     
     private func setupSignalHandlers() -> SignalWaiter {
-        let waiter = SignalWaiter()
-        
-        signal(SIGINT) { _ in
-            Task {
-                await SignalWaiter.shared.signal()
-            }
-        }
-        
-        signal(SIGTERM) { _ in
-            Task {
-                await SignalWaiter.shared.signal()
-            }
-        }
-        
-        return waiter
+        return SignalWaiter.shared
     }
 }
 
-/// Actor for waiting on shutdown signals
-actor SignalWaiter {
+/// Handles shutdown signals using DispatchSource
+final class SignalWaiter: @unchecked Sendable {
     static let shared = SignalWaiter()
     
     private var continuation: CheckedContinuation<Void, Never>?
+    private var signalSources: [DispatchSourceSignal] = []
+    private let lock = NSLock()
+    
+    private init() {
+        // Set up signal sources
+        setupSignalSource(for: SIGINT)
+        setupSignalSource(for: SIGTERM)
+    }
+    
+    private func setupSignalSource(for sig: Int32) {
+        // Ignore the signal in the default handler to prevent termination
+        Darwin.signal(sig, SIG_IGN)
+        
+        let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+        source.setEventHandler { [weak self] in
+            self?.triggerShutdown()
+        }
+        source.resume()
+        signalSources.append(source)
+    }
     
     func wait() async {
         await withCheckedContinuation { continuation in
+            lock.lock()
             self.continuation = continuation
+            lock.unlock()
         }
     }
     
-    func signal() {
+    private func triggerShutdown() {
+        lock.lock()
         continuation?.resume()
         continuation = nil
+        lock.unlock()
     }
 }
 

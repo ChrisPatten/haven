@@ -36,6 +36,12 @@ modules:
       - place
     min_confidence: 0.0  # Minimum confidence threshold (0.0-1.0)
   
+  face:
+    enabled: true
+    min_face_size: 0.01       # Minimum face size as fraction of image (0.0-1.0) - 1% allows waist-up shots
+    min_confidence: 0.7       # Minimum detection confidence (0.0-1.0)
+    include_landmarks: false  # Include facial landmarks (eyes, nose, mouth)
+  
   fswatch:
     enabled: false
     watches: []
@@ -53,7 +59,4 @@ modules:
     enabled: false
   
   notes:
-    enabled: false
-  
-  faces:
     enabled: false
