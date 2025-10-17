@@ -1,0 +1,49 @@
+# Default configuration for Haven Host Agent
+port: 7090
+
+auth:
+  header: x-auth
+  secret: change-me  # CHANGE THIS IN PRODUCTION!
+
+gateway:
+  base_url: http://gateway:8080
+  ingest_path: /v1/ingest
+  timeout: 30
+
+logging:
+  level: info
+  format: json
+
+modules:
+  imessage:
+    enabled: true
+    batch_size: 500
+    ocr_enabled: true
+  
+  ocr:
+    enabled: true
+    languages:
+      - en
+    timeout_ms: 2000
+  
+  fswatch:
+    enabled: false
+    watches: []
+  
+  contacts:
+    enabled: false
+  
+  calendar:
+    enabled: false
+  
+  reminders:
+    enabled: false
+  
+  mail:
+    enabled: false
+  
+  notes:
+    enabled: false
+  
+  faces:
+    enabled: false

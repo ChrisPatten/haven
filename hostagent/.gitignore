@@ -1,0 +1,36 @@
+# Swift build artifacts
+.build/
+*.xcodeproj
+*.xcworkspace
+.swiftpm/
+DerivedData/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Dependencies
+Packages/
+.package.resolved
+
+# Logs
+*.log
+logs/
+
+# Config (may contain secrets)
+hostagent.yaml
+.env
+
+# Test artifacts
+*.profraw
+*.profdata
+
+# Temporary files
+*.tmp
+temp/

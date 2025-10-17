@@ -14,36 +14,59 @@ The following run inside Docker containers via `docker compose`:
 - **qdrant** (`:6333`) – Vector database
 - **minio** (`:9000/:9001`) – Object storage for file attachments
 
-### **Collectors (Host Python Environment)**
-The following run on your **host machine** (macOS) using a local Python 3.11+ virtualenv:
-- `scripts/collectors/collector_imessage.py` – Reads `~/Library/Messages/chat.db`, posts to gateway API
-- `scripts/collectors/collector_localfs.py` – Watches filesystem, uploads files via gateway API
-- `scripts/collectors/collector_contacts.py` – Reads macOS Contacts.app, posts to gateway API
-- `scripts/backfill_image_enrichment.py` – Backfill utility, calls gateway API
+### **Host Agent (Native macOS Swift Service)**
+The following runs on your **host machine** (macOS) as a native Swift daemon:
+- **hostagent** (`:7090`) – Swift-based HTTP API providing localhost-only access to:
+  - **iMessage collector** – Reads `~/Library/Messages/chat.db` with safe snapshots, posts to gateway API
+  - **Vision OCR** – Native macOS Vision framework for text extraction (replaces `imdesc.swift`)
+  - **File system watch** – FSEvents-based monitoring with presigned URL uploads
+  - **Stub modules** – Contacts, Calendar, Reminders, Mail, Notes, Faces (future)
 
-**Why this split?**
-- Collectors need **host filesystem access** (`~/Library/Messages/`, `~/Documents/`, etc.)
-- Collectors need **macOS-specific APIs** (Contacts.app via pyobjc, native Vision framework)
+**Legacy Python Collectors (Deprecated)**
+The following are being migrated to the host agent:
+- `scripts/collectors/collector_imessage.py` – ⚠️ Use host agent `/v1/collectors/imessage:run` instead
+- `scripts/collectors/collector_localfs.py` – ⚠️ Use host agent `/v1/fs-watches` instead
+- `scripts/collectors/collector_contacts.py` – ⚠️ Stub in host agent
+- `scripts/collectors/imdesc.swift` – ⚠️ Use host agent `/v1/ocr` instead
+
+**Why this architecture?**
+- Host agent needs **host filesystem access** (`~/Library/Messages/`, `~/Documents/`, etc.)
+- Host agent needs **macOS-specific APIs** (Contacts.app, native Vision framework, FSEvents)
+- Host agent runs as **persistent daemon** (LaunchAgent) with TCC/FDA permissions
 - Services need **network isolation** and **reproducible deployment** (Docker)
+- **Native Swift** provides better performance, concurrency, and system integration than Python
 
 ### **Interacting with Services**
 
-There are **only two ways** to interact with containerized services:
+There are **three ways** to interact with Haven:
 
-#### Option 1: Via Gateway API (Recommended)
+#### Option 1: Via Gateway API (External/Containerized Services)
 All external interactions should go through the gateway on `http://localhost:8085`:
 ```bash
-# Collectors automatically use this
-export AUTH_TOKEN="changeme"
-export GATEWAY_URL="http://localhost:8085"
-python scripts/collectors/collector_imessage.py
-
 # Manual API calls
+export AUTH_TOKEN="changeme"
 curl -H "Authorization: Bearer $AUTH_TOKEN" \
   "http://localhost:8085/v1/search?q=dinner"
 ```
 
-#### Option 2: Exec into Container (Debugging/Admin)
+#### Option 2: Via Host Agent API (macOS-Specific Capabilities)
+Docker services access host capabilities via `host.docker.internal:7090`:
+```bash
+# From host machine
+curl -H "x-auth: changeme" http://localhost:7090/v1/health
+
+# From inside Docker container
+curl -H "x-auth: changeme" http://host.docker.internal:7090/v1/ocr \
+  -F "file=@/tmp/image.jpg"
+
+# Trigger iMessage collection
+curl -H "x-auth: changeme" \
+  -X POST http://host.docker.internal:7090/v1/collectors/imessage:run \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "tail", "batch_size": 200}'
+```
+
+#### Option 3: Exec into Container (Debugging/Admin)
 For direct service interaction or database queries:
 ```bash
 # Run commands inside the postgres container
@@ -64,11 +87,31 @@ docker compose restart catalog
 
 ## Layout & Ownership
 - `services/` houses deployable FastAPI apps and workers: `catalog_api`, `gateway_api`, and `embedding_service`.
+- `hostagent/` contains the Swift-based native macOS daemon (iMessage, OCR, FS watch).
 - Shared helpers live in `shared/`; reusable domain code (search pipelines, SDK) is packaged under `src/haven/`.
 - Infrastructure assets (`compose.yaml`, `Dockerfile`, `openapi.yaml`) and SQL migrations (`schema/`) sit at the root.
 - Tests reside in `tests/`, mirroring service names (e.g., `test_gateway_summary.py`).
 
 ## Day-to-Day Development
+
+### Starting Host Agent (macOS Native)
+```bash
+# One-time setup
+cd hostagent
+make install                       # builds and installs to /usr/local/bin
+make launchd                       # sets up auto-start LaunchAgent
+
+# Or run manually for development
+make run                           # debug build
+make dev                           # auto-reload on file changes (requires entr)
+
+# Check status
+make health                        # GET /v1/health
+make capabilities                  # GET /v1/capabilities
+
+# View logs
+tail -f ~/Library/Logs/Haven/hostagent.log
+```
 
 ### Starting Services (Containerized)
 ```bash
