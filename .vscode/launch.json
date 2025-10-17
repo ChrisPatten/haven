@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/haven-hostagent",
+            "name": "Debug haven-hostagent (haven-hostagent)",
+            "program": "${workspaceFolder:haven}/haven-hostagent/.build/debug/haven-hostagent",
+            "preLaunchTask": "swift: Build Debug haven-hostagent (haven-hostagent)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/haven-hostagent",
+            "name": "Release haven-hostagent (haven-hostagent)",
+            "program": "${workspaceFolder:haven}/haven-hostagent/.build/release/haven-hostagent",
+            "preLaunchTask": "swift: Build Release haven-hostagent (haven-hostagent)"
+        }
+    ]
+}

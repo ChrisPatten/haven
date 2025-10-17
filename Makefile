@@ -1,10 +1,19 @@
 # Makefile for common development tasks
 
-.PHONY: help rebuild purge local_setup start restart stop collector
+.PHONY: help rebuild purge local_setup start restart stop collector hostagent-install
+
+HOSTAGENT_DIR ?= haven-hostagent
+HOSTAGENT_CACHE_DIR ?= $(HOSTAGENT_DIR)/.swiftpm-cache
+HOSTAGENT_BUILD_DIR := $(HOSTAGENT_DIR)/.build
+HOSTAGENT_MODULE_CACHE_DIR ?= $(HOSTAGENT_DIR)/.clang-module-cache
+HOSTAGENT_BINARY := $(HOSTAGENT_BUILD_DIR)/release/haven-hostagent
+HOSTAGENT_INSTALL_PATH ?= /usr/local/bin/haven-hostagent
+HOSTAGENT_INSTALL_DIR := $(dir $(HOSTAGENT_INSTALL_PATH))
 
 help:
 	@echo "Available targets:"
 	@echo "  help                      Show this help"
+	@echo "  hostagent-install         Build Swift host agent and install to $(HOSTAGENT_INSTALL_PATH)"
 	@echo "  local_setup               Create/activate virtualenv and install local_requirements.txt"
 	@echo "  start                     Start docker compose services and follow logs"
 	@echo "  stop                      Stop docker compose services"
@@ -75,6 +84,24 @@ collector:
 			;; \
 	esac
 
+hostagent-install:
+	@echo "Building haven host agent..."
+	@mkdir -p "$(HOSTAGENT_CACHE_DIR)"
+	@mkdir -p "$(HOSTAGENT_MODULE_CACHE_DIR)"
+	@cd $(HOSTAGENT_DIR) && \
+		SWIFTPM_CUSTOM_CACHE_PATH="$(HOSTAGENT_CACHE_DIR)" \
+		swift build -c release --disable-sandbox --cache-path "$(HOSTAGENT_CACHE_DIR)" \
+			-Xcc -fmodules-cache-path="$(HOSTAGENT_MODULE_CACHE_DIR)"
+	@binary_path="$(HOSTAGENT_BINARY)"; \
+	if [ ! -f "$$binary_path" ]; then \
+		echo "Build failed: missing $$binary_path"; \
+		exit 1; \
+	fi
+	@echo "Installing binary to $(HOSTAGENT_INSTALL_PATH)"
+	@install -d "$(HOSTAGENT_INSTALL_DIR)"
+	@install -m 755 "$(HOSTAGENT_BINARY)" "$(HOSTAGENT_INSTALL_PATH)"
+	@echo "Installed haven-hostagent -> $(HOSTAGENT_INSTALL_PATH)"
+
 # Create or activate local Python virtualenv in ./env and install local_requirements.txt
 # Usage: make local_setup
 local_setup:
@@ -98,4 +125,3 @@ stop:
 # Restart running compose services
 restart:
 	@docker compose restart
-

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.haven.hostagent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/haven-hostagent</string>
+        <string>--config</string>
+        <string>${HOME}/.haven/hostagent.yaml</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${HOME}/Library/Application Support/Haven/hostagent</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${HOME}/Library/Logs/Haven/hostagent.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>${HOME}/Library/Logs/Haven/hostagent.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOST_AGENT_PORT</key>
+        <string>7090</string>
+    </dict>
+</dict>
+</plist>
