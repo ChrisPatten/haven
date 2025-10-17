@@ -3,6 +3,7 @@ import ArgumentParser
 import HavenCore
 import HostHTTP
 import Face
+import FSWatch
 
 @main
 struct HavenHostAgent: AsyncParsableCommand {
@@ -29,8 +30,20 @@ struct HavenHostAgent: AsyncParsableCommand {
             "gateway_url": config.gateway.baseUrl
         ])
         
+        // Initialize services
+        let fsWatchService = FSWatchService(
+            config: config.modules.fswatch,
+            maxQueueSize: config.modules.fswatch.eventQueueSize
+        )
+        
+        // Start FSWatch if enabled
+        if config.modules.fswatch.enabled {
+            try await fsWatchService.start()
+            logger.info("FSWatch service started")
+        }
+        
         // Build router with handlers
-        let router = buildRouter(config: config, configLoader: configLoader)
+        let router = buildRouter(config: config, configLoader: configLoader, fsWatchService: fsWatchService)
         
         // Create and start server
         let server = try HavenHTTPServer(config: config, router: router)
@@ -50,6 +63,10 @@ struct HavenHostAgent: AsyncParsableCommand {
             group.addTask {
                 await signalSource.wait()
                 logger.info("Shutdown signal received, stopping server...")
+                
+                // Stop services
+                await fsWatchService.stop()
+                
                 try await server.stop()
             }
             
@@ -69,7 +86,7 @@ struct HavenHostAgent: AsyncParsableCommand {
         print("")
     }
     
-    private func buildRouter(config: HavenConfig, configLoader: ConfigLoader) -> Router {
+    private func buildRouter(config: HavenConfig, configLoader: ConfigLoader, fsWatchService: FSWatchService) -> Router {
         let startTime = Date()
         
         let healthHandler = HealthHandler(config: config, startTime: startTime)
@@ -86,6 +103,9 @@ struct HavenHostAgent: AsyncParsableCommand {
             includeLandmarks: config.modules.face.includeLandmarks
         )
         let faceHandler = FaceHandler(faceService: faceService, config: config.modules.face)
+        
+        // Initialize FSWatch handler
+        let fsWatchHandler = FSWatchHandler(fsWatchService: fsWatchService, config: config.modules.fswatch)
         
         let handlers: [RouteHandler] = [
             // Core endpoints
@@ -117,12 +137,26 @@ struct HavenHostAgent: AsyncParsableCommand {
                 await faceHandler.handle(request: req)
             },
             
+            // FSWatch endpoints
+            PatternRouteHandler(method: "GET", pattern: "/v1/fs-watches/events") { req, ctx in
+                await fsWatchHandler.handlePollEvents(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "POST", pattern: "/v1/fs-watches/events:clear") { req, ctx in
+                await fsWatchHandler.handleClearEvents(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "GET", pattern: "/v1/fs-watches") { req, ctx in
+                await fsWatchHandler.handleListWatches(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "POST", pattern: "/v1/fs-watches") { req, ctx in
+                await fsWatchHandler.handleAddWatch(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "DELETE", pattern: "/v1/fs-watches/*") { req, ctx in
+                await fsWatchHandler.handleRemoveWatch(request: req, context: ctx)
+            },
+            
             // TODO: Add more handlers
             // - POST /v1/collectors/imessage:run (IMessageHandler)
             // - GET /v1/collectors/imessage/state (IMessageHandler)
-            // - POST /v1/fs-watches (FSWatchHandler)
-            // - GET /v1/fs-watches (FSWatchHandler)
-            // - DELETE /v1/fs-watches/{id} (FSWatchHandler)
         ]
         
         return Router(handlers: handlers)

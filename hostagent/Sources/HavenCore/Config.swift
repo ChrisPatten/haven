@@ -219,10 +219,24 @@ public struct FaceModuleConfig: Codable {
 public struct FSWatchModuleConfig: Codable {
     public var enabled: Bool
     public var watches: [FSWatchEntry]
+    public var eventQueueSize: Int
+    public var debounceMs: Int
     
-    public init(enabled: Bool = false, watches: [FSWatchEntry] = []) {
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case watches
+        case eventQueueSize = "event_queue_size"
+        case debounceMs = "debounce_ms"
+    }
+    
+    public init(enabled: Bool = false, 
+                watches: [FSWatchEntry] = [],
+                eventQueueSize: Int = 1000,
+                debounceMs: Int = 500) {
         self.enabled = enabled
         self.watches = watches
+        self.eventQueueSize = eventQueueSize
+        self.debounceMs = debounceMs
     }
 }
 

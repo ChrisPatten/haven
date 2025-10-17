@@ -44,7 +44,15 @@ modules:
   
   fswatch:
     enabled: false
+    event_queue_size: 1000  # Maximum number of events to queue
+    debounce_ms: 500        # Debounce interval for rapid file changes
     watches: []
+      # Example watch configuration:
+      # - id: downloads-watch
+      #   path: /Users/username/Downloads
+      #   glob: "*.{jpg,png,pdf}"
+      #   target: gateway
+      #   handoff: presigned
   
   contacts:
     enabled: false

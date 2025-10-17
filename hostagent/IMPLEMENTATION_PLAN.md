@@ -633,6 +633,165 @@ Response:
 
 ```yaml
 modules:
+  fswatch:
+    enabled: true
+    event_queue_size: 1000
+    debounce_ms: 500
+    directories:
+      - path: /Users/chrispatten/Downloads
+        patterns: ["*.jpg", "*.png", "*.pdf"]
+        events: [created, modified]
+      - path: /Users/chrispatten/Documents/Haven
+        patterns: ["*"]
+        events: [created]
+```
+
+**Testing:**
+
+* Test file creation, modification, deletion detection
+* Validate pattern filtering
+* Test queue overflow behavior
+* Test with rapid file operations
+
+**Estimated Complexity:** High (5-6 hours)
+
+**Status:** ✅ **COMPLETED** (2025-10-17)
+
+**Implementation Summary:**
+
+The FileWatcher module has been successfully implemented with comprehensive directory monitoring and event management capabilities:
+
+* **Core FSWatchService:** Actor-based service using `DispatchSource.makeFileSystemObjectSource` for efficient directory monitoring
+* **Multiple Watch Support:** Can monitor multiple directories simultaneously with individual glob patterns
+* **Event Debouncing:** Built-in 500ms debounce timer to prevent event flooding from rapid file changes
+* **Event Queue:** In-memory queue with configurable size (default 1000 events) with automatic overflow handling
+* **Glob Pattern Filtering:** Support for wildcard patterns (e.g., `*.txt`, `*.{jpg,png}`) to filter which files trigger events
+* **HTTP Endpoints:** Complete REST API for watch management and event polling:
+  * `GET /v1/fs-watches/events` - Poll events with optional limit, since timestamp, and acknowledgement
+  * `GET /v1/fs-watches` - List all active watches with statistics
+  * `POST /v1/fs-watches` - Add new watch dynamically
+  * `DELETE /v1/fs-watches/{id}` - Remove watch by ID
+  * `POST /v1/fs-watches/events:clear` - Clear all queued events
+* **Event Metadata:** Each event includes:
+  * Unique event ID
+  * Watch ID reference
+  * Event type (created, modified, deleted, renamed)
+  * Full file path
+  * Timestamp
+  * File size
+  * Filename and extension metadata
+* **Lifecycle Management:** Proper start/stop handling with graceful shutdown of all watchers
+
+**Files Created:**
+* `hostagent/Sources/FSWatch/FSWatchService.swift` - Core file watching service with DispatchSource integration
+* `hostagent/Sources/HostHTTP/Handlers/FSWatchHandler.swift` - HTTP handlers for all FSWatch endpoints
+* `scripts/test_fswatch.py` - Comprehensive test script
+
+**Files Modified:**
+* `hostagent/Sources/HavenCore/Config.swift` - Extended FSWatchModuleConfig with event_queue_size and debounce_ms
+* `hostagent/Sources/HostAgent/main.swift` - Registered FSWatch endpoints and service lifecycle
+* `hostagent/Resources/default-config.yaml` - Added FSWatch configuration with examples
+* `hostagent/Package.swift` - FSWatch module already existed in package structure
+
+**Testing:**
+
+A comprehensive test script has been provided at `scripts/test_fswatch.py`:
+
+```bash
+# Run hostagent (make sure fswatch is enabled in config)
+cd hostagent && swift run hostagent
+
+# Test file watching (in another terminal)
+python3 scripts/test_fswatch.py
+
+# Or test with a specific directory
+python3 scripts/test_fswatch.py /path/to/watch/directory
+```
+
+The test script validates:
+* Adding and removing watches
+* File creation detection
+* Event polling and acknowledgement
+* Event queue management
+* Watch statistics
+
+**API Examples:**
+
+Add a watch:
+```bash
+curl -X POST http://localhost:7090/v1/fs-watches \
+  -H "Content-Type: application/json" \
+  -H "x-auth: change-me" \
+  -d '{
+    "id": "downloads-watch",
+    "path": "/Users/username/Downloads",
+    "glob": "*.{jpg,png,pdf}",
+    "target": "gateway",
+    "handoff": "presigned"
+  }'
+```
+
+Poll events:
+```bash
+curl -X GET "http://localhost:7090/v1/fs-watches/events?limit=10&acknowledge=true" \
+  -H "x-auth: change-me"
+```
+
+List active watches:
+```bash
+curl -X GET http://localhost:7090/v1/fs-watches \
+  -H "x-auth: change-me"
+```
+
+**Technical Implementation Details:**
+
+* **FileSystemWatcher Class:** Private helper class managing individual directory watches with dedicated DispatchQueue
+* **Debouncing Strategy:** Uses DispatchSourceTimer to batch rapid events within 500ms window
+* **Error Handling:** Comprehensive validation for path existence, directory checks, and permission issues
+* **Thread Safety:** Full actor isolation for FSWatchService ensuring safe concurrent access
+* **Resource Management:** Proper cleanup with file descriptor closure and source cancellation
+
+**Future Enhancements:**
+* Add webhook support for real-time event pushing
+* Implement disk-based event persistence for queue overflow
+* Support recursive directory watching
+* Add more sophisticated pattern matching (regex support)
+* Integration with Haven gateway for automatic ingestion
+   * `POST /filewatcher/watch` - Add new directory to watch list
+   * `DELETE /filewatcher/watch` - Remove directory from watch list
+   * `GET /filewatcher/status` - List active watches and stats
+
+**API Example:**
+
+```json
+GET /filewatcher/events?since=<timestamp>&limit=10
+
+Response:
+{
+  "status": "success",
+  "data": {
+    "events": [
+      {
+        "id": "evt_123",
+        "type": "created",
+        "path": "/Users/me/Downloads/document.pdf",
+        "timestamp": "2025-10-16T14:30:00Z",
+        "size_bytes": 245678,
+        "metadata": {
+          "extension": "pdf",
+          "filename": "document.pdf"
+        }
+      }
+    ],
+    "has_more": false
+  }
+}
+```
+
+**Configuration Example:**
+
+```yaml
+modules:
   filewatcher:
     enabled: true
     directories:
@@ -882,9 +1041,11 @@ Collector should detect `HOSTAGENT_API_URL` and forward OCR tasks automatically.
 | --------- | ----------------------------------------------------- | ------------- | --------------------------------------- |
 | Phase 1   | Core daemon scaffolding and OCR implementation        | ✅ Complete    | Validate under real collector load      |
 | Phase 2   | Modularization and config management                  | ⏳ In progress | Implement module registry and config reload |
-| Phase 3   | Extended capabilities (entities, faces, file watcher) | ⏳ In progress | Units 3.1 & 3.2 complete, proceed to Unit 3.3 |
+| Phase 3   | Extended capabilities (entities, faces, file watcher) | ✅ Complete    | All units (3.1-3.4) complete, ready for integration testing |
 | Phase 3.1 | Enhanced OCR with layout and language detection       | ✅ Complete    | Ready for integration testing           |
 | Phase 3.2 | Natural Language entity extraction module             | ✅ Complete    | Ready for integration testing           |
+| Phase 3.3 | Face detection with landmarks and quality scoring     | ✅ Complete    | Ready for integration testing           |
+| Phase 3.4 | FileWatcher module with event queue and API           | ✅ Complete    | Ready for integration testing           |
 | Phase 4   | Performance tuning and packaging                      | ⏸ Planned     | Benchmark OCR throughput and memory use |
 
 ---
@@ -912,5 +1073,6 @@ Each time the coding agent performs implementation or refactoring work on HostAg
 | 2025-10-16 | GitHub Copilot        | **Unit 3.1 Complete**: Enhanced OCR with layout extraction, language detection, recognition levels, bounding box coordinates, and HTTP endpoint. Added test script and updated configuration. |
 | 2025-10-17 | GitHub Copilot        | **Unit 3.2 Complete**: Natural language entity extraction using NaturalLanguage framework with NLTagger. Supports person, organization, and place entity types. Added standalone `/v1/entities` endpoint and integrated with OCR pipeline via `extract_entities` parameter. Includes test script and full configuration support. |
 | 2025-10-17 | GitHub Copilot        | **Unit 3.3 Complete**: Face detection module using Vision framework with `VNDetectFaceRectanglesRequest` and `VNDetectFaceLandmarksRequest`. Supports bounding boxes, quality scoring, optional facial landmarks. Added `POST /v1/face/detect` endpoint with both file path and base64 image support. Includes comprehensive test script and full configuration integration. |
+| 2025-10-17 | GitHub Copilot        | **Unit 3.4 Complete**: FileWatcher module using DispatchSource for directory monitoring with debouncing, glob pattern filtering, and event queue management. Added complete REST API with endpoints for managing watches and polling events. Supports dynamic watch addition/removal and event acknowledgement. Includes comprehensive test script at `scripts/test_fswatch.py`. |
 | (next)     | (agent)               | Document updates as development progresses                                               |
 

@@ -1,6 +1,6 @@
 # Makefile for common development tasks
 
-.PHONY: help rebuild purge local_setup start restart stop collector
+.PHONY: help rebuild purge local_setup start restart stop collector backup restore list-backups
 
 help:
 	@echo "Available targets:"
@@ -17,6 +17,12 @@ help:
 	@echo "                            Example: make collector contacts"
 	@echo "                            Example: make collector imessage ARGS=\"--simulate 'Hi'\""
 	@echo "                            Example: make collector imessage ARGS=\"--lookback=1h\""
+	@echo "  backup [NAME]             Create a backup of Docker volumes and state files"
+	@echo "                            Optional: specify NAME for custom backup name"
+	@echo "                            Example: make backup NAME=before-migration"
+	@echo "  restore <name>            Restore from a backup (prompts for confirmation)"
+	@echo "                            Example: make restore NAME=before-migration"
+	@echo "  list-backups              List all available backups with details"
 
 # Rebuild docker compose services from scratch, start detached, and follow logs
 # Usage: make rebuild [SERVICE]
@@ -98,4 +104,33 @@ stop:
 # Restart running compose services
 restart:
 	@docker compose restart
+
+# Create a backup of Docker volumes and state files
+# Usage: make backup [NAME=<name>]
+# Example: make backup
+# Example: make backup NAME=before-migration
+backup:
+	@if [ -n "$(NAME)" ]; then \
+		./scripts/backup.sh "$(NAME)"; \
+	else \
+		./scripts/backup.sh; \
+	fi
+
+# Restore from a backup (prompts for confirmation)
+# Usage: make restore NAME=<backup_name>
+# Example: make restore NAME=before-migration
+restore:
+	@if [ -z "$(NAME)" ]; then \
+		echo "Error: Please specify a backup name"; \
+		echo "Usage: make restore NAME=<backup_name>"; \
+		echo ""; \
+		echo "Available backups:"; \
+		./scripts/list-backups.sh; \
+		exit 1; \
+	fi
+	@./scripts/restore.sh "$(NAME)"
+
+# List all available backups with details
+list-backups:
+	@./scripts/list-backups.sh
 
