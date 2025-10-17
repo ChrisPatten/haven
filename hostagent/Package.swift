@@ -43,6 +43,13 @@ let package = Package(
             path: "Sources/OCR"
         ),
         
+        // Entity: Natural Language entity extraction
+        .target(
+            name: "Entity",
+            dependencies: ["HavenCore"],
+            path: "Sources/Entity"
+        ),
+        
         // IMessages: Messages.app database collector
         .target(
             name: "IMessages",
@@ -67,6 +74,7 @@ let package = Package(
             dependencies: [
                 "HavenCore",
                 "OCR",
+                "Entity",
                 "IMessages",
                 "FSWatch",
                 .product(name: "NIOCore", package: "swift-nio"),

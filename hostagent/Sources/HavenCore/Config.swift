@@ -54,6 +54,7 @@ public struct GatewayConfig: Codable {
 public struct ModulesConfig: Codable {
     public var imessage: IMessageModuleConfig
     public var ocr: OCRModuleConfig
+    public var entity: EntityModuleConfig
     public var fswatch: FSWatchModuleConfig
     public var contacts: StubModuleConfig
     public var calendar: StubModuleConfig
@@ -64,6 +65,7 @@ public struct ModulesConfig: Codable {
     
     public init(imessage: IMessageModuleConfig = IMessageModuleConfig(),
                 ocr: OCRModuleConfig = OCRModuleConfig(),
+                entity: EntityModuleConfig = EntityModuleConfig(),
                 fswatch: FSWatchModuleConfig = FSWatchModuleConfig(),
                 contacts: StubModuleConfig = StubModuleConfig(),
                 calendar: StubModuleConfig = StubModuleConfig(),
@@ -73,6 +75,7 @@ public struct ModulesConfig: Codable {
                 faces: StubModuleConfig = StubModuleConfig()) {
         self.imessage = imessage
         self.ocr = ocr
+        self.entity = entity
         self.fswatch = fswatch
         self.contacts = contacts
         self.calendar = calendar
@@ -80,6 +83,24 @@ public struct ModulesConfig: Codable {
         self.mail = mail
         self.notes = notes
         self.faces = faces
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        imessage = try container.decode(IMessageModuleConfig.self, forKey: .imessage)
+        ocr = try container.decode(OCRModuleConfig.self, forKey: .ocr)
+        
+        // New field with default for backward compatibility
+        entity = try container.decodeIfPresent(EntityModuleConfig.self, forKey: .entity) ?? EntityModuleConfig()
+        
+        fswatch = try container.decode(FSWatchModuleConfig.self, forKey: .fswatch)
+        contacts = try container.decode(StubModuleConfig.self, forKey: .contacts)
+        calendar = try container.decode(StubModuleConfig.self, forKey: .calendar)
+        reminders = try container.decode(StubModuleConfig.self, forKey: .reminders)
+        mail = try container.decode(StubModuleConfig.self, forKey: .mail)
+        notes = try container.decode(StubModuleConfig.self, forKey: .notes)
+        faces = try container.decode(StubModuleConfig.self, forKey: .faces)
     }
 }
 
@@ -138,6 +159,36 @@ public struct OCRModuleConfig: Codable {
         // New fields with defaults for backward compatibility
         recognitionLevel = try container.decodeIfPresent(String.self, forKey: .recognitionLevel) ?? "fast"
         includeLayout = try container.decodeIfPresent(Bool.self, forKey: .includeLayout) ?? true
+    }
+}
+
+public struct EntityModuleConfig: Codable {
+    public var enabled: Bool
+    public var types: [String]
+    public var minConfidence: Float
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case types
+        case minConfidence = "min_confidence"
+    }
+    
+    public init(enabled: Bool = true, 
+                types: [String] = ["person", "organization", "place"],
+                minConfidence: Float = 0.0) {
+        self.enabled = enabled
+        self.types = types
+        self.minConfidence = minConfidence
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        types = try container.decode([String].self, forKey: .types)
+        
+        // New field with defaults for backward compatibility
+        minConfidence = try container.decodeIfPresent(Float.self, forKey: .minConfidence) ?? 0.0
     }
 }
 

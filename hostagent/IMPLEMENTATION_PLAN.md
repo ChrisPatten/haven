@@ -321,6 +321,72 @@ modules:
 
 **Estimated Complexity:** Medium (3-4 hours)
 
+**Status:** ✅ **COMPLETED** (2025-10-17)
+
+**Implementation Summary:**
+
+The natural language entity extraction module has been successfully implemented with the following features:
+
+* **Entity Types:** Support for person, organization, and place entity extraction using Apple's NaturalLanguage framework
+* **NLTagger Integration:** Uses `NLTagger` with `.nameType` scheme to identify named entities in text
+* **Enhanced Service:** New `EntityService` actor with configurable entity types and confidence thresholds
+* **HTTP Endpoint:** `POST /v1/entities` endpoint accepting:
+  * `text` (required) - text to analyze for entities
+  * `enabled_types` (optional) - array of entity types to extract
+  * `min_confidence` (optional) - minimum confidence threshold
+* **Configuration:** Updated `EntityModuleConfig` with:
+  * `enabled` - toggle entity extraction on/off
+  * `types` - list of entity types to extract by default
+  * `min_confidence` - default confidence threshold
+* **OCR Pipeline Integration:** Extended `/v1/ocr` endpoint with optional `extract_entities` parameter to automatically extract entities from OCR text
+* **Response Schema:** Structured entity objects with:
+  * `text` - the entity text
+  * `type` - entity classification (person, organization, place)
+  * `range` - character offset range in source text
+  * `confidence` - confidence score (currently 1.0 for NLTagger results)
+
+**Files Created:**
+* `hostagent/Sources/Entity/EntityService.swift` - Core entity extraction service
+* `hostagent/Sources/HostHTTP/Handlers/EntityHandler.swift` - HTTP handler for /v1/entities
+* `scripts/test_entity_extraction.py` - Test script for validation
+
+**Files Modified:**
+* `hostagent/Sources/HavenCore/Config.swift` - Added EntityModuleConfig
+* `hostagent/Sources/HostHTTP/Handlers/OCRHandler.swift` - Added entity extraction integration
+* `hostagent/Sources/HostAgent/main.swift` - Registered entity endpoint
+* `hostagent/Package.swift` - Added Entity module target
+* `hostagent/Resources/default-config.yaml` - Added entity configuration
+
+**Testing:**
+
+A comprehensive test script has been provided at `scripts/test_entity_extraction.py`:
+
+```bash
+# Run hostagent
+cd hostagent && swift run
+
+# Test entity extraction (in another terminal)
+python scripts/test_entity_extraction.py
+```
+
+**API Examples:**
+
+Standalone entity extraction:
+```bash
+curl -X POST http://localhost:7090/v1/entities \
+  -H "Content-Type: application/json" \
+  -H "x-auth: changeme" \
+  -d '{"text": "Meet John Smith at Apple Park on Monday"}'
+```
+
+OCR with entity extraction:
+```bash
+curl -X POST http://localhost:7090/v1/ocr \
+  -H "Content-Type: application/json" \
+  -H "x-auth: changeme" \
+  -d '{"image_path": "/path/to/image.jpg", "extract_entities": true}'
+```
+
 ---
 
 ### Unit 3.3 – Face Detection Module (Stub Implementation)
@@ -648,11 +714,13 @@ modules:
 | Method | Endpoint       | Description                               | Module       |
 | ------ | -------------- | ----------------------------------------- | ------------ |
 | `POST` | `/ocr`         | Perform OCR on provided image file path.  | OCRModule    |
-| `POST` | `/entities`    | Extract entities from text.               | EntityModule |
+| `POST` | `/entities`    | Extract named entities from text.         | EntityModule |
 | `GET`  | `/healthz`     | Returns agent health and enabled modules. | Core         |
 | `POST` | `/reload`      | Reload configuration from disk.           | Core         |
 | `POST` | `/face/detect` | (Future) Run face detection on image.     | FaceModule   |
 | `GET`  | `/config`      | Return current configuration.             | Core         |
+
+**Note:** All endpoints are prefixed with `/v1/` in the current implementation (e.g., `/v1/ocr`, `/v1/entities`).
 
 **Response Format Example**
 
@@ -734,8 +802,9 @@ Collector should detect `HOSTAGENT_API_URL` and forward OCR tasks automatically.
 | --------- | ----------------------------------------------------- | ------------- | --------------------------------------- |
 | Phase 1   | Core daemon scaffolding and OCR implementation        | ✅ Complete    | Validate under real collector load      |
 | Phase 2   | Modularization and config management                  | ⏳ In progress | Implement module registry and config reload |
-| Phase 3   | Extended capabilities (entities, faces, file watcher) | ⏳ In progress | Unit 3.1 complete, proceed to Unit 3.2  |
+| Phase 3   | Extended capabilities (entities, faces, file watcher) | ⏳ In progress | Units 3.1 & 3.2 complete, proceed to Unit 3.3 |
 | Phase 3.1 | Enhanced OCR with layout and language detection       | ✅ Complete    | Ready for integration testing           |
+| Phase 3.2 | Natural Language entity extraction module             | ✅ Complete    | Ready for integration testing           |
 | Phase 4   | Performance tuning and packaging                      | ⏸ Planned     | Benchmark OCR throughput and memory use |
 
 ---
@@ -761,5 +830,6 @@ Each time the coding agent performs implementation or refactoring work on HostAg
 | ---------- | --------------------- | ---------------------------------------------------------------------------------------- |
 | 2025-10-16 | Initial Consolidation | Merged PRP, implementation guide, scaffolding summary, and status docs into unified plan |
 | 2025-10-16 | GitHub Copilot        | **Unit 3.1 Complete**: Enhanced OCR with layout extraction, language detection, recognition levels, bounding box coordinates, and HTTP endpoint. Added test script and updated configuration. |
+| 2025-10-17 | GitHub Copilot        | **Unit 3.2 Complete**: Natural language entity extraction using NaturalLanguage framework with NLTagger. Supports person, organization, and place entity types. Added standalone `/v1/entities` endpoint and integrated with OCR pipeline via `extract_entities` parameter. Includes test script and full configuration support. |
 | (next)     | (agent)               | Document updates as development progresses                                               |
 

@@ -213,3 +213,6 @@ __marimo__/
 scripts/collect_context.sh
 
 .build/
+
+# Image files for use as test fixtures
+tests/fixtures/images/*

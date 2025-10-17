@@ -1,11 +1,13 @@
 import Foundation
 import HavenCore
 import OCR
+import Entity
 
-/// Handler for OCR endpoint
+/// Handler for OCR endpoint with optional entity extraction
 public struct OCRHandler {
     private let config: HavenConfig
     private let ocrService: OCRService
+    private let entityService: EntityService?
     private let logger = HavenLogger(category: "ocr-handler")
     
     public init(config: HavenConfig) {
@@ -16,6 +18,19 @@ public struct OCRHandler {
             recognitionLevel: config.modules.ocr.recognitionLevel,
             includeLayout: config.modules.ocr.includeLayout
         )
+        
+        // Initialize entity service if enabled
+        if config.modules.entity.enabled {
+            let enabledTypes = config.modules.entity.types.compactMap { typeString -> EntityType? in
+                EntityType(rawValue: typeString)
+            }
+            self.entityService = EntityService(
+                enabledTypes: enabledTypes.isEmpty ? EntityType.allCases : enabledTypes,
+                minConfidence: config.modules.entity.minConfidence
+            )
+        } else {
+            self.entityService = nil
+        }
     }
     
     public func handle(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
@@ -41,6 +56,7 @@ public struct OCRHandler {
         let imageDataBase64 = json["image_data"] as? String
         let recognitionLevel = json["recognition_level"] as? String
         let includeLayout = json["include_layout"] as? Bool
+        let extractEntities = json["extract_entities"] as? Bool ?? false
         
         // Validate input
         var imageData: Data? = nil
@@ -68,24 +84,34 @@ public struct OCRHandler {
                 includeLayout: includeLayout
             )
             
-            logger.info("OCR completed successfully", metadata: [
-                "text_length": result.ocrText.count,
-                "boxes": result.ocrBoxes.count,
-                "regions": result.regions?.count ?? 0
-            ])
+            logger.info("OCR completed successfully: text_length=\(result.ocrText.count), boxes=\(result.ocrBoxes.count), regions=\(result.regions?.count ?? 0)")
             
-            // Encode result
+            // Optionally extract entities from OCR text
+            var responseDict: [String: Any] = [:]
             let encoder = JSONEncoder()
             encoder.keyEncodingStrategy = .convertToSnakeCase
             let resultData = try encoder.encode(result)
+            responseDict = try JSONSerialization.jsonObject(with: resultData) as? [String: Any] ?? [:]
+            
+            if extractEntities, let entityService = self.entityService, !result.ocrText.isEmpty {
+                logger.info("Extracting entities from OCR text")
+                let entityResult = try await entityService.extractEntities(from: result.ocrText)
+                responseDict["entities"] = try JSONSerialization.jsonObject(
+                    with: encoder.encode(entityResult.entities)
+                ) as? [[String: Any]]
+                logger.info("Entity extraction completed: entities_found=\(entityResult.totalEntities)")
+            }
+            
+            // Encode final response
+            let finalData = try JSONSerialization.data(withJSONObject: responseDict)
             
             return HTTPResponse(
                 statusCode: 200,
                 headers: ["Content-Type": "application/json"],
-                body: resultData
+                body: finalData
             )
         } catch {
-            logger.error("OCR processing failed", metadata: ["error": error.localizedDescription])
+            logger.error("OCR processing failed: \(error.localizedDescription)")
             return HTTPResponse.internalError(message: "OCR processing failed: \(error.localizedDescription)")
         }
     }

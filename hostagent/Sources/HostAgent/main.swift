@@ -76,6 +76,7 @@ struct HavenHostAgent: AsyncParsableCommand {
         let metricsHandler = MetricsHandler()
         let modulesHandler = ModulesHandler(config: config, configLoader: configLoader)
         let ocrHandler = OCRHandler(config: config)
+        let entityHandler = EntityHandler(config: config)
         
         let handlers: [RouteHandler] = [
             // Core endpoints
@@ -95,6 +96,11 @@ struct HavenHostAgent: AsyncParsableCommand {
             // OCR endpoint
             PatternRouteHandler(method: "POST", pattern: "/v1/ocr") { req, ctx in
                 await ocrHandler.handle(request: req, context: ctx)
+            },
+            
+            // Entity extraction endpoint
+            PatternRouteHandler(method: "POST", pattern: "/v1/entities") { req, ctx in
+                await entityHandler.handle(request: req, context: ctx)
             },
             
             // TODO: Add more handlers
