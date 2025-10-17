@@ -25,6 +25,8 @@ modules:
     languages:
       - en
     timeout_ms: 2000
+    recognition_level: fast  # Options: fast, accurate
+    include_layout: true     # Include bounding boxes and language detection
   
   fswatch:
     enabled: false

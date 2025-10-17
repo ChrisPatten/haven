@@ -201,6 +201,47 @@ Response:
 
 **Estimated Complexity:** Medium (3-4 hours)
 
+**Status:** ✅ **COMPLETED** (2025-10-16)
+
+**Implementation Summary:**
+
+The enhanced OCR module has been successfully implemented with the following features:
+
+* **Recognition Levels:** Support for both `fast` and `accurate` Vision API recognition modes, configurable via config file or per-request
+* **Enhanced Response Schema:** New `OCRResult` structure includes:
+  * `regions` array with detailed text blocks, bounding boxes, and confidence scores
+  * `detectedLanguages` array for identified languages
+  * `recognitionLevel` field indicating which mode was used
+* **Bounding Box Extraction:** Full spatial layout information with normalized coordinates (0-1 range)
+* **Coordinate System Conversion:** Proper conversion from Vision's bottom-left origin to standard top-left coordinates
+* **HTTP Endpoint:** `POST /v1/ocr` endpoint accepting:
+  * `image_path` or `image_data` (base64) - image input
+  * `recognition_level` (optional) - override config default
+  * `include_layout` (optional) - control region extraction
+* **Configuration:** Updated `OCRModuleConfig` with `recognition_level` and `include_layout` options
+* **Backward Compatibility:** Existing `ocr_boxes` field maintained for compatibility
+
+**Files Modified:**
+* `hostagent/Sources/HavenCore/Config.swift` - Extended OCRModuleConfig
+* `hostagent/Sources/OCR/OCRService.swift` - Enhanced OCR processing logic
+* `hostagent/Sources/HostHTTP/Handlers/OCRHandler.swift` - New HTTP handler (created)
+* `hostagent/Sources/HostAgent/main.swift` - Registered OCR endpoint
+* `hostagent/Resources/default-config.yaml` - Updated default configuration
+* `scripts/test_enhanced_ocr.py` - Test script (created)
+
+**Testing:**
+
+A test script has been provided at `scripts/test_enhanced_ocr.py` that can be used to validate the implementation:
+
+```bash
+# Run hostagent
+cd hostagent && swift run
+
+# Test with an image (in another terminal)
+python scripts/test_enhanced_ocr.py /path/to/image.png
+python scripts/test_enhanced_ocr.py /path/to/image.png accurate true
+```
+
 ---
 
 ### Unit 3.2 – Natural Language Entity Extraction Module
@@ -689,12 +730,13 @@ Collector should detect `HOSTAGENT_API_URL` and forward OCR tasks automatically.
 
 ## Progress Tracking
 
-| Phase   | Description                                           | Status        | Next Steps                                  |
-| ------- | ----------------------------------------------------- | ------------- | ------------------------------------------- |
-| Phase 1 | Core daemon scaffolding and OCR implementation        | ✅ Complete    | Validate under real collector load          |
-| Phase 2 | Modularization and config management                  | ⏳ In progress | Implement module registry and config reload |
-| Phase 3 | Extended capabilities (entities, faces, file watcher) | ⏸ Planned     | Design NaturalLanguage integration          |
-| Phase 4 | Performance tuning and packaging                      | ⏸ Planned     | Benchmark OCR throughput and memory use     |
+| Phase     | Description                                           | Status        | Next Steps                              |
+| --------- | ----------------------------------------------------- | ------------- | --------------------------------------- |
+| Phase 1   | Core daemon scaffolding and OCR implementation        | ✅ Complete    | Validate under real collector load      |
+| Phase 2   | Modularization and config management                  | ⏳ In progress | Implement module registry and config reload |
+| Phase 3   | Extended capabilities (entities, faces, file watcher) | ⏳ In progress | Unit 3.1 complete, proceed to Unit 3.2  |
+| Phase 3.1 | Enhanced OCR with layout and language detection       | ✅ Complete    | Ready for integration testing           |
+| Phase 4   | Performance tuning and packaging                      | ⏸ Planned     | Benchmark OCR throughput and memory use |
 
 ---
 
@@ -718,5 +760,6 @@ Each time the coding agent performs implementation or refactoring work on HostAg
 | Date       | Author                | Summary                                                                                  |
 | ---------- | --------------------- | ---------------------------------------------------------------------------------------- |
 | 2025-10-16 | Initial Consolidation | Merged PRP, implementation guide, scaffolding summary, and status docs into unified plan |
+| 2025-10-16 | GitHub Copilot        | **Unit 3.1 Complete**: Enhanced OCR with layout extraction, language detection, recognition levels, bounding box coordinates, and HTTP endpoint. Added test script and updated configuration. |
 | (next)     | (agent)               | Document updates as development progresses                                               |
 

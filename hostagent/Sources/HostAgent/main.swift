@@ -62,7 +62,7 @@ struct HavenHostAgent: AsyncParsableCommand {
     
     private func printBanner() {
         print("╔════════════════════════════════════════════════╗")
-        print("║     🏠 Haven Host Agent v1.0.0                ║")
+        print("║     🏠 Haven Host Agent v1.0.0                 ║")
         print("║     Native macOS capabilities API              ║")
         print("╚════════════════════════════════════════════════╝")
         print("")
@@ -75,6 +75,7 @@ struct HavenHostAgent: AsyncParsableCommand {
         let capabilitiesHandler = CapabilitiesHandler(config: config)
         let metricsHandler = MetricsHandler()
         let modulesHandler = ModulesHandler(config: config, configLoader: configLoader)
+        let ocrHandler = OCRHandler(config: config)
         
         let handlers: [RouteHandler] = [
             // Core endpoints
@@ -91,8 +92,12 @@ struct HavenHostAgent: AsyncParsableCommand {
                 await modulesHandler.handleList(request: req, context: ctx)
             },
             
+            // OCR endpoint
+            PatternRouteHandler(method: "POST", pattern: "/v1/ocr") { req, ctx in
+                await ocrHandler.handle(request: req, context: ctx)
+            },
+            
             // TODO: Add more handlers
-            // - POST /v1/ocr (OCRHandler)
             // - POST /v1/collectors/imessage:run (IMessageHandler)
             // - GET /v1/collectors/imessage/state (IMessageHandler)
             // - POST /v1/fs-watches (FSWatchHandler)

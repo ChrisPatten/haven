@@ -105,17 +105,39 @@ public struct OCRModuleConfig: Codable {
     public var enabled: Bool
     public var languages: [String]
     public var timeoutMs: Int
+    public var recognitionLevel: String
+    public var includeLayout: Bool
     
     enum CodingKeys: String, CodingKey {
         case enabled
         case languages
         case timeoutMs = "timeout_ms"
+        case recognitionLevel = "recognition_level"
+        case includeLayout = "include_layout"
     }
     
-    public init(enabled: Bool = true, languages: [String] = ["en"], timeoutMs: Int = 2000) {
+    public init(enabled: Bool = true, 
+                languages: [String] = ["en"], 
+                timeoutMs: Int = 2000,
+                recognitionLevel: String = "fast",
+                includeLayout: Bool = true) {
         self.enabled = enabled
         self.languages = languages
         self.timeoutMs = timeoutMs
+        self.recognitionLevel = recognitionLevel
+        self.includeLayout = includeLayout
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        languages = try container.decode([String].self, forKey: .languages)
+        timeoutMs = try container.decode(Int.self, forKey: .timeoutMs)
+        
+        // New fields with defaults for backward compatibility
+        recognitionLevel = try container.decodeIfPresent(String.self, forKey: .recognitionLevel) ?? "fast"
+        includeLayout = try container.decodeIfPresent(Bool.self, forKey: .includeLayout) ?? true
     }
 }
 
