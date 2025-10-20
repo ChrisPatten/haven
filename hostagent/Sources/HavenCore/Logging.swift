@@ -49,10 +49,16 @@ public struct HavenLogger {
         // Convert to JSON string
         if let jsonData = try? JSONSerialization.data(withJSONObject: logData, options: [.sortedKeys]),
            let jsonString = String(data: jsonData, encoding: .utf8) {
+            // Primary sink: os_log (structured system logging)
             os_log("%{public}@", log: osLog, type: osLogType, jsonString)
+
+            // Also emit to stdout for detached / development runs (captured by nohup)
+            // Keep this lightweight and unconditional for easier debugging locally.
+            print(jsonString)
         } else {
             // Fallback to simple logging
             os_log("[%{public}@] %{public}@: %{public}@", log: osLog, type: osLogType, level, category, message)
+            print("[\(level)] \(category): \(message)")
         }
     }
 }

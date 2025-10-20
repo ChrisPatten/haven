@@ -23,23 +23,32 @@ struct HavenHostAgent: AsyncParsableCommand {
         let configLoader = ConfigLoader()
         let config = try configLoader.load(from: self.config)
         let logger = HavenLogger(category: "main")
-        
+
         logger.info("Configuration loaded", metadata: [
             "port": config.port,
             "auth_header": config.auth.header,
             "gateway_url": config.gateway.baseUrl
         ])
+        logger.info("Beginning hostagent initialization")
         
         // Initialize services
         let fsWatchService = FSWatchService(
             config: config.modules.fswatch,
             maxQueueSize: config.modules.fswatch.eventQueueSize
         )
-        
+
         // Start FSWatch if enabled
         if config.modules.fswatch.enabled {
-            try await fsWatchService.start()
-            logger.info("FSWatch service started")
+            logger.info("FSWatch enabled in config; starting service...")
+            do {
+                try await fsWatchService.start()
+                logger.info("FSWatch service started successfully")
+            } catch {
+                logger.error("FSWatch failed to start", metadata: ["error": "\(error)"])
+                // Continue startup even if FSWatch fails to start; allow server to come up
+            }
+        } else {
+            logger.info("FSWatch disabled in configuration; skipping start")
         }
         
         // Build router with handlers
@@ -47,34 +56,53 @@ struct HavenHostAgent: AsyncParsableCommand {
         
         // Create and start server
         let server = try HavenHTTPServer(config: config, router: router)
-        
-        logger.info("Starting server...")
-        
+
+        logger.info("Server created; preparing to start")
+
         // Handle shutdown gracefully
         let signalSource = setupSignalHandlers()
-        
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            // Start server
-            group.addTask {
-                try await server.start()
+
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                // Start server
+                group.addTask {
+                    do {
+                        logger.info("server.start() task beginning")
+                        try await server.start()
+                        logger.info("server.start() returned (server stopped)")
+                    } catch {
+                        logger.error("server.start() task threw an error", metadata: ["error": "\(error)"])
+                        throw error
+                    }
+                }
+
+                // Wait for signal
+                group.addTask {
+                    logger.info("Waiting for shutdown signal...")
+                    await signalSource.wait()
+                    logger.info("Shutdown signal received, stopping server...")
+
+                    // Stop services
+                    await fsWatchService.stop()
+
+                    do {
+                        try await server.stop()
+                        logger.info("Server stopped cleanly")
+                    } catch {
+                        logger.error("Error while stopping server", metadata: ["error": "\(error)"])
+                    }
+                }
+
+                // Wait for first task to complete
+                _ = try await group.next()
+                logger.info("A task completed, cancelling remaining tasks")
+                group.cancelAll()
             }
-            
-            // Wait for signal
-            group.addTask {
-                await signalSource.wait()
-                logger.info("Shutdown signal received, stopping server...")
-                
-                // Stop services
-                await fsWatchService.stop()
-                
-                try await server.stop()
-            }
-            
-            // Wait for first task to complete
-            try await group.next()
-            group.cancelAll()
+        } catch {
+            logger.error("Unhandled error in task group", metadata: ["error": "\(error)"])
+            throw error
         }
-        
+
         logger.info("Haven Host Agent stopped")
     }
     
@@ -185,7 +213,7 @@ final class SignalWaiter: @unchecked Sendable {
         // Ignore the signal in the default handler to prevent termination
         Darwin.signal(sig, SIG_IGN)
         
-        let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+        let source = DispatchSource.makeSignalSource(signal: sig, queue: .global())
         source.setEventHandler { [weak self] in
             self?.triggerShutdown()
         }
