@@ -17,6 +17,24 @@
             "name": "Release hostagent (hostagent)",
             "program": "${workspaceFolder:haven}/hostagent/.build/release/hostagent",
             "preLaunchTask": "swift: Build Release hostagent (hostagent)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/hostagent",
+            "name": "Debug BuildInfoTool (hostagent)",
+            "program": "${workspaceFolder:haven}/hostagent/.build/debug/BuildInfoTool",
+            "preLaunchTask": "swift: Build Debug BuildInfoTool (hostagent)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/hostagent",
+            "name": "Release BuildInfoTool (hostagent)",
+            "program": "${workspaceFolder:haven}/hostagent/.build/release/BuildInfoTool",
+            "preLaunchTask": "swift: Build Release BuildInfoTool (hostagent)"
         }
     ]
 }

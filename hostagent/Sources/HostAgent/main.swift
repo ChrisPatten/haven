@@ -10,7 +10,7 @@ struct HavenHostAgent: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "hostagent",
         abstract: "Haven Host Agent - localhost HTTP API for macOS capabilities",
-        version: "1.0.0"
+        version: BuildInfo.versionWithBuildID
     )
     
     @Option(name: .shortAndLong, help: "Path to configuration file")
@@ -126,10 +126,39 @@ struct HavenHostAgent: AsyncParsableCommand {
     }
     
     private func printBanner() {
-        print("╔════════════════════════════════════════════════╗")
-        print("║     🏠 Haven Host Agent v1.0.0                 ║")
-        print("║     Native macOS capabilities API              ║")
-        print("╚════════════════════════════════════════════════╝")
+        // Build dynamic banner width based on longest line content
+        let versionLineContent = "🏠 Haven Host Agent v" + BuildInfo.versionWithBuildID
+        let secondaryLineContent = "Native macOS capabilities API"
+        let paddingLeft = 3 // spaces after leading border before content
+        let lines = [versionLineContent, secondaryLineContent]
+
+        // Approximate display width: count ASCII as 1, wide emoji/CJK as 2
+        func displayWidth(of s: String) -> Int {
+            var w = 0
+            for ch in s {
+                // Basic heuristic: treat characters outside ASCII range as width 2
+                if ch.unicodeScalars.allSatisfy({ $0.value < 128 }) {
+                    w += 1
+                } else {
+                    w += 2
+                }
+            }
+            return w
+        }
+
+        let maxContentWidth = lines.map { displayWidth(of: $0) }.max() ?? 0
+        let innerWidth = paddingLeft + maxContentWidth + 1 // +1 trailing space before border
+        let topBorder = "╔" + String(repeating: "═", count: innerWidth) + "╗"
+        let bottomBorder = "╚" + String(repeating: "═", count: innerWidth) + "╝"
+        print(topBorder)
+        // Print each content line with padding, using displayWidth for calculations
+        for content in lines {
+            let contentDisplayWidth = displayWidth(of: content)
+            let padCount = maxContentWidth - contentDisplayWidth
+            let padded = content + String(repeating: " ", count: padCount)
+            print("║" + String(repeating: " ", count: paddingLeft) + padded + " ║")
+        }
+        print(bottomBorder)
         print("")
     }
     
@@ -153,7 +182,10 @@ struct HavenHostAgent: AsyncParsableCommand {
         
         // Initialize FSWatch handler
         let fsWatchHandler = FSWatchHandler(fsWatchService: fsWatchService, config: config.modules.fswatch)
-        let iMessageHandler = IMessageHandler()
+        
+        // Initialize gateway client for iMessage handler
+        let gatewayClient = GatewayClient(config: config.gateway, authToken: config.auth.secret)
+        let iMessageHandler = IMessageHandler(config: config, gatewayClient: gatewayClient)
         
         let handlers: [RouteHandler] = [
             // Core endpoints

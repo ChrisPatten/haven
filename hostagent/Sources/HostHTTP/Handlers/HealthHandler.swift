@@ -18,7 +18,7 @@ public struct HealthHandler {
         let response = HealthResponse(
             status: "healthy",
             startedAt: ISO8601DateFormatter().string(from: startTime),
-            version: "1.0.0",
+            version: BuildInfo.versionWithBuildID,
             uptimeSeconds: Int(Date().timeIntervalSince(startTime)),
             modules: moduleSummaries
         )

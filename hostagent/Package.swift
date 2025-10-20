@@ -14,6 +14,10 @@ let package = Package(
         .library(
             name: "HavenCore",
             targets: ["HavenCore"]
+        ),
+        .plugin(
+            name: "GenerateBuildInfo",
+            targets: ["GenerateBuildInfo"]
         )
     ],
     dependencies: [
@@ -33,7 +37,8 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Crypto", package: "swift-crypto")
             ],
-            path: "Sources/HavenCore"
+            path: "Sources/HavenCore",
+            plugins: ["GenerateBuildInfo"]
         ),
         
         // OCR: Vision framework integration
@@ -92,6 +97,12 @@ let package = Package(
                 .product(name: "NIOFoundationCompat", package: "swift-nio")
             ],
             path: "Sources/HostHTTP"
+        ),
+        
+        // Build plugin to generate BuildInfo before compilation
+        .plugin(
+            name: "GenerateBuildInfo",
+            capability: .buildTool()
         ),
         
         // Main executable
