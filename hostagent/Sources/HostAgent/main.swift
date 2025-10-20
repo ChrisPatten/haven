@@ -30,6 +30,7 @@ struct HavenHostAgent: AsyncParsableCommand {
             "gateway_url": config.gateway.baseUrl
         ])
         logger.info("Beginning hostagent initialization")
+    print("[hostagent] initialization: starting (pid:\(ProcessInfo.processInfo.processIdentifier))")
         
         // Initialize services
         let fsWatchService = FSWatchService(
@@ -58,9 +59,11 @@ struct HavenHostAgent: AsyncParsableCommand {
         let server = try HavenHTTPServer(config: config, router: router)
 
         logger.info("Server created; preparing to start")
+    print("[hostagent] server instance created; preparing to start")
 
         // Handle shutdown gracefully
-        let signalSource = setupSignalHandlers()
+    let signalSource = setupSignalHandlers()
+    print("[hostagent] signal handlers registered")
 
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
@@ -68,10 +71,13 @@ struct HavenHostAgent: AsyncParsableCommand {
                 group.addTask {
                     do {
                         logger.info("server.start() task beginning")
+                        print("[hostagent] server.start() task beginning")
                         try await server.start()
                         logger.info("server.start() returned (server stopped)")
+                        print("[hostagent] server.start() returned (server stopped)")
                     } catch {
                         logger.error("server.start() task threw an error", metadata: ["error": "\(error)"])
+                        print("[hostagent] server.start() task threw an error: \(error)")
                         throw error
                     }
                 }
@@ -79,8 +85,10 @@ struct HavenHostAgent: AsyncParsableCommand {
                 // Wait for signal
                 group.addTask {
                     logger.info("Waiting for shutdown signal...")
+                    print("[hostagent] waiting for shutdown signal...")
                     await signalSource.wait()
                     logger.info("Shutdown signal received, stopping server...")
+                    print("[hostagent] shutdown signal received, stopping server...")
 
                     // Stop services
                     await fsWatchService.stop()
@@ -88,18 +96,29 @@ struct HavenHostAgent: AsyncParsableCommand {
                     do {
                         try await server.stop()
                         logger.info("Server stopped cleanly")
+                        print("[hostagent] server stopped cleanly")
                     } catch {
                         logger.error("Error while stopping server", metadata: ["error": "\(error)"])
+                        print("[hostagent] error while stopping server: \(error)")
                     }
                 }
 
                 // Wait for first task to complete
-                _ = try await group.next()
-                logger.info("A task completed, cancelling remaining tasks")
+                logger.info("Waiting for first task to complete in group")
+                print("[hostagent] awaiting first task completion in task group...")
+                if let _ = try await group.next() {
+                    logger.info("A task completed (group.next returned non-nil)")
+                    print("[hostagent] a task completed; cancelling remaining tasks")
+                } else {
+                    logger.info("Task group completed with no tasks")
+                    print("[hostagent] task group next returned nil (no tasks)")
+                }
+
                 group.cancelAll()
             }
         } catch {
             logger.error("Unhandled error in task group", metadata: ["error": "\(error)"])
+            print("[hostagent] unhandled error in task group: \(error)")
             throw error
         }
 
@@ -134,6 +153,7 @@ struct HavenHostAgent: AsyncParsableCommand {
         
         // Initialize FSWatch handler
         let fsWatchHandler = FSWatchHandler(fsWatchService: fsWatchService, config: config.modules.fswatch)
+        let iMessageHandler = IMessageHandler()
         
         let handlers: [RouteHandler] = [
             // Core endpoints
@@ -185,6 +205,12 @@ struct HavenHostAgent: AsyncParsableCommand {
             // TODO: Add more handlers
             // - POST /v1/collectors/imessage:run (IMessageHandler)
             // - GET /v1/collectors/imessage/state (IMessageHandler)
+            PatternRouteHandler(method: "POST", pattern: "/v1/collectors/imessage:run") { req, ctx in
+                await iMessageHandler.handleRun(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "GET", pattern: "/v1/collectors/imessage/state") { req, ctx in
+                await iMessageHandler.handleState(request: req, context: ctx)
+            },
         ]
         
         return Router(handlers: handlers)

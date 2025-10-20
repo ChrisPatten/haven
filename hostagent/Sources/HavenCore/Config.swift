@@ -238,6 +238,15 @@ public struct FSWatchModuleConfig: Codable {
         self.eventQueueSize = eventQueueSize
         self.debounceMs = debounceMs
     }
+    
+    // Custom decoder to support legacy configs without these fields
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        watches = try container.decodeIfPresent([FSWatchEntry].self, forKey: .watches) ?? []
+        eventQueueSize = try container.decodeIfPresent(Int.self, forKey: .eventQueueSize) ?? 1000
+        debounceMs = try container.decodeIfPresent(Int.self, forKey: .debounceMs) ?? 500
+    }
 }
 
 public struct FSWatchEntry: Codable, Identifiable {
@@ -314,10 +323,15 @@ public class ConfigLoader {
             logger.info("Loading configuration from \(configPath)")
             let url = URL(fileURLWithPath: configPath)
             let data = try Data(contentsOf: url)
-            
-            // Parse YAML
+
+            // Parse YAML - if parsing fails, log and continue using defaults
             let decoder = YAMLDecoder()
-            config = try decoder.decode(HavenConfig.self, from: data)
+            do {
+                config = try decoder.decode(HavenConfig.self, from: data)
+            } catch {
+                logger.error("Failed to parse configuration file; using defaults", metadata: ["error": "\(error)"])
+                // Keep `config` as initialized defaults and continue
+            }
         } else {
             logger.warning("Configuration file not found at \(configPath), using defaults")
         }

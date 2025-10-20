@@ -1,4 +1,4 @@
-.PHONY: build test clean install uninstall run dev release help
+tail -n 200 ~/Library/Logs/Haven/hostagent.log || tail -n 200 /tmp/hostagent_run.log.PHONY: build test clean install uninstall run dev release help
 
 # Default target
 help:

@@ -47,7 +47,8 @@ let package = Package(
         .target(
             name: "Entity",
             dependencies: ["HavenCore"],
-            path: "Sources/Entity"
+            path: "Sources/Entity",
+            exclude: ["README.md"]
         ),
         
         // Face: Vision framework face detection
