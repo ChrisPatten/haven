@@ -2,12 +2,14 @@
 # AGENTS.md
 
 ## 0. TL;DR
-Agents are host-native daemons, container services, background workers, and CLI collectors that move or transform data.  
-**External entry point:** Gateway only.  
-**HostAgent:** localhost-only.  
-**No agent** writes directly to Postgres, Qdrant, or MinIO except via prescribed routes.
+* Agents are host-native daemons, container services, background workers, and CLI collectors that move or transform data.  
+* **External entry point:** Gateway only.  
+* **HostAgent:** localhost-only.  
+* **No agent** writes directly to Postgres, Qdrant, or MinIO except via prescribed routes.
+* If the user mentions "bead", "beads", or references beads by name like "haven-27" or "hv-27", they are referring to the planning and work-tracking system available via the beads MCP server.
+* Review the documentation in /docs/ as necessary for developer onboarding and architecture overviews.
+* Unless specifically instructed to do otherwise, any new .md files created MUST be placed in .tmp/. "Otherwise" means specific guidance to update permanent documentation. In this case, integrate the new information into the /docs/ directory for inclusion in the mkdocs site.
 
-If the user mentions "bead", "beads", or references beads by name like "haven-27" or "hv-27", they are referring to the planning and work-tracking system described in §9.
 
 ---
 
@@ -46,66 +48,6 @@ Embedding Worker → Postgres (chunks) → Catalog (/v1/catalog/embeddings)
 
 ---
 
-## 3. API Contracts
-
-### 3.1 Gateway `/v1/ingest`
-```json
-{
-  "source_type": "imessage",
-  "external_id": "imessage:{guid}",
-  "text": "...",
-  "people": [...],
-  "content_timestamp": "...",
-  "content_timestamp_type": "sent"
-}
-````
-
-### 3.2 Gateway `/v1/ingest/file`
-
-Multipart upload with binary and JSON meta.
-Gateway → MinIO → Catalog (records `document_files`).
-
-### 3.3 Catalog `/v1/catalog/embeddings`
-
-```json
-{
-  "chunk_id": "...",
-  "model": "BAAI/bge-m3",
-  "vector": [...]
-}
-```
-
----
-
-## 4. Operational Runbooks
-
-**HostAgent**
-
-* Install: `make install && make launchd`
-* Health: `GET /v1/health`
-* Logs: `~/Library/Logs/Haven/hostagent.log`
-
-**Services**
-
-* Start: `docker compose up --build`
-* DB migration: auto-applied on startup
-* Reset embeddings: `UPDATE chunks SET embedding_status='pending'`
-
-**Backfill**
-
-* Run: `python scripts/backfill_image_enrichment.py --dry-run`
-
-**Development Mode (HostAgent iMessage)**
-
-* For development without Full Disk Access, use a copy of chat.db:
-  ```bash
-  cp ~/Library/Messages/chat.db ~/.haven/chat.db
-  export HAVEN_IMESSAGE_CHAT_DB_PATH=~/.haven/chat.db
-  ```
-* See `hostagent/DEVELOPMENT_MODE.md` for full details
-
----
-
 ## 5. Security & Privacy
 
 * Only Gateway (`:8085`) is externally exposed.
@@ -124,9 +66,7 @@ Gateway → MinIO → Catalog (records `document_files`).
 * **Adding a new agent checklist:**
 
   1. Add a table row in §2 (all columns).
-  2. Add contract example in §3.
-  3. Add runbook in §4.
-  4. Add observability and metric keys.
+  2. Add observability and metric keys.
 
 ---
 
@@ -134,7 +74,6 @@ Gateway → MinIO → Catalog (records `document_files`).
 
 * **Unit:** each service package.
 * **Integration:** ingest → cataloged → embedded → searchable.
-* **Smoke tests:** iMessage `--simulate`, LocalFS watcher, `/v1/search` sanity.
 
 ---
 
@@ -178,8 +117,7 @@ Tools exposed:
 
 ### 9.3 Ready-Work Discipline
 
-Agents **must** query `beads.ready` before starting work.
-Select ≤3 items with all dependencies satisfied.
+Agents **must** query `beads.ready` before starting work to confirm readiness of a user's requested task.
 If no ready tasks exist, create a `blocked` issue describing the missing dependency and link via `requires`.
 
 ### 9.4 Repo ↔ Beads Linking
@@ -250,22 +188,3 @@ beads.create '{
 * Beads **plans**, Gateway **executes**.
   Agents never mutate infrastructure directly based on Beads alone.
 * Secrets are never stored in Beads issues — reference vault paths instead.
-* Unless specifically instructed to do otherwise, any new .md files created MUST be placed in .tmp/. "Otherwise" means specific guidance to update permanent documentation. In this case, integrate the new information into the /docs/ directory for inclusion in the mkdocs site.
-
-### 9.9 Adoption Checklist (for new contributors)
-
-1. Configure MCP (9.1)
-2. Pull latest `beads/` graph
-3. Run `beads.ready`
-4. Pick up to 3 tasks
-5. Keep states updated
-6. Cross-link commits and PRs
-
----
-
-## 10. References
-
-* Beads MCP: [https://github.com/steveyegge/beads](https://github.com/steveyegge/beads)
-* Haven Gateway API Spec: `openapi/gateway.yaml`
-* Catalog Schema v2: `schema/init.sql`
-* Developer Onboarding: `docs/CONTRIBUTING.md`

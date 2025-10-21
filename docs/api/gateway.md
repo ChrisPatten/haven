@@ -1,6 +1,6 @@
 # Gateway API
 
-The Gateway service exposes ingestion, orchestration, and search endpoints used by Haven clients. Use the links below to view the OpenAPI contract in your preferred tooling.
+Gateway is the public entry point to Haven. It accepts ingestion payloads, brokers access to Catalog and Search, and keeps a thin orchestration layer around collectors. The OpenAPI specification is the canonical source of truth for all routes exposed on `:8085`.
 
 <p>
   <a class="md-button md-button--primary" href="../../openapi/gateway.yaml" download>
@@ -10,3 +10,25 @@ The Gateway service exposes ingestion, orchestration, and search endpoints used 
     Open interactive reference ↗
   </a>
 </p>
+
+## Using the Spec
+- **Interactive viewer**: `docs/api/gateway-reference.html` is generated from `openapi/gateway.yaml` using `scripts/export_openapi.py`. Regenerate it whenever the spec changes:
+  ```bash
+  python scripts/export_openapi.py --input openapi/gateway.yaml --output docs/api/gateway-reference.html
+  ```
+- **MkDocs integration**: `scripts/docs_hooks.py` copies the spec into `docs/openapi/gateway.yaml` during builds so download links always point at the latest revision.
+- **Validation**: CI validates the OpenAPI document as part of the docs publish workflow (see `.github/workflows/docs.yml`).
+
+## Notable Endpoints
+| Route | Purpose |
+| --- | --- |
+| `POST /v1/ingest` | Ingest text documents with people, thread context, and metadata |
+| `POST /v1/ingest/file` | Upload binaries (images, PDFs, etc.) with enrichment metadata |
+| `GET /v1/ingest/{submission_id}` | Track ingestion status and chunk embedding progress |
+| `GET /v1/search` | Perform hybrid lexical/vector search with facets and timeline filters |
+| `POST /v1/ask` | Run curated search + summarisation with inline citations |
+| `GET /v1/documents/{document_id}` | Retrieve persisted documents; `PATCH` to update text/metadata |
+
+Authentication uses bearer tokens (`Authorization: Bearer <token>`). Downstream catalog/search calls rely on internal service tokens defined in your deployment environment.
+
+_Adapted from `openapi/gateway.yaml`, `scripts/export_openapi.py`, and `documentation/technical_reference.md`._

@@ -1,44 +1,39 @@
-# Haven Documentation Staging
+# Haven Documentation
 
-This staging tree gathers the current Haven documentation so it can be reviewed and promoted into the permanent `/docs/` directory. Each section links to the copied sources with short descriptions to guide reviewers.
+Haven is a personal data plane that keeps high-signal conversations, files, and local knowledge searchable without leaving your device. These pages collect the canonical runbooks, architecture notes, and API references that previously lived across `README.md`, `AGENTS.md`, and the legacy `documentation/` tree.
 
-## Getting Started & Guides
-- [Getting Started](getting-started.md) — local preview workflow and contribution basics.
-- [Repository README](guides/README.md) — project overview, development tooling, and repo conventions.
-- [Agents Overview](guides/AGENTS.md) — topology and operational notes for Haven agents.
+## Start Here
+- [Getting Started](getting-started.md) — install prerequisites, run the stack locally, and preview docs.
+- [Repository Overview](guides/README.md) — tour of the source tree, collectors, and shared tooling.
+- [Agents Overview](guides/AGENTS.md) — HostAgent topology, orchestration rules, and runbooks.
 
-## Architecture
-- [Architecture Overview](architecture/overview.md) — system context, data flow, and key components.
-- [Services Deep Dive](architecture/services.md) — service-by-service breakdown with interfaces.
+## How the Platform Fits Together
+- [Architecture Overview](architecture/overview.md) — system context, data flow, and critical data stores.
+- [Service Deep Dive](architecture/services.md) — responsibilities and interfaces for each core service.
+- [Technical Reference](reference/technical_reference.md) — detailed schema, ingestion, and pipeline behaviour.
 
-## Operations
-- [Local Development](operations/local-dev.md) — compose profiles, environment variables, and bootstrap steps.
-- [Deployment Outline](operations/deploy.md) — high-level runbook for shipping Haven services.
+## Operating Haven
+- [Local Development](operations/local-dev.md) — compose profiles, environment variables, and verification steps.
+- [Deployment](operations/deploy.md) — promote builds, run migrations, and validate production rollouts.
+- [HostAgent Landing](hostagent/index.md) — macOS-specific setup, permissions, and troubleshooting.
 
-## HostAgent
-- [HostAgent Landing](hostagent/index.md) — staging page for macOS agent documentation.
-- [HostAgent README](hostagent/hostagent-readme.md) — install, launchd, and capability references from the native project.
+## APIs and References
+- [Gateway API](api/gateway.md) — download and explore the OpenAPI contract used for ingestion and search.
+- [Functional Guide](reference/functional_guide.md) — end-user workflows and platform capabilities.
+- [Backup & Restore](reference/BACKUP_RESTORE.md) — procedures for snapshots, restores, and retention.
+- [Schema Reference](reference/SCHEMA_V2_REFERENCE.md) — canonical SQL definitions and views.
 
-## API
-- [Gateway API Reference](api/gateway.md) — current notes on Gateway endpoints and usage.
-- [API Index](api/index.md) — placeholder for the future interactive reference.
+## Keeping Current
+- [Contributing](contributing.md) — docs-as-code workflow, review checklist, and style guidance.
+- [Changelog](changelog.md) — notable updates to the documentation set and supporting tooling.
 
-## Reference Material
-- [Functional Guide](reference/functional_guide.md) — product behaviour and user workflows.
-- [Technical Reference](reference/technical_reference.md) — in-depth details on internal systems.
-- [Graph Reference](reference/graph.md) — data model notes for graph integrations.
-- [Backup & Restore](reference/BACKUP_RESTORE.md) — procedures for snapshotting and recovery.
-- [Schema v2 Reference](reference/SCHEMA_V2_REFERENCE.md) — catalog schema documentation.
+Preview the site locally with:
 
-## Schema Files
-- [Database Init SQL](schema/init.sql) — canonical schema bootstrap script.
-- [Migration README](schema/migrations/README.md) — guidance for crafting migrations.
-- [Migration v2_001](schema/migrations/v2_001_email_collector.sql) — sample migration for the email collector.
+```bash
+pip install -r requirements-docs.txt
+mkdocs serve
+```
 
-## Changelog & Contributing
-- [Changelog](changelog.md) — running log of noteworthy changes.
-- [Contributing](contributing.md) — standards for collaborating on the docs.
+The navigation above maps directly to the MkDocs sidebar. Every page cites its source material so future updates can trace back to the primary documents.
 
-## Next Steps
-- Run `mkdocs serve -f mkdocs.yml --docs-dir .tmp/docs` to preview this staging tree.
-- Track gaps or TODOs directly in `haven-49` before promoting content into `/docs/`.
+_Adapted from `README.md`, `.tmp/docs/index.md`, and prior notes in `documentation/technical_reference.md`._

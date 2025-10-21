@@ -1,11 +1,13 @@
 # Changelog
 
-High-level updates to the Haven project will be tracked here once the documentation site is live.
+## 2025-10-21 — Documentation consolidation (haven-50)
+- Promoted legacy documentation (`README.md`, `AGENTS.md`, `documentation/*`) into the MkDocs site.
+- Rewrote architecture, operations, and HostAgent landing pages with production-ready guidance.
+- Linked Gateway API docs to the OpenAPI exporter workflow and documented interactive reference regeneration.
+- Established docs-as-code workflow guidance (`docs/contributing.md`) and added a local preview quick start.
 
-## Upcoming Entries
+## 2025-10-21 — MkDocs foundation (haven-40, haven-42–45)
+- Added Material-themed MkDocs site, nav skeleton, and hooks for copying OpenAPI specs.
+- Introduced CI publish workflow and OpenAPI validation.
 
-- Initial docs skeleton and MkDocs setup.
-- API reference integration.
-- CI publish workflow.
-
-> Note: This file is a placeholder; formal release notes will be added as the project adopts the docs-as-code workflow.
+_Earlier milestones are documented in the corresponding Beads issues._

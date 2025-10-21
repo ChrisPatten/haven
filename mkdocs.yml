@@ -23,6 +23,7 @@ nav:
   - API Reference:
       - Overview: api/index.md
       - Gateway API: api/gateway.md
+      - Gateway Interactive Reference: api/gateway-reference.html
   - Reference:
       - Functional Guide: reference/functional_guide.md
       - Technical Reference: reference/technical_reference.md
