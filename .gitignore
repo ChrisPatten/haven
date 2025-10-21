@@ -216,3 +216,5 @@ scripts/collect_context.sh
 
 # Image files for use as test fixtures
 tests/fixtures/images/*
+
+.tmp/

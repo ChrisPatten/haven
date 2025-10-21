@@ -86,6 +86,25 @@ modules:
   
   mail:
     enabled: false
+    filters:
+      # combination_mode: any | all (any = message accepted if any filter matches)
+      combination_mode: any
+      # default_action: include | exclude (applied when no filters present)
+      default_action: include
+      # Inline filters are embedded directly in the config file. Provide either
+      # string expressions using the filter mini-language or structured objects.
+      inline: []
+      # Additional filter documents loaded from disk. Non-existent files are ignored.
+      files:
+        - ~/.haven/email_collector_filters.yaml
+      # Environment variable that can supply a JSON/YAML filter definition.
+      environment_variable: EMAIL_COLLECTOR_FILTERS
+      # Optional pre-filter hints let the collector skip folders before deeper checks.
+      prefilter:
+        include_folders: []
+        exclude_folders: []
+        vip_only: false
+        require_list_unsubscribe: false
   
   notes:
     enabled: false

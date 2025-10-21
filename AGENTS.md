@@ -248,6 +248,7 @@ beads.create '{
 * Beads **plans**, Gateway **executes**.
   Agents never mutate infrastructure directly based on Beads alone.
 * Secrets are never stored in Beads issues — reference vault paths instead.
+* Any new .md files created MUST be placed in .tmp/ and the user can choose to include them in their own documentation later.
 
 ### 9.9 Adoption Checklist (for new contributors)
 

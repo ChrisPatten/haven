@@ -60,7 +60,7 @@ public struct ModulesConfig: Codable {
     public var contacts: StubModuleConfig
     public var calendar: StubModuleConfig
     public var reminders: StubModuleConfig
-    public var mail: StubModuleConfig
+    public var mail: MailModuleConfig
     public var notes: StubModuleConfig
     
     public init(imessage: IMessageModuleConfig = IMessageModuleConfig(),
@@ -71,7 +71,7 @@ public struct ModulesConfig: Codable {
                 contacts: StubModuleConfig = StubModuleConfig(),
                 calendar: StubModuleConfig = StubModuleConfig(),
                 reminders: StubModuleConfig = StubModuleConfig(),
-                mail: StubModuleConfig = StubModuleConfig(),
+                mail: MailModuleConfig = MailModuleConfig(),
                 notes: StubModuleConfig = StubModuleConfig()) {
         self.imessage = imessage
         self.ocr = ocr
@@ -99,7 +99,14 @@ public struct ModulesConfig: Codable {
         contacts = try container.decode(StubModuleConfig.self, forKey: .contacts)
         calendar = try container.decode(StubModuleConfig.self, forKey: .calendar)
         reminders = try container.decode(StubModuleConfig.self, forKey: .reminders)
-        mail = try container.decode(StubModuleConfig.self, forKey: .mail)
+        
+        if let mailConfig = try container.decodeIfPresent(MailModuleConfig.self, forKey: .mail) {
+            mail = mailConfig
+        } else if let legacyMail = try container.decodeIfPresent(StubModuleConfig.self, forKey: .mail) {
+            mail = MailModuleConfig(enabled: legacyMail.enabled)
+        } else {
+            mail = MailModuleConfig()
+        }
         notes = try container.decode(StubModuleConfig.self, forKey: .notes)
     }
 }
@@ -298,6 +305,101 @@ public struct LoggingConfig: Codable {
     }
 }
 
+// MARK: - Mail Module Configuration
+
+public struct MailModuleConfig: Codable {
+    public var enabled: Bool
+    public var filters: MailFiltersConfig
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case filters
+    }
+    
+    public init(enabled: Bool = false, filters: MailFiltersConfig = MailFiltersConfig()) {
+        self.enabled = enabled
+        self.filters = filters
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        filters = try container.decodeIfPresent(MailFiltersConfig.self, forKey: .filters) ?? MailFiltersConfig()
+    }
+}
+
+public struct MailFiltersConfig: Codable {
+    public var combinationMode: MailFilterCombinationMode
+    public var defaultAction: MailFilterDefaultAction
+    public var inline: [MailFilterExpression]
+    public var files: [String]
+    public var environmentVariable: String?
+    public var prefilter: MailPrefilterConfig
+    
+    enum CodingKeys: String, CodingKey {
+        case combinationMode = "combination_mode"
+        case defaultAction = "default_action"
+        case inline
+        case files
+        case environmentVariable = "environment_variable"
+        case prefilter
+    }
+    
+    public init(
+        combinationMode: MailFilterCombinationMode = .any,
+        defaultAction: MailFilterDefaultAction = .include,
+        inline: [MailFilterExpression] = [],
+        files: [String] = [MailFiltersConfig.defaultFiltersPath],
+        environmentVariable: String? = "EMAIL_COLLECTOR_FILTERS",
+        prefilter: MailPrefilterConfig = MailPrefilterConfig()
+    ) {
+        self.combinationMode = combinationMode
+        self.defaultAction = defaultAction
+        self.inline = inline
+        self.files = files
+        self.environmentVariable = environmentVariable
+        self.prefilter = prefilter
+    }
+    
+    public static var defaultFiltersPath: String {
+        return "~/.haven/email_collector_filters.yaml"
+    }
+}
+
+public struct MailPrefilterConfig: Codable {
+    public var includeFolders: [String]
+    public var excludeFolders: [String]
+    public var vipOnly: Bool
+    public var requireListUnsubscribe: Bool
+    
+    enum CodingKeys: String, CodingKey {
+        case includeFolders = "include_folders"
+        case excludeFolders = "exclude_folders"
+        case vipOnly = "vip_only"
+        case requireListUnsubscribe = "require_list_unsubscribe"
+    }
+    
+    public init(includeFolders: [String] = [],
+                excludeFolders: [String] = [],
+                vipOnly: Bool = false,
+                requireListUnsubscribe: Bool = false) {
+        self.includeFolders = includeFolders
+        self.excludeFolders = excludeFolders
+        self.vipOnly = vipOnly
+        self.requireListUnsubscribe = requireListUnsubscribe
+    }
+}
+
+public enum MailFilterCombinationMode: String, Codable {
+    case any
+    case all
+}
+
+public enum MailFilterDefaultAction: String, Codable {
+    case include
+    case exclude
+}
+
 // MARK: - Config Loading
 
 public enum ConfigError: Error, LocalizedError {
@@ -452,6 +554,9 @@ public class ConfigLoader {
         
         if let chatDbPath = ProcessInfo.processInfo.environment["HAVEN_IMESSAGE_CHAT_DB_PATH"] {
             config.modules.imessage.chatDbPath = chatDbPath
+        }
+        if let mailEnabled = ProcessInfo.processInfo.environment["HAVEN_MAIL_ENABLED"] {
+            config.modules.mail.enabled = (mailEnabled as NSString).boolValue
         }
     }
     

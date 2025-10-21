@@ -117,10 +117,15 @@ CREATE TABLE documents (
         status IN ('submitted', 'extracting', 'extracted', 'enriching', 'enriched', 'indexed', 'failed')
     ),
     CONSTRAINT documents_valid_source_type CHECK (
-        source_type IN ('imessage', 'sms', 'email', 'localfs', 'gdrive', 'note', 'reminder', 'calendar_event', 'contact')
-    )
+        source_type IN ('imessage', 'sms', 'email', 'email_local', 'localfs', 'gdrive', 'note', 'reminder', 'calendar_event', 'contact')
+    ),
+    intent JSONB DEFAULT NULL,
+    relevance_score FLOAT DEFAULT NULL
 );
 
+-- Column comments for email collector fields
+COMMENT ON COLUMN documents.intent IS 'JSONB field for email intent classification: bills, receipts, confirmations, appointments, action_requests, notifications, etc.';
+COMMENT ON COLUMN documents.relevance_score IS 'Float score (0.0-1.0) for noise filtering; higher scores indicate more relevant/actionable content';
 
 -- Files
 CREATE TABLE files (
@@ -240,6 +245,11 @@ CREATE INDEX IF NOT EXISTS idx_documents_due_date ON documents(due_date) WHERE d
 CREATE INDEX IF NOT EXISTS idx_documents_is_completed ON documents(is_completed) WHERE is_completed = true;
 CREATE INDEX IF NOT EXISTS idx_documents_upcoming_incomplete ON documents(due_date)
     WHERE has_due_date = true AND (is_completed IS NULL OR is_completed = false);
+CREATE INDEX IF NOT EXISTS idx_documents_intent ON documents USING GIN(intent);
+CREATE INDEX IF NOT EXISTS idx_documents_relevance_score ON documents(relevance_score) 
+    WHERE relevance_score IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_documents_email_local ON documents(source_type, content_timestamp DESC) 
+    WHERE source_type = 'email_local';
 
 -- Threads
 CREATE INDEX IF NOT EXISTS idx_threads_external_id ON threads(external_id);
