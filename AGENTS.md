@@ -93,6 +93,15 @@ Gateway → MinIO → Catalog (records `document_files`).
 
 * Run: `python scripts/backfill_image_enrichment.py --dry-run`
 
+**Development Mode (HostAgent iMessage)**
+
+* For development without Full Disk Access, use a copy of chat.db:
+  ```bash
+  cp ~/Library/Messages/chat.db ~/.haven/chat.db
+  export HAVEN_IMESSAGE_CHAT_DB_PATH=~/.haven/chat.db
+  ```
+* See `hostagent/DEVELOPMENT_MODE.md` for full details
+
 ---
 
 ## 5. Security & Privacy
@@ -100,7 +109,8 @@ Gateway → MinIO → Catalog (records `document_files`).
 * Only Gateway (`:8085`) is externally exposed.
 * Use Bearer tokens for all API calls.
 * Treat `~/.haven` and `~/Library/Messages/chat.db` as sensitive.
-* HostAgent requests full-disk access and contacts permission via macOS TCC/FDA.
+* HostAgent requests full-disk access and contacts permission via macOS TCC/FDA in production.
+* For development, use `HAVEN_IMESSAGE_CHAT_DB_PATH` to work with a copy in `~/.haven/chat.db`.
 * MinIO is the system of record for files; enrichment and embeddings stored separately.
 
 ---

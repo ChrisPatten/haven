@@ -43,7 +43,7 @@ public struct AuthMiddleware {
 }
 
 /// HTTP response builder
-public struct HTTPResponse {
+public struct HTTPResponse: Sendable {
     public let statusCode: Int
     public let headers: [String: String]
     public let body: Data?
@@ -118,7 +118,7 @@ public struct HTTPResponse {
 }
 
 /// HTTP request representation
-public struct HTTPRequest {
+public struct HTTPRequest: Sendable {
     public let method: String
     public let path: String
     public let queryParameters: [String: String]

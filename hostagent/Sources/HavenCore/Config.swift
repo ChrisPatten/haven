@@ -108,17 +108,28 @@ public struct IMessageModuleConfig: Codable {
     public var enabled: Bool
     public var batchSize: Int
     public var ocrEnabled: Bool
+    public var chatDbPath: String
     
     enum CodingKeys: String, CodingKey {
         case enabled
         case batchSize = "batch_size"
         case ocrEnabled = "ocr_enabled"
+        case chatDbPath = "chat_db_path"
     }
     
-    public init(enabled: Bool = true, batchSize: Int = 500, ocrEnabled: Bool = true) {
+    public init(enabled: Bool = true, batchSize: Int = 500, ocrEnabled: Bool = true, chatDbPath: String = "") {
         self.enabled = enabled
         self.batchSize = batchSize
         self.ocrEnabled = ocrEnabled
+        self.chatDbPath = chatDbPath
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        batchSize = try container.decode(Int.self, forKey: .batchSize)
+        ocrEnabled = try container.decode(Bool.self, forKey: .ocrEnabled)
+        chatDbPath = try container.decodeIfPresent(String.self, forKey: .chatDbPath) ?? ""
     }
 }
 
@@ -317,7 +328,11 @@ public class ConfigLoader {
         
         // Start with defaults
         var config = HavenConfig()
-        
+        // Ensure default config is present in user's ~/.haven when no explicit config provided
+        if path == nil {
+            ensureDefaultConfigExists(at: configPath)
+        }
+
         // Load from file if it exists
         if FileManager.default.fileExists(atPath: configPath) {
             logger.info("Loading configuration from \(configPath)")
@@ -365,6 +380,57 @@ public class ConfigLoader {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent(".haven/hostagent.yaml").path
     }
+
+    /// Ensure the default config file is copied from bundled resources to the user's ~/.haven
+    /// if no explicit config path was provided and the file does not already exist.
+    private func ensureDefaultConfigExists(at configPath: String) {
+        // If config already exists, nothing to do
+        if FileManager.default.fileExists(atPath: configPath) {
+            return
+        }
+
+        // Attempt to locate the bundled default config in package resources
+        var defaultConfigURL: URL? = nil
+        // Try a few candidate locations within the repository layout for Resources/default-config.yaml
+        var candidates: [URL] = []
+
+        // 1) Resources/ relative to this package directory (source layout)
+        let currentFileURL = URL(fileURLWithPath: #file)
+        let packageDir = currentFileURL.deletingLastPathComponent().deletingLastPathComponent()
+        candidates.append(packageDir.appendingPathComponent("Resources/default-config.yaml"))
+
+        // 2) Resources/ relative to current working directory (when running from hostagent folder)
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        candidates.append(cwd.appendingPathComponent("Resources/default-config.yaml"))
+        candidates.append(cwd.appendingPathComponent("../Resources/default-config.yaml"))
+
+        // 3) workspace-relative hostagent/Resources (when running from repo root)
+        candidates.append(cwd.appendingPathComponent("hostagent/Resources/default-config.yaml"))
+
+        for candidate in candidates {
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                defaultConfigURL = candidate
+                break
+            }
+        }
+
+        guard let src = defaultConfigURL else {
+            logger.info("No bundled default-config.yaml found; skipping copy to \(configPath)")
+            return
+        }
+
+        do {
+            let destURL = URL(fileURLWithPath: configPath)
+            let dir = destURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: destURL.path) == false {
+                try FileManager.default.copyItem(at: src, to: destURL)
+                logger.info("Created default config at \(configPath)")
+            }
+        } catch {
+            logger.error("Failed to copy default config to \(configPath)", metadata: ["error": "\(error)"])
+        }
+    }
     
     private func applyEnvironmentOverrides(_ config: inout HavenConfig) {
         if let port = ProcessInfo.processInfo.environment["HAVEN_PORT"],
@@ -382,6 +448,10 @@ public class ConfigLoader {
         
         if let logLevel = ProcessInfo.processInfo.environment["HAVEN_LOG_LEVEL"] {
             config.logging.level = logLevel
+        }
+        
+        if let chatDbPath = ProcessInfo.processInfo.environment["HAVEN_IMESSAGE_CHAT_DB_PATH"] {
+            config.modules.imessage.chatDbPath = chatDbPath
         }
     }
     

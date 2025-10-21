@@ -22,7 +22,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.62.0"),
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.24.0"),
+    // GRDB removed: not used by any current target
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.6"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.3"),
@@ -63,16 +63,7 @@ let package = Package(
             path: "Sources/Face"
         ),
         
-        // IMessages: Messages.app database collector
-        .target(
-            name: "IMessages",
-            dependencies: [
-                "HavenCore",
-                "OCR",
-                .product(name: "GRDB", package: "GRDB.swift")
-            ],
-            path: "Sources/IMessages"
-        ),
+        // IMessages target intentionally omitted (no Sources/IMessages in this repo)
         
         // FSWatch: File system monitoring
         .target(
@@ -89,7 +80,6 @@ let package = Package(
                 "OCR",
                 "Entity",
                 "Face",
-                "IMessages",
                 "FSWatch",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -128,12 +118,7 @@ let package = Package(
             path: "Tests/OCRTests",
             resources: [.copy("Fixtures")]
         ),
-        .testTarget(
-            name: "IMessagesTests",
-            dependencies: ["IMessages", "HavenCore"],
-            path: "Tests/IMessagesTests",
-            resources: [.copy("Fixtures")]
-        ),
+        // IMessagesTests omitted (test fixture retained in tree but not part of Package.swift)
         .testTarget(
             name: "FSWatchTests",
             dependencies: ["FSWatch", "HavenCore"],

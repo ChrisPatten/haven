@@ -3,15 +3,31 @@ port: 7090
 
 auth:
   header: x-auth
-  secret: change-me  # CHANGE THIS IN PRODUCTION!
+  secret: changeme  # CHANGE THIS IN PRODUCTION!
 
 gateway:
-  base_url: http://gateway:8080
+  # HostAgent runs on macOS host, so use localhost:8085 to reach Gateway
+  # (Gateway container exposes port 8085 to the host)
+  base_url: http://localhost:8085
   ingest_path: /v1/ingest
   timeout: 30
 
 logging:
+  # Valid levels: trace, debug, info, notice, warning (or warn), error, critical (or fatal)
+  # - Use lower-case strings. Some runtimes accept synonyms (warn/fatal).
+  # - trace: very detailed diagnostics
+  # - debug: verbose debugging information
+  # - info: normal operational messages
+  # - notice: higher-than-info (optional in some libs)
+  # - warning/warn: unexpected but non-fatal
+  # - error: operation failed; attention required
+  # - critical/fatal: serious failure requiring immediate action
   level: info
+  # Valid formats: json, text, logfmt
+  # - json: structured JSON logs (default in this config)
+  # - text: human-readable plain text logs
+  # - logfmt: key=value pairs for compatibility with some log collectors
+  # Use lower-case strings. Some runtimes accept additional custom formatters.
   format: json
 
 modules:
@@ -19,6 +35,11 @@ modules:
     enabled: true
     batch_size: 500
     ocr_enabled: true
+    # chat_db_path: Path to chat.db (defaults to ~/Library/Messages/chat.db)
+    # For development without Full Disk Access, copy chat.db to ~/.haven/chat.db
+    # and set: chat_db_path: ~/.haven/chat.db
+    # Or use environment variable: HAVEN_IMESSAGE_CHAT_DB_PATH=~/.haven/chat.db
+    chat_db_path: ""  # Empty string uses system default
   
   ocr:
     enabled: true

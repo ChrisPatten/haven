@@ -127,7 +127,7 @@ public actor EntityService {
 
 // MARK: - Data Types
 
-public enum EntityType: String, Codable, CaseIterable {
+public enum EntityType: String, Codable, CaseIterable, Sendable {
     case person
     case organization
     case place

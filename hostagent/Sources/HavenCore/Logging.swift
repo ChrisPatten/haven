@@ -6,6 +6,11 @@ public struct HavenLogger {
     private let subsystem = "com.haven.hostagent"
     private let category: String
     private let osLog: OSLog
+    // Global minimum level; messages below this will be suppressed.
+    // Lower numeric == more verbose. Default is info.
+    private static var minimumLevelPriority: Int = HavenLogger.priority(for: "info")
+    // Logging output format: "json", "text", or "logfmt"
+    private static var outputFormat: String = "json"
     
     public init(category: String) {
         self.category = category
@@ -34,31 +39,85 @@ public struct HavenLogger {
     }
     
     private func log(level: String, message: String, metadata: [String: Any], osLogType: OSLogType) {
+        // Respect global minimum level
+        let msgPriority = HavenLogger.priority(for: level)
+        if msgPriority < HavenLogger.minimumLevelPriority {
+            return
+        }
         var logData: [String: Any] = [
             "ts": ISO8601DateFormatter().string(from: Date()),
             "lvl": level,
             "mod": category,
             "msg": message
         ]
-        
+
         // Merge metadata
         for (key, value) in metadata {
             logData[key] = value
         }
-        
-        // Convert to JSON string
-        if let jsonData = try? JSONSerialization.data(withJSONObject: logData, options: [.sortedKeys]),
-           let jsonString = String(data: jsonData, encoding: .utf8) {
-            // Primary sink: os_log (structured system logging)
-            os_log("%{public}@", log: osLog, type: osLogType, jsonString)
 
-            // Also emit to stdout for detached / development runs (captured by nohup)
-            // Keep this lightweight and unconditional for easier debugging locally.
-            print(jsonString)
-        } else {
-            // Fallback to simple logging
-            os_log("[%{public}@] %{public}@: %{public}@", log: osLog, type: osLogType, level, category, message)
-            print("[\(level)] \(category): \(message)")
+        let fmt = HavenLogger.outputFormat.lowercased()
+        switch fmt {
+        case "text":
+            // Human readable text: [lvl] category: message key=val ...
+            var parts = ["[\(level)] \(category): \(message)"]
+            if !metadata.isEmpty {
+                let meta = metadata.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+                parts.append(meta)
+            }
+            let out = parts.joined(separator: " ")
+            os_log("%{public}@", log: osLog, type: osLogType, out)
+            print(out)
+
+        case "logfmt":
+            // key=value format for log collectors
+            var pairs: [String] = []
+            pairs.append("ts=\(ISO8601DateFormatter().string(from: Date()))")
+            pairs.append("lvl=\(level)")
+            pairs.append("mod=\(category)")
+            pairs.append("msg=\"\(message)\"")
+            for (k, v) in metadata.sorted(by: { $0.key < $1.key }) {
+                pairs.append("\(k)=\"\(v)\"")
+            }
+            let out = pairs.joined(separator: " ")
+            os_log("%{public}@", log: osLog, type: osLogType, out)
+            print(out)
+
+        default:
+            // Default: JSON structured output
+            if let jsonData = try? JSONSerialization.data(withJSONObject: logData, options: [.sortedKeys]),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                os_log("%{public}@", log: osLog, type: osLogType, jsonString)
+                print(jsonString)
+            } else {
+                // Fallback to text
+                os_log("[%{public}@] %{public}@: %{public}@", log: osLog, type: osLogType, level, category, message)
+                print("[\(level)] \(category): \(message)")
+            }
+        }
+    }
+
+    /// Set the global minimum level by name (e.g. "info", "warning").
+    public static func setMinimumLevel(_ level: String) {
+        HavenLogger.minimumLevelPriority = HavenLogger.priority(for: level)
+    }
+
+    /// Set the global output format (json, text, logfmt)
+    public static func setOutputFormat(_ format: String) {
+        HavenLogger.outputFormat = format.lowercased()
+    }
+
+    /// Map textual level to numeric priority. Higher means more severe.
+    public static func priority(for level: String) -> Int {
+        switch level.lowercased() {
+        case "trace": return 0
+        case "debug": return 10
+        case "info": return 20
+        case "notice": return 25
+        case "warning", "warn": return 30
+        case "error": return 40
+        case "critical", "fatal": return 50
+        default: return 20 // default to info
         }
     }
 }

@@ -51,6 +51,8 @@ nano ~/.haven/hostagent.yaml
 4. Enable the checkbox
 5. If prompted, authenticate with your password
 
+> **Development Mode:** For rapid development without Full Disk Access, see [DEVELOPMENT_MODE.md](DEVELOPMENT_MODE.md) to use a copy of chat.db in `~/.haven/`.
+
 ### Run Manually
 
 ```bash

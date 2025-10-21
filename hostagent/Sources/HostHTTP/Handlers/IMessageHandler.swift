@@ -99,6 +99,7 @@ public actor IMessageHandler {
         
         // Parse request parameters
         var params = CollectorParams()
+        params.configChatDbPath = config.modules.imessage.chatDbPath
         if let body = request.body, !body.isEmpty {
             if let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
                 params.mode = json["mode"] as? String ?? params.mode
@@ -242,8 +243,12 @@ public actor IMessageHandler {
         var threadLookbackDays: Int = 90
         var messageLookbackDays: Int = 30
         var chatDbPath: String = ""
+        var configChatDbPath: String = ""
         
         var resolvedChatDbPath: String {
+            if !configChatDbPath.isEmpty {
+                return NSString(string: configChatDbPath).expandingTildeInPath
+            }
             if !chatDbPath.isEmpty {
                 return chatDbPath
             }
@@ -259,41 +264,83 @@ public actor IMessageHandler {
             throw CollectorError.chatDbNotFound(chatDbPath)
         }
         
-        // Create a safe snapshot of chat.db using SQLite backup API
-        // Note: We reuse the same snapshot file like the Python collector
-        let snapshotPath = try createChatDbSnapshot(sourcePath: chatDbPath)
+        // Determine if we need to create a snapshot
+        // If the source is already in ~/.haven/, we can use it directly (it's already a copy)
+        let havenDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".haven")
+        let isAlreadyDevCopy = chatDbPath.hasPrefix(havenDir.path)
         
-        // Verify snapshot exists
-        guard FileManager.default.fileExists(atPath: snapshotPath) else {
-            throw CollectorError.snapshotFailed("Snapshot file was not created at \(snapshotPath)")
+        let dbPath: String
+        if isAlreadyDevCopy {
+            // Use the dev copy directly - no snapshot needed
+            logger.info("Using development copy directly (no snapshot needed)", metadata: ["path": chatDbPath])
+            dbPath = chatDbPath
+        } else {
+            // Create a safe snapshot of the system chat.db using SQLite backup API
+            logger.info("Creating snapshot of system chat.db", metadata: ["source": chatDbPath])
+            dbPath = try createChatDbSnapshot(sourcePath: chatDbPath)
+            
+            // Verify snapshot exists
+            guard FileManager.default.fileExists(atPath: dbPath) else {
+                throw CollectorError.snapshotFailed("Snapshot file was not created at \(dbPath)")
+            }
         }
         
-        logger.info("Opening snapshot database", metadata: ["path": snapshotPath])
+        logger.info("Opening database", metadata: ["path": dbPath])
         
-        // Open database (snapshot -> immutable URI -> source fallback)
+        // Open database with appropriate flags based on mode
         var db: OpaquePointer? = nil
-        var openResult = sqlite3_open_v2(snapshotPath, &db, SQLITE_OPEN_READONLY, nil)
+        var openResult: Int32
         var usingSourceFallback = false
-        if openResult != SQLITE_OK {
-            logger.warning("Snapshot open failed; retry immutable URI", metadata: ["code": String(openResult)])
-            if db != nil { sqlite3_close(db); db = nil }
-            let immutableUri = "file:\(snapshotPath)?mode=ro&immutable=1"
-            openResult = sqlite3_open_v2(immutableUri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil)
+        
+        if isAlreadyDevCopy {
+            // For dev copies, try different approaches to handle missing WAL files
+            // Try 1: Open with nolock and immutable flags (works without WAL files)
+            let noLockUri = "file:\(dbPath)?mode=ro&nolock=1&immutable=1"
+            openResult = sqlite3_open_v2(noLockUri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil)
+            
+            if openResult != SQLITE_OK {
+                logger.warning("Dev copy open with nolock failed; trying basic readonly", metadata: ["code": String(openResult)])
+                if db != nil { sqlite3_close(db); db = nil }
+                // Try 2: Basic readonly open
+                openResult = sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil)
+            }
+            
+            if openResult != SQLITE_OK {
+                logger.warning("Dev copy basic open failed; trying immutable URI", metadata: ["code": String(openResult)])
+                if db != nil { sqlite3_close(db); db = nil }
+                // Try 3: Immutable URI
+                let immutableUri = "file:\(dbPath)?mode=ro&immutable=1"
+                openResult = sqlite3_open_v2(immutableUri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil)
+            }
+        } else {
+            // For snapshots, use standard approach
+            openResult = sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil)
+            
+            if openResult != SQLITE_OK {
+                logger.warning("Snapshot open failed; retry immutable URI", metadata: ["code": String(openResult)])
+                if db != nil { sqlite3_close(db); db = nil }
+                let immutableUri = "file:\(dbPath)?mode=ro&immutable=1"
+                openResult = sqlite3_open_v2(immutableUri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil)
+            }
         }
+        
+        // Final fallback: try source database directly
         if openResult != SQLITE_OK {
-            logger.warning("Immutable snapshot open failed; falling back to source DB", metadata: ["code": String(openResult)])
+            logger.warning("All open attempts failed; falling back to source DB", metadata: ["code": String(openResult)])
             if db != nil { sqlite3_close(db); db = nil }
-            let sourceUri = "file:\(chatDbPath)?mode=ro"
+            let sourceUri = "file:\(chatDbPath)?mode=ro&nolock=1"
             openResult = sqlite3_open_v2(sourceUri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil)
             if openResult == SQLITE_OK { usingSourceFallback = true }
         }
+        
         guard openResult == SQLITE_OK else {
-            var errorMsg = "Failed to open snapshot and source DB"
+            var errorMsg = "Failed to open database"
             if let dbLocal = db { errorMsg += ": \(String(cString: sqlite3_errmsg(dbLocal))) (code: \(openResult))" }
+            errorMsg += "\nTip: For dev mode, ensure chat.db is properly copied. Run: cp ~/Library/Messages/chat.db ~/.haven/chat.db"
             throw CollectorError.databaseOpenFailed(errorMsg)
         }
         defer { if db != nil { sqlite3_close(db) } }
-        logger.info("Database open success", metadata: ["mode": usingSourceFallback ? "source_fallback" : "snapshot"]) 
+        logger.info("Database open success", metadata: ["mode": usingSourceFallback ? "source_fallback" : (isAlreadyDevCopy ? "dev_copy" : "snapshot")]) 
         // Diagnostics: journal mode
         do {
             var pragmaStmt: OpaquePointer? = nil

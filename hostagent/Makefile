@@ -9,8 +9,9 @@ help:
 	@echo "  clean      - Clean build artifacts"
 	@echo "  install    - Install to /usr/local/bin"
 	@echo "  uninstall  - Remove from /usr/local/bin"
-	@echo "  run        - Run debug version"
-	@echo "  dev        - Run with auto-reload (requires entr)"
+	@echo "  run        - Run debug version (auto-detects dev mode)"
+	@echo "  dev        - Run with auto-reload (requires entr, auto-detects dev mode)"
+	@echo "  dev-setup  - Set up development mode (copy chat.db to ~/.haven)"
 	@echo "  launchd    - Install and start LaunchAgent"
 	@echo "  unlaunchd  - Stop and uninstall LaunchAgent"
 
@@ -51,9 +52,14 @@ uninstall:
 	@sudo rm -f /usr/local/bin/hostagent
 	@echo "Uninstall complete (config preserved at ~/.haven/)"
 
-# Run debug version
+# Run debug version (with dev mode if ~/.haven/chat.db exists)
 run: build
-	./.build/debug/hostagent
+	@if [ -f ~/.haven/chat.db ]; then \
+		echo "📋 Development mode: using ~/.haven/chat.db"; \
+		export HAVEN_IMESSAGE_CHAT_DB_PATH=~/.haven/chat.db && ./.build/debug/hostagent; \
+	else \
+		./.build/debug/hostagent; \
+	fi
 
 # Development mode with auto-reload (requires entr)
 dev:
@@ -61,7 +67,47 @@ dev:
 		echo "Error: entr not found. Install with: brew install entr"; \
 		exit 1; \
 	fi
-	@find Sources -name '*.swift' | entr -r make run
+	@if [ -f ~/.haven/chat.db ]; then \
+		echo "📋 Development mode: using ~/.haven/chat.db"; \
+		export HAVEN_IMESSAGE_CHAT_DB_PATH=~/.haven/chat.db && find Sources -name '*.swift' | entr -r sh -c 'export HAVEN_IMESSAGE_CHAT_DB_PATH=~/.haven/chat.db && ./.build/debug/hostagent'; \
+	else \
+		find Sources -name '*.swift' | entr -r make run; \
+	fi
+
+# Set up development mode (copy chat.db to ~/.haven)
+dev-setup:
+	@echo "🏠 Haven Host Agent - Development Mode Setup"
+	@echo "============================================="
+	@echo ""
+	@if [ -f ~/.haven/chat.db ]; then \
+		echo "✅ Development mode already set up"; \
+		echo "   ~/.haven/chat.db exists"; \
+		echo ""; \
+		echo "To refresh the copy:"; \
+		echo "  1. Close Messages app (to release database locks)"; \
+		echo "  2. Run: rm ~/.haven/chat.db && make dev-setup"; \
+	else \
+		if [ -f ~/Library/Messages/chat.db ]; then \
+			mkdir -p ~/.haven; \
+			echo "📋 Copying chat.db to ~/.haven/chat.db..."; \
+			echo "   Note: Using nolock mode, so WAL files not required"; \
+			cp ~/Library/Messages/chat.db ~/.haven/chat.db && \
+			chmod 644 ~/.haven/chat.db && \
+			echo "✅ Development mode setup complete!" && \
+			echo "" && \
+			echo "File copied: $$(du -h ~/.haven/chat.db | cut -f1)" && \
+			echo "" && \
+			echo "ℹ️  The copy is opened with 'nolock' mode, so missing WAL files are OK"; \
+			echo "" && \
+			echo "Now run: make run or make dev"; \
+		else \
+			echo "❌ System chat.db not found at ~/Library/Messages/chat.db"; \
+			echo ""; \
+			echo "You may need to:"; \
+			echo "  1. Grant Full Disk Access to Terminal"; \
+			echo "  2. Use Messages app to create message history"; \
+		fi \
+	fi
 
 # Install and start LaunchAgent
 launchd: install

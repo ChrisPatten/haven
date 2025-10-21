@@ -18,10 +18,21 @@ struct HavenHostAgent: AsyncParsableCommand {
     
     func run() async throws {
         printBanner()
-        
+        // Respect environment override for logging level early (before config load)
+        if let envLevel = ProcessInfo.processInfo.environment["HAVEN_LOG_LEVEL"] {
+            HavenLogger.setMinimumLevel(envLevel)
+        }
+        // Respect environment override for logging format early
+        if let envFormat = ProcessInfo.processInfo.environment["HAVEN_LOG_FORMAT"] {
+            HavenLogger.setOutputFormat(envFormat)
+        }
         // Load configuration
         let configLoader = ConfigLoader()
         let config = try configLoader.load(from: self.config)
+    // Apply configured minimum level from file (overrides env)
+    HavenLogger.setMinimumLevel(config.logging.level)
+    // Apply configured output format from file (overrides env)
+    HavenLogger.setOutputFormat(config.logging.format)
         let logger = HavenLogger(category: "main")
 
         logger.info("Configuration loaded", metadata: [

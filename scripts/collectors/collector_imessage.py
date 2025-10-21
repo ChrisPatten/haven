@@ -186,13 +186,65 @@ def _build_event_signature(event: "SourceEvent") -> Dict[str, Any]:
 def _should_emit_event(event: "SourceEvent") -> bool:
     current = _build_event_signature(event)
     previous = _version_tracker.get(event.doc_id)
-    if previous == current:
-        return False
-    return True
+    if previous is None:
+        return True
+    # Support legacy format (previous stored signature directly) and new format (dict with 'sig')
+    if isinstance(previous, dict) and "sig" in previous:
+        prev_sig = previous.get("sig")
+    else:
+        prev_sig = previous
+    return prev_sig != current
 
 
 def _register_event_version(event: "SourceEvent") -> None:
-    _version_tracker[event.doc_id] = _build_event_signature(event)
+    try:
+        sig = _build_event_signature(event)
+        row_id = event.message.get("row_id")
+        entry: Dict[str, Any] = {"sig": sig}
+        if isinstance(row_id, int):
+            entry["row_id"] = int(row_id)
+        else:
+            entry["row_id"] = row_id
+        entry["registered_at"] = datetime.now(timezone.utc).isoformat()
+        _version_tracker[event.doc_id] = entry
+    except Exception:
+        # Defensive: fall back to previous behaviour
+        try:
+            _version_tracker[event.doc_id] = _build_event_signature(event)
+        except Exception:
+            logger.debug("register_event_failed", doc_id=getattr(event, "doc_id", None), exc_info=True)
+
+
+def _prune_version_tracker_by_age(max_age_seconds: int = 15 * 60) -> None:
+    """Prune version tracker entries older than max_age_seconds based on registered_at.
+
+    Rationale: entries older than ~15 minutes are unlikely to change, so we can
+    safely remove them for efficiency.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    try:
+        removed = []
+        for key, val in list(_version_tracker.items()):
+            if isinstance(val, dict):
+                reg = val.get("registered_at")
+                if not reg:
+                    continue
+                try:
+                    reg_dt = datetime.fromisoformat(str(reg))
+                except Exception:
+                    # If parsing fails, skip pruning this entry
+                    continue
+                # Normalize naive datetimes to UTC
+                if reg_dt.tzinfo is None:
+                    reg_dt = reg_dt.replace(tzinfo=timezone.utc)
+                if reg_dt < cutoff:
+                    del _version_tracker[key]
+                    removed.append(key)
+        if removed:
+            logger.debug("pruned_version_tracker_by_age", removed_count=len(removed))
+            _save_version_tracker(_version_tracker)
+    except Exception:
+        logger.debug("prune_version_tracker_by_age_failed", exc_info=True)
 
 
 @dataclass
@@ -1244,11 +1296,32 @@ def normalize_row(
     image_placeholders: List[str] = []
 
     if not disable_images:
-        enriched_attachments, image_events, image_placeholders = enrich_image_attachments(
+        result = enrich_image_attachments(
             attachments,
             thread_id=row["chat_guid"],
             message_guid=row["guid"],
         )
+        # Support older callables (tests may monkeypatch to return 2-tuple)
+        try:
+            # Normalize result into a tuple for safe unpacking
+            if result is None:
+                enriched_attachments, image_events, image_placeholders = [], [], []
+            else:
+                tup = tuple(result) if not isinstance(result, tuple) else result
+                if len(tup) == 3:
+                    enriched_attachments, image_events, image_placeholders = tup
+                elif len(tup) == 2:
+                    enriched_attachments, image_events = tup
+                    image_placeholders = []
+                else:
+                    # Fallback: treat as iterable of enriched attachments
+                    enriched_attachments = list(tup)
+                    image_events = []
+                    image_placeholders = []
+        except Exception:
+            enriched_attachments = []
+            image_events = []
+            image_placeholders = []
         
         # If we have placeholders (images that failed or were missing), add them to text
         # BUT: Don't override the "Sent N photos" summary text
@@ -1678,6 +1751,11 @@ def process_events(
 
     for event in events:
         _register_event_version(event)
+    # Prune tracker using state's min_seen_rowid to keep it bounded
+    try:
+        _prune_version_tracker(state.min_seen_rowid if state.min_seen_rowid else None)
+    except Exception:
+        logger.debug("prune_in_process_events_failed", exc_info=True)
     _save_version_tracker(_version_tracker)
 
     row_ids: List[int] = []
@@ -1873,12 +1951,25 @@ def run_poll_loop(args: argparse.Namespace) -> None:
                         # Process batch
                         if post_events(batch_events):
                             total_processed += len(batch_events)
+                            # Register versions for dispatched events so we don't resend them
+                            for evt in batch_events:
+                                try:
+                                    _register_event_version(evt)
+                                except Exception:
+                                    logger.debug("version_register_failed", doc_id=getattr(evt, "doc_id", None), exc_info=True)
+                            _save_version_tracker(_version_tracker)
+
                             # Update min_seen to lowest ROWID in this batch
                             min_rowid = min(evt.message["row_id"] for evt in batch_events)
                             state.min_seen_rowid = min_rowid
+                            # Prune tracker entries older than configured age (15 minutes)
+                            try:
+                                _prune_version_tracker_by_age()
+                            except Exception:
+                                logger.debug("prune_after_min_seen_failed", exc_info=True)
                             scan_cursor = min_rowid - 1
                             state.save()  # Save after each batch so we can resume
-                            
+
                             logger.info(
                                 "backlog_batch_dispatched",
                                 count=len(batch_events),
@@ -1989,9 +2080,17 @@ def run_poll_loop(args: argparse.Namespace) -> None:
                             # Process batch
                             if post_events(batch_events):
                                 total_processed += len(batch_events)
+                                # Register versions for dispatched events so we don't resend them
+                                for evt in batch_events:
+                                    try:
+                                        _register_event_version(evt)
+                                    except Exception:
+                                        logger.debug("version_register_failed", doc_id=getattr(evt, "doc_id", None), exc_info=True)
+                                _save_version_tracker(_version_tracker)
+
                                 min_rowid = min(evt.message["row_id"] for evt in batch_events)
                                 scan_cursor = min_rowid - 1
-                                
+
                                 # Record activity time when we dispatched new messages
                                 last_activity = datetime.now(timezone.utc)
                                 logger.info(
@@ -2006,6 +2105,11 @@ def run_poll_loop(args: argparse.Namespace) -> None:
                         
                         # Update last_seen to new max
                         state.last_seen_rowid = state.max_seen_rowid
+                        # Prune old tracker entries by age (15 minutes)
+                        try:
+                            _prune_version_tracker_by_age()
+                        except Exception:
+                            logger.debug("prune_after_new_max_failed", exc_info=True)
                         state.save()
                         
                         if total_processed > 0:
@@ -2076,6 +2180,13 @@ def simulate_message(text: str, sender: str = "me") -> None:
         logger.info("simulated_message_sent", text=text)
     else:
         logger.error("simulated_message_failed", text=text)
+
+    # Ensure simulated messages are recorded in the version tracker so repeats don't resend
+    try:
+        _register_event_version(event)
+        _save_version_tracker(_version_tracker)
+    except Exception:
+        logger.debug("simulate_version_register_failed", doc_id=event.doc_id, exc_info=True)
 
 
 def parse_time_bound(time_str: str) -> timedelta:

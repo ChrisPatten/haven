@@ -2,10 +2,10 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOHTTP1
-import HavenCore
+@preconcurrency import HavenCore
 
 /// SwiftNIO-based HTTP server for Haven Host Agent
-public final class HavenHTTPServer {
+public final class HavenHTTPServer: @unchecked Sendable {
     private let config: HavenConfig
     private let router: Router
     private let logger: HavenLogger
@@ -20,6 +20,7 @@ public final class HavenHTTPServer {
     }
     
     deinit {
+        // Best-effort synchronous shutdown for deinit (can't await here)
         try? group.syncShutdownGracefully()
     }
     
@@ -54,13 +55,14 @@ public final class HavenHTTPServer {
     public func stop() async throws {
         logger.info("Stopping HTTP server...")
         try await channel?.close()
-        try group.syncShutdownGracefully()
+        // Use async shutdown to avoid blocking from an async context
+        try await group.shutdownGracefully()
     }
 }
 
 // MARK: - HTTP Request Handler
 
-final class HTTPHandler: ChannelInboundHandler {
+final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
     
@@ -119,14 +121,23 @@ final class HTTPHandler: ChannelInboundHandler {
                 }
             )
             
-            // Process request asynchronously, but send response on EventLoop
+            // Process request asynchronously, but send response on the EventLoop.
+            // Convert the non-Sendable `context` into an opaque pointer (raw) so
+            // we don't capture the non-Sendable type in a @Sendable closure.
             let eventLoop = context.eventLoop
+            let ctxRaw = Int(bitPattern: Unmanaged.passUnretained(context).toOpaque())
+            let headVersion = head.version
+
             Task {
                 let response = await processRequest(request, context: reqContext)
-                
-                // Execute the response sending on the EventLoop
+
+                // Execute the response sending on the EventLoop. Reconstruct the
+                // ChannelHandlerContext from the opaque pointer inside the eventLoop
+                // closure to avoid capturing it into the @Sendable closure.
                 eventLoop.execute {
-                    self.sendResponse(context: context, response: response, head: head)
+                    let ptr = UnsafeRawPointer(bitPattern: ctxRaw)!
+                    let ctx = Unmanaged<ChannelHandlerContext>.fromOpaque(ptr).takeUnretainedValue()
+                    self.sendResponse(context: ctx, response: response, version: headVersion)
                 }
             }
             
@@ -180,7 +191,7 @@ final class HTTPHandler: ChannelInboundHandler {
         return response
     }
     
-    private func sendResponse(context: ChannelHandlerContext, response: HTTPResponse, head: HTTPRequestHead) {
+    private func sendResponse(context: ChannelHandlerContext, response: HTTPResponse, version: HTTPVersion) {
         // Send headers
         var headers = HTTPHeaders()
         for (name, value) in response.headers {
@@ -188,7 +199,7 @@ final class HTTPHandler: ChannelInboundHandler {
         }
         
         let responseHead = HTTPResponseHead(
-            version: head.version,
+            version: version,
             status: HTTPResponseStatus(statusCode: response.statusCode),
             headers: headers
         )
