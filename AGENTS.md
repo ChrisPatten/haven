@@ -6,9 +6,13 @@
 * **External entry point:** Gateway only.  
 * **HostAgent:** localhost-only.  
 * **No agent** writes directly to Postgres, Qdrant, or MinIO except via prescribed routes.
-* If the user mentions "bead", "beads", or references beads by name like "haven-27" or "hv-27", they are referring to the planning and work-tracking system available via the beads MCP server.
+* If the user mentions "bead", "beads", or references beads by name like "haven-27" or "hv-27", they are referring to the planning and work-tracking system available via the beads MCP server. Call the `beads.show` tool to retrieve relevant information.
+  * If the MCP server is not available, fall back to using the `bd` command-line tool to retrieve information about beads.
 * Review the documentation in /docs/ as necessary for developer onboarding and architecture overviews.
 * Unless specifically instructed to do otherwise, any new .md files created MUST be placed in .tmp/. "Otherwise" means specific guidance to update permanent documentation. In this case, integrate the new information into the /docs/ directory for inclusion in the mkdocs site.
+* Before closing a beads issue, ensure any documentation changes are reflected in /docs/ as appropriate.
+* **NEVER** edit the files in .beads/ directly. All changes must be made via the beads MCP server or the `bd` CLI tool to ensure proper versioning and tracking.
+* When writing commit messages, include the relevant beads issue ID in the footer as `Refs: beads:#<id>`. Do not include references to the files in the .beads/ directory in commit messages.
 
 
 ---
@@ -103,7 +107,7 @@ Clients (Cursor, Claude Desktop, etc.) must register Beads in their MCP config:
 ```
 
 Tools exposed:
-`beads.create`, `beads.update`, `beads.list`, `beads.close`, `beads.dep.add`, `beads.ready`
+`beads.create`, `beads.update`, `beads.list`, `beads.dep.add`, `beads.ready`, `beads.show`, `beads.reopen`, `beads.blocked`
 
 ### 9.2 Work Graph Contract
 
@@ -180,6 +184,17 @@ beads.create '{
   "size": "S",
   "body": "Gateway rejects uploads > 50MB; need chunked upload or limit bump.",
   "dependencies": [{"type":"blocks","issue":"beads:#142"}]
+}'
+```
+
+**Close completed work**
+
+```bash
+beads.update '{
+  "issue_id": "haven-29",
+  "status": "closed",
+  "notes": "Implemented .emlx parsing, metadata extraction, intent classification, noise detection, PII redaction; added HostAgent HTTP endpoints, tests (22), fixtures, and documentation. Build and tests pass locally.",
+  "workspace_root": "/Users/chrispatten/workspace/haven"
 }'
 ```
 

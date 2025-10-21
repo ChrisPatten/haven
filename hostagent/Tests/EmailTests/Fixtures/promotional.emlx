@@ -1,0 +1,17 @@
+680
+From: no-reply@newsletter.com
+To: subscriber@example.com
+Subject: Weekly Newsletter - 50% Off Sale!
+Date: Tue, 19 Oct 2025 09:00:00 -0400
+Message-ID: <news789@newsletter.com>
+List-Unsubscribe: <mailto:unsubscribe@newsletter.com>
+Content-Type: text/html; charset=utf-8
+
+<html>
+<body>
+<h1>This Week's Special Offers</h1>
+<p>Don't miss our amazing sale!</p>
+<p>50% OFF on all items this week only.</p>
+<a href="https://example.com/unsubscribe">Unsubscribe</a>
+</body>
+</html>

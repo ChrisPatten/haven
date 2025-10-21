@@ -198,6 +198,9 @@ struct HavenHostAgent: AsyncParsableCommand {
         let gatewayClient = GatewayClient(config: config.gateway, authToken: config.auth.secret)
         let iMessageHandler = IMessageHandler(config: config, gatewayClient: gatewayClient)
         
+        // Initialize email handler
+        let emailHandler = EmailHandler(config: config)
+        
         let handlers: [RouteHandler] = [
             // Core endpoints
             PatternRouteHandler(method: "GET", pattern: "/v1/health") { req, ctx in
@@ -253,6 +256,23 @@ struct HavenHostAgent: AsyncParsableCommand {
             },
             PatternRouteHandler(method: "GET", pattern: "/v1/collectors/imessage/state") { req, ctx in
                 await iMessageHandler.handleState(request: req, context: ctx)
+            },
+            
+            // Email utility endpoints
+            PatternRouteHandler(method: "POST", pattern: "/v1/email/parse") { req, ctx in
+                await emailHandler.handleParse(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "POST", pattern: "/v1/email/metadata") { req, ctx in
+                await emailHandler.handleMetadata(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "POST", pattern: "/v1/email/classify-intent") { req, ctx in
+                await emailHandler.handleClassifyIntent(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "POST", pattern: "/v1/email/redact-pii") { req, ctx in
+                await emailHandler.handleRedactPII(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "POST", pattern: "/v1/email/is-noise") { req, ctx in
+                await emailHandler.handleIsNoise(request: req, context: ctx)
             },
         ]
         

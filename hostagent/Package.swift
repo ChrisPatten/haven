@@ -63,6 +63,13 @@ let package = Package(
             path: "Sources/Face"
         ),
         
+        // Email: .emlx parsing and metadata extraction
+        .target(
+            name: "Email",
+            dependencies: ["HavenCore"],
+            path: "Sources/Email"
+        ),
+        
         // IMessages target intentionally omitted (no Sources/IMessages in this repo)
         
         // FSWatch: File system monitoring
@@ -80,6 +87,7 @@ let package = Package(
                 "OCR",
                 "Entity",
                 "Face",
+                "Email",
                 "FSWatch",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -123,6 +131,12 @@ let package = Package(
             name: "FSWatchTests",
             dependencies: ["FSWatch", "HavenCore"],
             path: "Tests/FSWatchTests"
+        ),
+        .testTarget(
+            name: "EmailTests",
+            dependencies: ["Email", "HavenCore"],
+            path: "Tests/EmailTests",
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "HostHTTPTests",

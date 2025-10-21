@@ -1,0 +1,22 @@
+580
+From: doctor@clinic.com
+To: patient@example.com
+Subject: Appointment Confirmation
+Date: Mon, 18 Oct 2025 16:30:00 -0400
+Message-ID: <appt101@clinic.com>
+In-Reply-To: <req100@example.com>
+References: <req100@example.com>
+Content-Type: text/plain; charset=utf-8
+
+Dear Patient,
+
+Your appointment has been confirmed:
+
+Date: October 25, 2025
+Time: 2:00 PM
+Location: Main Street Clinic
+
+Please arrive 15 minutes early.
+
+Best regards,
+Main Street Clinic

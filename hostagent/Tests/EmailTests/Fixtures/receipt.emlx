@@ -1,0 +1,19 @@
+745
+From: sender@example.com
+To: recipient@example.com
+Subject: Test Receipt Email
+Date: Thu, 21 Oct 2025 10:30:00 -0400
+Message-ID: <test123@example.com>
+Content-Type: text/plain; charset=utf-8
+
+Dear Customer,
+
+Thank you for your purchase!
+
+Order Number: ORD-2025-12345
+Amount: $49.99
+
+Your order has been confirmed and will ship within 2-3 business days.
+
+Best regards,
+Example Store
