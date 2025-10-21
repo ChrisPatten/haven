@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Prepare-commit-msg hook to ensure generated docs are up-to-date before running pre-commit
+set -euo pipefail
+
+echo "Running beads backlog generator (prepare-commit-msg)..."
+python3 scripts/generate_beads_backlog.py || true
+
+# Stage the generated file so subsequent hooks see the updated version
+git add docs/beads_backlog.md || true
+
+exit 0
