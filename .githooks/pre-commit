@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Pre-commit hook to refresh beads backlog markdown
+set -euo pipefail
+
+echo "Refreshing docs/beads_backlog.md..."
+python3 scripts/generate_beads_backlog.py
+
+git add docs/beads_backlog.md || true
+
+exit 0

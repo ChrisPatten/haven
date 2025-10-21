@@ -10,3 +10,12 @@ repos:
         require_serial: true
         pass_filenames: false
         files: ''
+      - id: generate-beads-backlog
+        name: generate-beads-backlog
+        entry: python3 scripts/generate_beads_backlog.py
+        language: system
+        stages: [pre-commit]
+        always_run: true
+        require_serial: true
+        pass_filenames: false
+        files: ''

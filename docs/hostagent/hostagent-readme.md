@@ -210,6 +210,44 @@ Response:
 }
 ```
 
+### Email Local Collector
+
+```bash
+# Simulate run against fixture directory
+POST /v1/collectors/email_local:run
+Content-Type: application/json
+
+{
+  "mode": "simulate",
+  "simulate_path": "/Users/alex/haven-fixtures/emlx",
+  "limit": 50
+}
+
+# Check collector state
+GET /v1/collectors/email_local/state
+```
+
+**Stats Payload**
+
+The run response and state endpoint surface the following counters:
+
+| Field | Description |
+|-------|-------------|
+| `messages_processed` | Number of `.emlx` files successfully parsed. |
+| `documents_created` | Documents emitted downstream (one per message during simulate mode). |
+| `attachments_processed` | Count of attachment records encountered. |
+| `errors_encountered` | Parse failures logged as warnings. |
+| `start_time` / `end_time` | ISO-8601 timestamps for the run window. |
+| `duration_ms` | Run duration in milliseconds. |
+
+**Error Codes**
+
+- `400` — invalid mode (`simulate` or `real` only), malformed JSON body, missing `simulate_path`, or limit outside `1..10_000`.
+- `404` — fixture path missing or contains no `.emlx` files.
+- `409` — a run is already in progress.
+- `503` — mail module disabled in config.
+- `501` — real mode requested (placeholder).
+
 ### File System Watch
 
 ```bash
@@ -265,7 +303,11 @@ modules:
   contacts: { enabled: false }
   calendar: { enabled: false }
   reminders: { enabled: false }
-  mail: { enabled: false }
+  mail:
+    enabled: true
+    filters:
+      combination_mode: any
+      default_action: include
   notes: { enabled: false }
   faces: { enabled: false }
 ```

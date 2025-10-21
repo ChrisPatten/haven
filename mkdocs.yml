@@ -20,6 +20,8 @@ nav:
   - HostAgent:
       - Overview: hostagent/index.md
       - Native README: hostagent/hostagent-readme.md
+      - Email Utilities: hostagent/email-utilities.md
+      - Email Local Collector: hostagent/email-local-collector.md
   - API Reference:
       - Overview: api/index.md
       - Gateway API: api/gateway.md
@@ -34,6 +36,7 @@ nav:
       - Database Init SQL: schema/init.sql
       - Migration Guide: schema/migrations/README.md
       - Migration v2_001 Email Collector: schema/migrations/v2_001_email_collector.sql
+  - Backlog: beads_backlog.md
   - Contributing: contributing.md
   - Changelog: changelog.md
 

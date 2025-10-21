@@ -141,7 +141,8 @@ let package = Package(
         .testTarget(
             name: "HostHTTPTests",
             dependencies: ["HostHTTP", "HavenCore"],
-            path: "Tests/HostHTTPTests"
+            path: "Tests/HostHTTPTests",
+            resources: [.copy("Fixtures")]
         )
     ]
 )

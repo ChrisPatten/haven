@@ -148,3 +148,13 @@ export-openapi:
 		docker compose run --rm --no-deps gateway python -c "import sys; sys.path.insert(0, '/app'); from services.gateway_api.app import app; import yaml; schema = app.openapi(); print(yaml.dump(schema, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120))" > openapi/gateway.yaml; \
 	fi
 	@echo "✓ OpenAPI schema exported to openapi/gateway.yaml"
+
+# Install git hooks from .githooks directory into .git/hooks
+.githooks/install-hooks:
+	@echo "Installing git hooks from .githooks to .git/hooks"
+	@mkdir -p .git/hooks
+	@cp -R .githooks/* .git/hooks/
+	@chmod +x .git/hooks/* || true
+
+install-hooks: .githooks/install-hooks
+

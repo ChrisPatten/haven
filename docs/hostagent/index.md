@@ -12,6 +12,8 @@ HostAgent is the native macOS companion to Haven. It unlocks capabilities that c
 - `GET /v1/health` — verifies the agent is running and lists enabled modules.
 - `GET /v1/capabilities` — advertises active collectors, OCR support, and configuration.
 - `POST /v1/collectors/imessage:run` — runs the iMessage collector (supports `simulate`, `limit`, and lookback parameters).
+- `POST /v1/collectors/email_local:run` — runs the Mail.app `.emlx` collector in simulate or real mode, returning run statistics.
+- `GET /v1/collectors/email_local/state` — returns collector state (last status, timestamps, counters, and last error).
 - `POST /v1/ocr` — uploads an image or presigned URL for Vision OCR + entity extraction.
 - `POST /v1/fswatch` (family of routes) — manages filesystem watch registrations and event queues.
 

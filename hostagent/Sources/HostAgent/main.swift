@@ -198,8 +198,9 @@ struct HavenHostAgent: AsyncParsableCommand {
         let gatewayClient = GatewayClient(config: config.gateway, authToken: config.auth.secret)
         let iMessageHandler = IMessageHandler(config: config, gatewayClient: gatewayClient)
         
-        // Initialize email handler
+        // Initialize email handlers
         let emailHandler = EmailHandler(config: config)
+        let emailLocalHandler = EmailLocalHandler(config: config)
         
         let handlers: [RouteHandler] = [
             // Core endpoints
@@ -256,6 +257,12 @@ struct HavenHostAgent: AsyncParsableCommand {
             },
             PatternRouteHandler(method: "GET", pattern: "/v1/collectors/imessage/state") { req, ctx in
                 await iMessageHandler.handleState(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "POST", pattern: "/v1/collectors/email_local:run") { req, ctx in
+                await emailLocalHandler.handleRun(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "GET", pattern: "/v1/collectors/email_local/state") { req, ctx in
+                await emailLocalHandler.handleState(request: req, context: ctx)
             },
             
             // Email utility endpoints
@@ -325,4 +332,3 @@ final class SignalWaiter: @unchecked Sendable {
         lock.unlock()
     }
 }
-
