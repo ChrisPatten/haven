@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gateway API – Interactive Reference</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+        background: #272822;
+        color: #f8f8f2;
+        font-family: "Fira Code", "Source Code Pro", Menlo, Monaco, Consolas, monospace;
+      }
+
+      body {
+        overflow: hidden;
+      }
+
+      #redoc-container {
+        position: fixed;
+        inset: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        background: #272822;
+      }
+
+      .loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        font-size: 1.1rem;
+        color: #f8f8f2;
+      }
+
+      /* Redoc overrides */
+      body .redoc-wrap {
+        background: transparent !important;
+      }
+
+      body .menu-content {
+        background: #1e1f1c !important;
+        color: #f8f8f2 !important;
+        border-right: 1px solid #3b3c36 !important;
+      }
+
+      body .menu-content .menu-item {
+        color: #f8f8f2 !important;
+      }
+
+      body .menu-content .menu-item.active {
+        background: #3b3c36 !important;
+        color: #a6e22e !important;
+      }
+
+      body .menu-content .menu-item:hover {
+        background: #49483e !important;
+      }
+
+      body .menu-content .search-input {
+        background: #1e1f1c !important;
+        color: #f8f8f2 !important;
+        border-color: #49483e !important;
+      }
+
+      body .api-content {
+        background: #272822 !important;
+        color: #f8f8f2 !important;
+        padding: 24px 32px 48px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        max-width: 1250px !important;
+      }
+
+      body .api-content h1,
+      body .api-content h2,
+      body .api-content h3 {
+        color: #f8f8f2 !important;
+      }
+
+      body .api-content h4,
+      body .api-content h5,
+      body .api-content h6 {
+        color: #a6e22e !important;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      body .api-content h5,
+      body .api-content h6 {
+        font-size: 0.85rem !important;
+        color: #f8f8f2 !important;
+      }
+
+      body .api-content h5 span,
+      body .api-content h6 span {
+        color: #66d9ef !important;
+        text-transform: none !important;
+        letter-spacing: 0;
+      }
+
+      body .api-content .section-title small,
+      body .api-content .section-subtitle,
+      body .api-content .hint {
+        color: #a6aebb !important;
+      }
+
+      body .api-content .sc-iqAclL,
+      body .api-content .sc-iqAclL span {
+        color: #f8f8f2 !important;
+        text-transform: none !important;
+        letter-spacing: 0 !important;
+        border-bottom-color: #3b3c36 !important;
+      }
+
+      body .api-content .sc-bQoAQe {
+        color: #66d9ef !important;
+      }
+
+      body pre,
+      body code {
+        background: #1e1f1c !important;
+        color: #f8f8f2 !important;
+      }
+
+      body kbd {
+        background: #3b3c36 !important;
+        border: 1px solid #49483e !important;
+        color: #f8f8f2 !important;
+      }
+
+      body table {
+        background: #1e1f1c !important;
+        color: #f8f8f2 !important;
+        border: 1px solid #3b3c36 !important;
+      }
+
+      body table td,
+      body table th {
+        border-color: #3b3c36 !important;
+      }
+
+      body .right-panel {
+        background: #1b1c19 !important;
+        color: #f8f8f2 !important;
+        border-left: 1px solid #3b3c36 !important;
+        box-shadow: none !important;
+      }
+
+      body .response-col_description code {
+        color: #e6db74 !important;
+      }
+
+      body .menu-content ::-webkit-scrollbar-thumb,
+      body .api-content ::-webkit-scrollbar-thumb,
+      body #redoc-container ::-webkit-scrollbar-thumb {
+        background: #49483e;
+      }
+
+      body .menu-content ::-webkit-scrollbar,
+      body .api-content ::-webkit-scrollbar,
+      body #redoc-container ::-webkit-scrollbar {
+        width: 10px;
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js" defer></script>
+  </head>
+  <body>
+    <div id="redoc-container">
+      <div class="loading">Loading Gateway API reference…</div>
+    </div>
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        if (!window.Redoc) {
+          return;
+        }
+
+        const specUrl = new URL("../../openapi/gateway.yaml", window.location.href).toString();
+        const options = {
+          hideDownloadButton: false,
+          expandResponses: "200,201,400,404",
+          pathInMiddlePanel: true,
+          disableSearch: false,
+          scrollYOffset: 0,
+          theme: {
+            colors: {
+              primary: { main: "#a6e22e" },
+              text: {
+                primary: "#f8f8f2",
+                secondary: "#a6aebb",
+                disabled: "#75715e",
+                hint: "#75715e"
+              },
+              http: {
+                get: "#a6e22e",
+                post: "#66d9ef",
+                put: "#fd971f",
+                delete: "#f92672",
+                options: "#ae81ff",
+                patch: "#e6db74"
+              },
+              background: {
+                default: "#272822",
+                paper: "#1e1f1c"
+              }
+            },
+            typography: {
+              fontFamily: '"Fira Code", "Source Code Pro", Menlo, Monaco, Consolas, monospace',
+              headings: {
+                fontFamily: '"Fira Code", "Source Code Pro", Menlo, Monaco, Consolas, monospace',
+                fontWeight: "500"
+              },
+              code: {
+                fontFamily: '"Fira Code", "Source Code Pro", Menlo, Monaco, Consolas, monospace'
+              },
+              links: { color: "#66d9ef" },
+              bold: { fontWeight: "600" },
+              buttons: { textTransform: "none" }
+            },
+            sidebar: {
+              backgroundColor: "#1e1f1c",
+              textColor: "#f8f8f2",
+              activeTextColor: "#a6e22e",
+              width: "300px"
+            },
+            menu: {
+              backgroundColor: "#1e1f1c",
+              textColor: "#f8f8f2",
+              activeTextColor: "#a6e22e",
+              width: "300px"
+            },
+            rightPanel: {
+              backgroundColor: "#1b1c19",
+              textColor: "#f8f8f2",
+              width: "360px"
+            },
+            spacing: {
+              unit: 4,
+              sectionHorizontal: 28,
+              sectionVertical: 24
+            }
+          }
+        };
+
+        window.Redoc.init(specUrl, options, document.getElementById("redoc-container"));
+      });
+    </script>
+  </body>
+</html>

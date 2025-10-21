@@ -13,7 +13,7 @@ Haven is a personal data plane that turns local iMessage history into a searchab
 - **Embedding Service** – background worker (`services/embedding_service/worker.py`) that polls pending chunks, calls the embedding provider, and upserts vectors into Qdrant.
 - **Gateway API (`:8085`)** – public FastAPI surface for hybrid search, summarization, document retrieval, and catalog proxying.
 - **Search Service** – FastAPI + Typer service that powers hybrid lexical/vector search and ingestion utilities.
-- **OpenAPI Spec** – `openapi.yaml` documents the public gateway surface for external integrations.
+- **OpenAPI Spec** – `openapi/gateway.yaml` documents the public gateway surface for external integrations.
 
 ## Repository Layout
 - `services/` – Deployable FastAPI apps and workers (gateway, catalog, embedding service).

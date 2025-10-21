@@ -66,18 +66,19 @@ public struct HealthHandler {
             extraInfo: nil
         ))
         
-        // Stub modules
-        for (name, moduleConfig) in [
-            ("contacts", config.modules.contacts),
-            ("calendar", config.modules.calendar),
-            ("reminders", config.modules.reminders),
-            ("mail", config.modules.mail),
-            ("notes", config.modules.notes)
+        // Stub and simple modules (use enabled booleans to avoid type mismatch between
+        // different module config types like MailModuleConfig and StubModuleConfig)
+        for (name, enabled) in [
+            ("contacts", config.modules.contacts.enabled),
+            ("calendar", config.modules.calendar.enabled),
+            ("reminders", config.modules.reminders.enabled),
+            ("mail", config.modules.mail.enabled),
+            ("notes", config.modules.notes.enabled)
         ] {
             summaries.append(ModuleSummary(
                 name: name,
-                enabled: moduleConfig.enabled,
-                status: moduleConfig.enabled ? "stub" : "disabled",
+                enabled: enabled,
+                status: enabled ? "stub" : "disabled",
                 extraInfo: nil
             ))
         }

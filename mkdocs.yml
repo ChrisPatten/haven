@@ -1,0 +1,61 @@
+site_name: Haven Documentation
+site_description: "Documentation hub for Haven services and operations."
+site_url: ""
+
+theme:
+  name: material
+
+nav:
+  - Home: index.md
+  - Guides:
+      - Getting Started: getting-started.md
+      - Repository Overview: guides/README.md
+      - Agents Overview: guides/AGENTS.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Services: architecture/services.md
+  - Operations:
+      - Local Development: operations/local-dev.md
+      - Deployment: operations/deploy.md
+  - HostAgent:
+      - Overview: hostagent/index.md
+      - Native README: hostagent/hostagent-readme.md
+  - API Reference:
+      - Overview: api/index.md
+      - Gateway API: api/gateway.md
+  - Reference:
+      - Functional Guide: reference/functional_guide.md
+      - Technical Reference: reference/technical_reference.md
+      - Graph Reference: reference/graph.md
+      - Backup & Restore: reference/BACKUP_RESTORE.md
+      - Schema v2 Reference: reference/SCHEMA_V2_REFERENCE.md
+  - Schema:
+      - Database Init SQL: schema/init.sql
+      - Migration Guide: schema/migrations/README.md
+      - Migration v2_001 Email Collector: schema/migrations/v2_001_email_collector.sql
+  - Contributing: contributing.md
+  - Changelog: changelog.md
+
+docs_dir: docs
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - toc:
+      permalink: true
+
+extra:
+  openapi_specs:
+    - id: gateway
+      name: Gateway API
+      description: "Public ingestion, search, and orchestration endpoints exposed by the Gateway service."
+      source: openapi/gateway.yaml
+      output: openapi/gateway.yaml
+      page: api/gateway.md
+
+plugins:
+  - search
+  - mkdocs-simple-hooks:
+      hooks:
+        on_pre_build: scripts.docs_hooks:prepare_openapi_assets
+        on_post_build: scripts.docs_hooks:cleanup_openapi_assets

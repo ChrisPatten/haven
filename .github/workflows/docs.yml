@@ -1,0 +1,115 @@
+name: Docs Publish
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - openapi/**
+      - requirements-docs.txt
+      - .github/workflows/docs.yml
+      - scripts/docs_hooks.py
+  pull_request:
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - openapi/**
+      - requirements-docs.txt
+      - .github/workflows/docs.yml
+      - scripts/docs_hooks.py
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-docs-${{ hashFiles('requirements-docs.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-docs-
+
+      - name: Install documentation dependencies
+        run: pip install --upgrade pip && pip install -r requirements-docs.txt
+
+      - name: Validate OpenAPI specifications
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import sys
+          import yaml
+          from openapi_spec_validator import validate_v3_spec
+
+          repo_root = Path.cwd()
+          specs = [
+              repo_root / "openapi" / "gateway.yaml",
+          ]
+
+          for spec_path in specs:
+              if not spec_path.exists():
+                  raise SystemExit(f"Missing OpenAPI spec: {spec_path}")
+              with spec_path.open("r", encoding="utf-8") as handle:
+                  spec = yaml.safe_load(handle)
+              validate_v3_spec(spec)
+              print(f"Validated {spec_path.relative_to(repo_root)}")
+          PY
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: Build MkDocs site
+        run: mkdocs build --config-file mkdocs.yml --site-dir "$(pwd)/site"
+
+      - name: Include OpenAPI artifacts
+        run: |
+          mkdir -p site/openapi
+          cp openapi/*.yaml site/openapi/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Upload preview artifact
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site-preview
+          path: site
+          retention-days: 7
+
+  deploy:
+    needs: build
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

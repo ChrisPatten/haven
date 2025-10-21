@@ -36,7 +36,7 @@
 - **Volumes** – `pg_data` for Postgres (`haven_v2` database), `qdrant_data` for vector storage, `minio_data` for file attachments.
 - **Attachment enrichment helper** – `scripts/collectors/imdesc.swift` compiled via `scripts/build-imdesc.sh`; optional Ollama vision integration.
 - **Shared models** – `shared/models_v2.py` defines Document, Thread, File, Chunk data models used across services.
-- **OpenAPI** – `openapi.yaml` describes public gateway endpoints for external integrations (may need updates for v2).
+- **OpenAPI** – `openapi/gateway.yaml` describes public gateway endpoints for external integrations (may need updates for v2).
 - **Tests** – `tests/` includes coverage for gateway, catalog, search, and collectors with unified schema validation.
 
 ## Network & Auth Contracts

@@ -1,6 +1,6 @@
 # Makefile for common development tasks
 
-.PHONY: help rebuild purge local_setup start restart stop collector backup restore list-backups
+.PHONY: help rebuild purge local_setup start restart stop collector backup restore list-backups export-openapi
 
 help:
 	@echo "Available targets:"
@@ -17,6 +17,7 @@ help:
 	@echo "                            Example: make collector contacts"
 	@echo "                            Example: make collector imessage ARGS=\"--simulate 'Hi'\""
 	@echo "                            Example: make collector imessage ARGS=\"--lookback=1h\""
+	@echo "  export-openapi            Export Gateway OpenAPI schema to openapi/gateway.yaml for Redoc"
 	@echo "  backup [NAME]             Create a backup of Docker volumes and state files"
 	@echo "                            Optional: specify NAME for custom backup name"
 	@echo "                            Example: make backup NAME=before-migration"
@@ -134,3 +135,16 @@ restore:
 list-backups:
 	@./scripts/list-backups.sh
 
+# Export Gateway OpenAPI schema to openapi/gateway.yaml for Redoc
+# This extracts the live schema from the FastAPI app so all routes are documented
+# Tries running container first, falls back to transient container
+export-openapi:
+	@echo "Exporting Gateway OpenAPI schema..."
+	@if docker compose ps gateway | grep -q "Up"; then \
+		echo "Using running gateway container..."; \
+		docker compose exec -T gateway python -c "import sys; sys.path.insert(0, '/app'); from services.gateway_api.app import app; import yaml; schema = app.openapi(); print(yaml.dump(schema, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120))" > openapi/gateway.yaml; \
+	else \
+		echo "Starting transient gateway container..."; \
+		docker compose run --rm --no-deps gateway python -c "import sys; sys.path.insert(0, '/app'); from services.gateway_api.app import app; import yaml; schema = app.openapi(); print(yaml.dump(schema, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120))" > openapi/gateway.yaml; \
+	fi
+	@echo "✓ OpenAPI schema exported to openapi/gateway.yaml"

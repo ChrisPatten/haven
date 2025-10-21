@@ -1,0 +1,4 @@
+mkdocs>=1.5,<1.6
+mkdocs-material>=9.5,<10
+mkdocs-simple-hooks>=0.1.5,<0.2
+openapi-spec-validator>=0.7,<1

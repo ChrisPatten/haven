@@ -7,6 +7,8 @@ Agents are host-native daemons, container services, background workers, and CLI 
 **HostAgent:** localhost-only.  
 **No agent** writes directly to Postgres, Qdrant, or MinIO except via prescribed routes.
 
+If the user mentions "bead", "beads", or references beads by name like "haven-27" or "hv-27", they are referring to the planning and work-tracking system described in §9.
+
 ---
 
 ## 1. Topology
@@ -248,7 +250,7 @@ beads.create '{
 * Beads **plans**, Gateway **executes**.
   Agents never mutate infrastructure directly based on Beads alone.
 * Secrets are never stored in Beads issues — reference vault paths instead.
-* Any new .md files created MUST be placed in .tmp/ and the user can choose to include them in their own documentation later.
+* Unless specifically instructed to do otherwise, any new .md files created MUST be placed in .tmp/. "Otherwise" means specific guidance to update permanent documentation. In this case, integrate the new information into the /docs/ directory for inclusion in the mkdocs site.
 
 ### 9.9 Adoption Checklist (for new contributors)
 
@@ -264,6 +266,6 @@ beads.create '{
 ## 10. References
 
 * Beads MCP: [https://github.com/steveyegge/beads](https://github.com/steveyegge/beads)
-* Haven Gateway API Spec: `services/gateway/openapi.yaml`
+* Haven Gateway API Spec: `openapi/gateway.yaml`
 * Catalog Schema v2: `schema/init.sql`
 * Developer Onboarding: `docs/CONTRIBUTING.md`
