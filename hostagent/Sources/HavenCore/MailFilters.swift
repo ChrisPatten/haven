@@ -182,12 +182,8 @@ public indirect enum MailFilterExpression: Equatable, Codable {
                 return
             }
             
-            if let predicate = try container.decodeIfPresent(MailFilterPredicateDefinition.self, forKey: .predicate) {
-                self = .predicate(predicate)
-                return
-            }
-            
-            if let predicate = try container.decodeIfPresent(MailFilterPredicateDefinition.self, forKey: .pred) {
+            if container.contains(.predicate) || container.contains(.pred) {
+                let predicate = try MailFilterPredicateDefinition(from: decoder)
                 self = .predicate(predicate)
                 return
             }
@@ -336,7 +332,9 @@ public enum MailFilterPredicateDefinition: Equatable, Codable {
             if args.isEmpty {
                 throw MailFilterError.invalidPredicate("Predicate '\(predicateName)' requires at least one mime pattern")
             }
-            let patterns: [String] = args.compactMap { $0.stringValue }
+            let patterns: [String] = args
+                .compactMap { $0.stringValue }
+                .map { $0.trimmingRegexDelimiters() }
             self = .attachmentMime(patterns: patterns)
         case "folder_exact", "folderexact":
             self = .folderExact(try requireStringArg(at: 0))
@@ -1496,7 +1494,9 @@ private struct MailFilterPredicateBuilder {
         case "has_attachment", "hasattachment":
             return .hasAttachment
         case "attachment_mime", "attachmentmime":
-            let patterns = arguments.compactMap { $0.stringRepresentation }
+            let patterns = arguments
+                .compactMap { $0.stringRepresentation }
+                .map { $0.trimmingRegexDelimiters() }
             if patterns.isEmpty {
                 throw MailFilterError.invalidPredicate("attachment_mime requires patterns")
             }
@@ -1716,6 +1716,15 @@ public struct MailFilterDocument: Codable {
     }
 }
 
+private extension MailFilterDocument {
+    var hasContent: Bool {
+        return expressions.isEmpty == false
+            || combinationMode != nil
+            || defaultAction != nil
+            || prefilter != nil
+    }
+}
+
 private struct MailFilterSourceLoader {
     let fileManager: FileManager
     
@@ -1747,19 +1756,16 @@ private struct MailFilterSourceLoader {
         }
         
         if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
-            // Attempt JSON decode
             if let jsonData = trimmed.data(using: .utf8) {
-                do {
-                    let document = try JSONDecoder().decode(MailFilterDocument.self, from: jsonData)
+                let decoder = JSONDecoder()
+                if let document = try? decoder.decode(MailFilterDocument.self, from: jsonData), document.hasContent {
                     return document
-                } catch {
-                    if let expressions = try? JSONDecoder().decode([MailFilterExpression].self, from: jsonData) {
-                        return MailFilterDocument(expressions: expressions)
-                    }
-                    if let expression = try? JSONDecoder().decode(MailFilterExpression.self, from: jsonData) {
-                        return MailFilterDocument(expressions: [expression])
-                    }
-                    // Fall through to YAML attempt
+                }
+                if let expressions = try? decoder.decode([MailFilterExpression].self, from: jsonData) {
+                    return MailFilterDocument(expressions: expressions)
+                }
+                if let expression = try? decoder.decode(MailFilterExpression.self, from: jsonData) {
+                    return MailFilterDocument(expressions: [expression])
                 }
             }
         }
@@ -1792,6 +1798,14 @@ private struct MailFilterSourceLoader {
 private extension String {
     func trimmed() -> String {
         trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    func trimmingRegexDelimiters() -> String {
+        guard count >= 2 else { return self }
+        if hasPrefix("/") && hasSuffix("/") {
+            return String(dropFirst().dropLast())
+        }
+        return self
     }
 }
 
@@ -1840,13 +1854,17 @@ private extension MailFilterExpression {
             }
         case .and(let expressions):
             var aggregate = FolderPredicateCollection()
+            var foundRestrictive = false
             for expression in expressions {
                 guard let partial = expression.collectFolderPredicatesInternal() else {
-                    return nil
+                    continue
                 }
-                aggregate = aggregate.merging(partial)
+                if partial.isRestrictive {
+                    aggregate = aggregate.merging(partial)
+                    foundRestrictive = true
+                }
             }
-            return aggregate
+            return foundRestrictive ? aggregate : FolderPredicateCollection()
         case .or, .not:
             return nil
         }

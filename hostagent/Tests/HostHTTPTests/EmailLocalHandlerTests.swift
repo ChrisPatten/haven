@@ -127,6 +127,61 @@ final class EmailLocalHandlerTests: XCTestCase {
         XCTAssertNotNil(state["last_run_error"] as? String)
     }
     
+    func testRealRunProcessesEnvelopeIndex() async throws {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+        let stateURL = tempRoot.appendingPathComponent("state.json")
+        let builder = try MailFixtureBuilder(root: tempRoot)
+        let mailbox = try builder.createMailbox(name: "INBOX", displayName: "Inbox")
+        try builder.addMessage(mailbox: mailbox, subject: "Indexed", remoteID: "999", flags: 0)
+        let collector = EmailIndexedCollector(mailRoot: builder.mailRoot, stateFileURL: stateURL)
+        let handler = EmailLocalHandler(config: makeConfig(mailEnabled: true), indexedCollector: collector)
+        let requestBody: [String: Any] = ["mode": "real", "limit": 10]
+        let requestData = try JSONSerialization.data(withJSONObject: requestBody)
+        let request = HTTPRequest(
+            method: "POST",
+            path: "/v1/collectors/email_local:run",
+            headers: ["Content-Type": "application/json"],
+            body: requestData
+        )
+        let response = await handler.handleRun(request: request, context: RequestContext())
+        XCTAssertEqual(response.statusCode, 200)
+        let payload = try decodeJSONDictionary(from: response.body)
+        XCTAssertEqual(payload["status"] as? String, "completed")
+        let stats = try XCTUnwrap(payload["stats"] as? [String: Any])
+        XCTAssertEqual(stats["messages_processed"] as? Int, 1)
+        XCTAssertEqual(stats["documents_created"] as? Int, 1)
+        XCTAssertNil(payload["warnings"])
+        let stateData = try Data(contentsOf: stateURL)
+        let stateJSON = try JSONSerialization.jsonObject(with: stateData) as? [String: Any]
+        XCTAssertEqual(stateJSON?["lastRowID"] as? Int, 1)
+    }
+    
+    func testRealRunFallsBackWhenEnvelopeMissing() async throws {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+        let collector = EmailIndexedCollector(mailRoot: tempRoot, stateFileURL: tempRoot.appendingPathComponent("state.json"))
+        let handler = EmailLocalHandler(config: makeConfig(mailEnabled: true), indexedCollector: collector)
+        let requestBody: [String: Any] = ["mode": "real", "limit": 5]
+        let requestData = try JSONSerialization.data(withJSONObject: requestBody)
+        let request = HTTPRequest(
+            method: "POST",
+            path: "/v1/collectors/email_local:run",
+            headers: ["Content-Type": "application/json"],
+            body: requestData
+        )
+        let response = await handler.handleRun(request: request, context: RequestContext())
+        XCTAssertEqual(response.statusCode, 200)
+        let payload = try decodeJSONDictionary(from: response.body)
+        XCTAssertEqual(payload["status"] as? String, "partial")
+        let warnings = try XCTUnwrap(payload["warnings"] as? [String])
+        XCTAssertFalse(warnings.isEmpty)
+    }
+    
     // MARK: - Helpers
     
     private func makeConfig(mailEnabled: Bool) -> HavenConfig {

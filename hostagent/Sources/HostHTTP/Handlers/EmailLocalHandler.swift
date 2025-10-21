@@ -7,6 +7,7 @@ public actor EmailLocalHandler {
     private let config: HavenConfig
     private let emailService: EmailService
     private let logger = HavenLogger(category: "email-local-handler")
+    private let indexedCollector: EmailIndexedCollector
     
     // State tracking
     private var isRunning: Bool = false
@@ -81,7 +82,6 @@ public actor EmailLocalHandler {
         case simulatePathRequired
         case pathNotFound(String)
         case noEmlxFiles(String)
-        case realModeNotImplemented
         case invalidRequestBody
         
         var errorDescription: String? {
@@ -100,8 +100,6 @@ public actor EmailLocalHandler {
                 return "No file or directory found at path '\(path)'"
             case .noEmlxFiles(let path):
                 return "No .emlx files found under '\(path)'"
-            case .realModeNotImplemented:
-                return "Real mode is not yet implemented"
             case .invalidRequestBody:
                 return "Request body must be valid JSON"
             }
@@ -117,17 +115,16 @@ public actor EmailLocalHandler {
                 return 400
             case .pathNotFound, .noEmlxFiles:
                 return 404
-            case .realModeNotImplemented:
-                return 501
             case .invalidRequestBody:
                 return 400
             }
         }
     }
     
-    public init(config: HavenConfig) {
+    public init(config: HavenConfig, indexedCollector: EmailIndexedCollector = EmailIndexedCollector()) {
         self.config = config
         self.emailService = EmailService()
+        self.indexedCollector = indexedCollector
     }
     
     /// Handle POST /v1/collectors/email_local:run
@@ -246,7 +243,7 @@ public actor EmailLocalHandler {
             }
             return try await runSimulateMode(at: path, limit: params.limit, stats: &stats)
         case "real":
-            throw HandlerError.realModeNotImplemented
+            return try await runRealMode(limit: params.limit, stats: &stats)
         default:
             throw HandlerError.invalidMode(params.mode)
         }
@@ -303,6 +300,26 @@ public actor EmailLocalHandler {
         
         let hadErrors = stats.errorsEncountered > 0
         return RunOutcome(partial: hadErrors, warnings: warnings)
+    }
+    
+    private func runRealMode(limit: Int, stats: inout CollectorStats) async throws -> RunOutcome {
+        do {
+            let result = try await indexedCollector.run(limit: limit)
+            stats.messagesProcessed += result.messages.count
+            stats.documentsCreated += result.messages.count
+            let partial = !result.warnings.isEmpty
+            if partial {
+                return RunOutcome(partial: true, warnings: result.warnings)
+            }
+            return .success
+        } catch let error as EmailCollectorError {
+            if case .envelopeIndexNotFound = error {
+                let warning = "Envelope Index not found; falling back to crawler mode (not yet implemented)"
+                logger.warning("Indexed mode unavailable, falling back to crawler placeholder", metadata: ["warning": warning])
+                return RunOutcome(partial: true, warnings: [warning])
+            }
+            throw error
+        }
     }
     
     // MARK: - Validation & Parsing

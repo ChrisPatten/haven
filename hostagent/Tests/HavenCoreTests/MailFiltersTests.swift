@@ -62,15 +62,15 @@ final class MailFiltersTests: XCTestCase {
                 nowProvider: { self.now }
             )
         )
-        
+
         var message = EmailFilterMessageContext(
             subject: "Invoice 22-019",
             folderPath: "Inbox/Receipts",
             date: now.addingTimeInterval(-5 * 86_400)
         )
-        
+
         XCTAssertTrue(evaluator.evaluate(message))
-        
+
         message.subject = "Payment reminder"
         XCTAssertFalse(evaluator.evaluate(message))
     }
@@ -154,7 +154,7 @@ final class MailFiltersTests: XCTestCase {
             attachments: [EmailAttachmentInfo(filename: "statement.pdf", mimeType: "application/pdf")]
         )
         XCTAssertTrue(evaluator.evaluate(message))
-        
+
         message.attachments = [EmailAttachmentInfo(filename: "photo.jpg", mimeType: "image/jpeg")]
         XCTAssertFalse(evaluator.evaluate(message))
     }

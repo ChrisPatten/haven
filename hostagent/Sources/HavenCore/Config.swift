@@ -367,10 +367,10 @@ public struct MailFiltersConfig: Codable {
 }
 
 public struct MailPrefilterConfig: Codable {
-    public var includeFolders: [String]
-    public var excludeFolders: [String]
-    public var vipOnly: Bool
-    public var requireListUnsubscribe: Bool
+    public var includeFolders: [String] = []
+    public var excludeFolders: [String] = []
+    public var vipOnly: Bool = false
+    public var requireListUnsubscribe: Bool = false
     
     enum CodingKeys: String, CodingKey {
         case includeFolders = "include_folders"
@@ -387,6 +387,14 @@ public struct MailPrefilterConfig: Codable {
         self.excludeFolders = excludeFolders
         self.vipOnly = vipOnly
         self.requireListUnsubscribe = requireListUnsubscribe
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        includeFolders = try container.decodeIfPresent([String].self, forKey: .includeFolders) ?? []
+        excludeFolders = try container.decodeIfPresent([String].self, forKey: .excludeFolders) ?? []
+        vipOnly = try container.decodeIfPresent(Bool.self, forKey: .vipOnly) ?? false
+        requireListUnsubscribe = try container.decodeIfPresent(Bool.self, forKey: .requireListUnsubscribe) ?? false
     }
 }
 

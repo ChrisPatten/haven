@@ -200,7 +200,8 @@ struct HavenHostAgent: AsyncParsableCommand {
         
         // Initialize email handlers
         let emailHandler = EmailHandler(config: config)
-        let emailLocalHandler = EmailLocalHandler(config: config)
+        let emailIndexedCollector = EmailIndexedCollector()
+        let emailLocalHandler = EmailLocalHandler(config: config, indexedCollector: emailIndexedCollector)
         
         let handlers: [RouteHandler] = [
             // Core endpoints
