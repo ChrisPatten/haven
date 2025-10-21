@@ -183,7 +183,9 @@
           return;
         }
 
-        const specUrl = new URL("../../openapi/gateway.yaml", window.location.href).toString();
+        // Use a path relative to the site root to work both locally and on GitHub Pages
+        const baseUrl = window.location.pathname.replace(/\/api\/gateway-reference\.html.*$/, '');
+        const specUrl = baseUrl + '/openapi/gateway.yaml';
         const options = {
           hideDownloadButton: false,
           expandResponses: "200,201,400,404",

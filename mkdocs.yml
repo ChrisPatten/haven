@@ -1,6 +1,6 @@
 site_name: Haven Documentation
 site_description: "Documentation hub for Haven services and operations."
-site_url: ""
+site_url: "https://chrispatten.github.io/haven/"
 
 theme:
   name: material
