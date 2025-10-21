@@ -58,7 +58,17 @@ jobs:
           from pathlib import Path
           import sys
           import yaml
-          from openapi_spec_validator import validate_v3_spec
+
+          # Try common locations for the validate function across package versions.
+          try:
+              # present in many modern versions
+              from openapi_spec_validator.shortcuts import validate_spec
+          except Exception:
+              try:
+                  from openapi_spec_validator.validators import validate_spec
+              except Exception:
+                  # older versions exposed validate_v3_spec at package root
+                  from openapi_spec_validator import validate_v3_spec as validate_spec
 
           repo_root = Path.cwd()
           specs = [
@@ -70,7 +80,7 @@ jobs:
                   raise SystemExit(f"Missing OpenAPI spec: {spec_path}")
               with spec_path.open("r", encoding="utf-8") as handle:
                   spec = yaml.safe_load(handle)
-              validate_v3_spec(spec)
+              validate_spec(spec)
               print(f"Validated {spec_path.relative_to(repo_root)}")
           PY
 
