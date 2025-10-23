@@ -252,3 +252,102 @@ def test_gateway_ingest_status_proxies_catalog(monkeypatch):
     assert "X-Correlation-ID" in response.headers
     assert calls["request"]["path"] == "/v1/catalog/submissions/sub-1"
     assert calls["request"]["headers"]["X-Correlation-ID"].startswith("gw_status_")
+
+
+def test_email_duplicate_ingestion_returns_existing_document(monkeypatch):
+    """Test that ingesting the same email twice returns the existing document without error."""
+    original_token = gateway_app.settings.catalog_token
+    gateway_app.settings.catalog_token = None
+
+    submission_count = 0
+    first_doc_id = "doc-email-1"
+
+    class DummyResponse:
+        def __init__(self, status_code: int = 202, payload: Dict[str, Any] | None = None) -> None:
+            self.status_code = status_code
+            nonlocal submission_count
+            submission_count += 1
+            
+            # First submission creates new document, second returns existing
+            if submission_count == 1:
+                self._payload = payload or {
+                    "submission_id": f"sub-{submission_count}",
+                    "status": "embedding_pending",
+                    "doc_id": first_doc_id,
+                    "external_id": "email:test-message-id-123",
+                    "version_number": 1,
+                    "total_chunks": 2,
+                    "duplicate": False,
+                }
+            else:
+                self._payload = {
+                    "submission_id": f"sub-{submission_count}",
+                    "status": "completed",
+                    "doc_id": first_doc_id,  # Same doc_id
+                    "external_id": "email:test-message-id-123",
+                    "version_number": 1,
+                    "total_chunks": 2,
+                    "duplicate": True,
+                }
+
+        def json(self) -> Dict[str, Any]:
+            return self._payload
+
+        @property
+        def text(self) -> str:
+            return "ok"
+
+    class DummyAsyncClient:
+        async def __aenter__(self) -> "DummyAsyncClient":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def request(self, method: str, path: str, json=None, headers=None):
+            return DummyResponse()
+
+    monkeypatch.setattr(gateway_app.httpx, "AsyncClient", DummyAsyncClient)
+
+    try:
+        with TestClient(gateway_app.app) as client:
+            # First ingestion
+            response1 = client.post(
+                "/v1/ingest",
+                json={
+                    "source_type": "email_local",
+                    "source_id": "email:test-message-id-123",
+                    "content": {"mime_type": "text/plain", "data": "Test email body"},
+                    "metadata": {"subject": "Test Subject"},
+                },
+                headers={"Authorization": "Bearer changeme"},
+            )
+            
+            # Second ingestion of same email (same source_id/external_id)
+            response2 = client.post(
+                "/v1/ingest",
+                json={
+                    "source_type": "email_local",
+                    "source_id": "email:test-message-id-123",
+                    "content": {"mime_type": "text/plain", "data": "Test email body"},
+                    "metadata": {"subject": "Test Subject"},
+                },
+                headers={"Authorization": "Bearer changeme"},
+            )
+    finally:
+        gateway_app.settings.catalog_token = original_token
+        gateway_app._search_client = None
+
+    # Both should succeed
+    assert response1.status_code == 202
+    assert response2.status_code == 200  # Duplicate returns 200 OK
+    
+    payload1 = response1.json()
+    payload2 = response2.json()
+    
+    # Second ingestion should return the same document
+    assert payload2["doc_id"] == payload1["doc_id"]
+    assert payload2["external_id"] == "email:test-message-id-123"
+    assert payload2["version_number"] == 1
+    assert payload2["duplicate"] is True
+

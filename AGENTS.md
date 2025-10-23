@@ -10,7 +10,7 @@
   * If the MCP server is not available, fall back to using the `bd` command-line tool to retrieve information about beads.
 * Review the documentation in /docs/ as necessary for developer onboarding and architecture overviews.
 * Unless specifically instructed to do otherwise, any new .md files created MUST be placed in .tmp/. "Otherwise" means specific guidance to update permanent documentation. In this case, integrate the new information into the /docs/ directory for inclusion in the mkdocs site.
-* Before closing a beads issue, ensure any documentation changes are reflected in /docs/ as appropriate.
+* When I ask you to create documentation, consider it an "Otherwise" scenario. Review the existing mkdocs yaml and the documentation structure and create or update accordingly (including both creating/updating .md files and configuring it in the mkdocs yaml).
 * **NEVER** edit the files in .beads/ directly. All changes must be made via the beads MCP server or the `bd` CLI tool to ensure proper versioning and tracking.
 * When writing commit messages, include the relevant beads issue ID in the footer as `Refs: beads:#<id>`. Do not include references to the files in the .beads/ directory in commit messages.
 

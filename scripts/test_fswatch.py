@@ -20,7 +20,7 @@ from pathlib import Path
 
 # Configuration
 HOSTAGENT_URL = "http://localhost:7090"
-AUTH_TOKEN = "change-me"
+AUTH_TOKEN = "changeme"
 
 HEADERS = {
     "Content-Type": "application/json",

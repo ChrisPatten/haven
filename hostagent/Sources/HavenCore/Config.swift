@@ -25,7 +25,7 @@ public struct AuthConfig: Codable {
     public var header: String
     public var secret: String
     
-    public init(header: String = "x-auth", secret: String = "change-me") {
+    public init(header: String = "x-auth", secret: String = "changeme") {
         self.header = header
         self.secret = secret
     }
@@ -34,20 +34,32 @@ public struct AuthConfig: Codable {
 public struct GatewayConfig: Codable {
     public var baseUrl: String
     public var ingestPath: String
+    public var ingestFilePath: String
     public var timeout: Int
     
     enum CodingKeys: String, CodingKey {
         case baseUrl = "base_url"
         case ingestPath = "ingest_path"
+        case ingestFilePath = "ingest_file_path"
         case timeout
     }
     
     public init(baseUrl: String = "http://gateway:8080",
                 ingestPath: String = "/v1/ingest",
+                ingestFilePath: String = "/v1/ingest/file",
                 timeout: Int = 30) {
         self.baseUrl = baseUrl
         self.ingestPath = ingestPath
+        self.ingestFilePath = ingestFilePath
         self.timeout = timeout
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.baseUrl = try container.decode(String.self, forKey: .baseUrl)
+        self.ingestPath = try container.decode(String.self, forKey: .ingestPath)
+        self.ingestFilePath = try container.decodeIfPresent(String.self, forKey: .ingestFilePath) ?? "/v1/ingest/file"
+        self.timeout = try container.decodeIfPresent(Int.self, forKey: .timeout) ?? 30
     }
 }
 
@@ -309,22 +321,74 @@ public struct LoggingConfig: Codable {
 
 public struct MailModuleConfig: Codable {
     public var enabled: Bool
+    public var sourcePath: String?
     public var filters: MailFiltersConfig
+    public var state: MailStateConfig
     
-    enum CodingKeys: String, CodingKey {
-        case enabled
-        case filters
-    }
-    
-    public init(enabled: Bool = false, filters: MailFiltersConfig = MailFiltersConfig()) {
+    public init(
+        enabled: Bool = false,
+        sourcePath: String? = nil,
+        filters: MailFiltersConfig = MailFiltersConfig(),
+        state: MailStateConfig = MailStateConfig()
+    ) {
         self.enabled = enabled
+        self.sourcePath = sourcePath
         self.filters = filters
+        self.state = state
     }
     
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        sourcePath = try container.decodeIfPresent(String.self, forKey: .sourcePath)
         filters = try container.decodeIfPresent(MailFiltersConfig.self, forKey: .filters) ?? MailFiltersConfig()
+        state = try container.decodeIfPresent(MailStateConfig.self, forKey: .state) ?? MailStateConfig()
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case sourcePath = "source_path"
+        case filters
+        case state
+    }
+}
+
+public struct MailStateConfig: Codable {
+    public var clearOnNewRun: Bool
+    public var runStatePath: String
+    public var rejectedLogPath: String
+    public var lockFilePath: String
+    public var rejectedRetentionDays: Int
+
+    enum CodingKeys: String, CodingKey {
+        case clearOnNewRun = "clear_on_new_run"
+        case runStatePath = "run_state_path"
+        case rejectedLogPath = "rejected_log_path"
+        case lockFilePath = "lock_file_path"
+        case rejectedRetentionDays = "rejected_retention_days"
+    }
+
+    public init(
+        clearOnNewRun: Bool = true,
+        runStatePath: String = "~/.haven/email_collector_state_run.json",
+        rejectedLogPath: String = "~/.haven/rejected_emails.log",
+        lockFilePath: String = "~/.haven/email_collector.lock",
+        rejectedRetentionDays: Int = 30
+    ) {
+        self.clearOnNewRun = clearOnNewRun
+        self.runStatePath = runStatePath
+        self.rejectedLogPath = rejectedLogPath
+        self.lockFilePath = lockFilePath
+        self.rejectedRetentionDays = rejectedRetentionDays
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        clearOnNewRun = try container.decodeIfPresent(Bool.self, forKey: .clearOnNewRun) ?? true
+        runStatePath = try container.decodeIfPresent(String.self, forKey: .runStatePath) ?? "~/.haven/email_collector_state_run.json"
+        rejectedLogPath = try container.decodeIfPresent(String.self, forKey: .rejectedLogPath) ?? "~/.haven/rejected_emails.log"
+        lockFilePath = try container.decodeIfPresent(String.self, forKey: .lockFilePath) ?? "~/.haven/email_collector.lock"
+        rejectedRetentionDays = try container.decodeIfPresent(Int.self, forKey: .rejectedRetentionDays) ?? 30
     }
 }
 
@@ -566,6 +630,9 @@ public class ConfigLoader {
         if let mailEnabled = ProcessInfo.processInfo.environment["HAVEN_MAIL_ENABLED"] {
             config.modules.mail.enabled = (mailEnabled as NSString).boolValue
         }
+        if let mailSource = ProcessInfo.processInfo.environment["HAVEN_MAIL_SOURCE_PATH"] {
+            config.modules.mail.sourcePath = mailSource
+        }
     }
     
     private func validate(_ config: HavenConfig) throws {
@@ -573,7 +640,7 @@ public class ConfigLoader {
             throw ConfigError.validationError("Port must be between 1024 and 65535")
         }
         
-        if config.auth.secret.isEmpty || config.auth.secret == "change-me" {
+        if config.auth.secret.isEmpty || config.auth.secret == "changeme" {
             logger.warning("Using default auth secret - this is insecure!")
         }
         

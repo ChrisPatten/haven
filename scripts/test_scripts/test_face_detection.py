@@ -13,7 +13,7 @@ import requests
 
 # Configuration
 BASE_URL = "http://localhost:7090"
-AUTH_SECRET = "change-me"
+AUTH_SECRET = "changeme"
 
 def test_face_detection(image_path: str, include_landmarks: bool = False):
     """Test face detection with an image file."""

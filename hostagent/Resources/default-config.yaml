@@ -86,6 +86,7 @@ modules:
   
   mail:
     enabled: false
+    source_path: ""
     filters:
       # combination_mode: any | all (any = message accepted if any filter matches)
       combination_mode: any

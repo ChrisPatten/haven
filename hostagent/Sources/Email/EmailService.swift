@@ -238,7 +238,7 @@ public actor EmailService {
                 }
                 
                 // New header
-                let parts = line.split(separator: ":", maxSplits: 1)
+                let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
                 if parts.count == 2 {
                     currentHeader = String(parts[0]).trimmingCharacters(in: .whitespaces)
                     currentValue = String(parts[1]).trimmingCharacters(in: .whitespaces)

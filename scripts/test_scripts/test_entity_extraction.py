@@ -19,7 +19,7 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
 HOSTAGENT_URL = "http://localhost:7090"
-AUTH_TOKEN = "change-me"
+AUTH_TOKEN = "changeme"
 
 @dataclass
 class TestResult:
@@ -285,7 +285,7 @@ def main():
     
     parser = argparse.ArgumentParser(description='Test Haven Host Agent entity extraction')
     parser.add_argument('--url', default='http://localhost:7090', help='Host agent URL')
-    parser.add_argument('--auth', default='change-me', help='Auth token')
+    parser.add_argument('--auth', default='changeme', help='Auth token')
     parser.add_argument('--image', help='Path to image file for OCR + entity extraction test')
     args = parser.parse_args()
     

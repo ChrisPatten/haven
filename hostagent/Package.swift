@@ -84,6 +84,7 @@ let package = Package(
             name: "HostHTTP",
             dependencies: [
                 "HavenCore",
+                "HostAgentEmail",
                 "OCR",
                 "Entity",
                 "Face",
@@ -109,9 +110,26 @@ let package = Package(
             dependencies: [
                 "HavenCore",
                 "HostHTTP",
+                "HostAgentEmail",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ],
-            path: "Sources/HostAgent"
+            path: "Sources/HostAgent",
+            exclude: ["Collectors", "Submission"]
+        ),
+        
+        // HostAgent email submission helpers
+        .target(
+            name: "HostAgentEmail",
+            dependencies: [
+                "HavenCore",
+                "Email"
+            ],
+            path: "Sources/HostAgent",
+            exclude: ["main.swift"],
+            sources: [
+                "Collectors",
+                "Submission"
+            ]
         ),
         
         // Tests
@@ -140,9 +158,14 @@ let package = Package(
         ),
         .testTarget(
             name: "HostHTTPTests",
-            dependencies: ["HostHTTP", "HavenCore"],
+            dependencies: ["HostHTTP", "HostAgentEmail", "HavenCore"],
             path: "Tests/HostHTTPTests",
             resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "SubmissionTests",
+            dependencies: ["HostAgentEmail", "Email", "HavenCore"],
+            path: "Tests/SubmissionTests"
         )
     ]
 )

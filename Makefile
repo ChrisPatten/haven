@@ -1,6 +1,6 @@
 # Makefile for common development tasks
 
-.PHONY: help rebuild purge local_setup start restart stop collector backup restore list-backups export-openapi
+.PHONY: help rebuild purge local_setup start restart stop collector backup restore list-backups export-openapi docs
 
 help:
 	@echo "Available targets:"
@@ -18,6 +18,9 @@ help:
 	@echo "                            Example: make collector imessage ARGS=\"--simulate 'Hi'\""
 	@echo "                            Example: make collector imessage ARGS=\"--lookback=1h\""
 	@echo "  export-openapi            Export Gateway OpenAPI schema to openapi/gateway.yaml for Redoc"
+	@echo "  docs                      Serve MkDocs documentation at http://127.0.0.1:8000"
+	@echo "                            Optional: DOC_HOST, DOC_PORT, DOC_SITE_PATH, OPEN_BROWSER=false"
+	@echo "                            Example: DOC_PORT=8001 make docs"
 	@echo "  backup [NAME]             Create a backup of Docker volumes and state files"
 	@echo "                            Optional: specify NAME for custom backup name"
 	@echo "                            Example: make backup NAME=before-migration"
@@ -148,6 +151,12 @@ export-openapi:
 		docker compose run --rm --no-deps gateway python -c "import sys; sys.path.insert(0, '/app'); from services.gateway_api.app import app; import yaml; schema = app.openapi(); print(yaml.dump(schema, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120))" > openapi/gateway.yaml; \
 	fi
 	@echo "✓ OpenAPI schema exported to openapi/gateway.yaml"
+
+# Serve the MkDocs documentation locally. Prefers ./env/bin/mkdocs (virtualenv),
+# falls back to system `mkdocs`. Opens the default browser on macOS unless
+# OPEN_BROWSER=false is specified. Example: make docs OPEN_BROWSER=false
+docs:
+	@./scripts/serve_docs.sh
 
 # Install git hooks from .githooks directory into .git/hooks
 .githooks/install-hooks:

@@ -351,7 +351,7 @@ The primary use case is testing with HostAgent's simulate mode:
 ```bash
 curl -X POST http://localhost:7090/v1/collectors/email_local:run \
   -H "Content-Type: application/json" \
-  -H "x-auth: change-me" \
+  -H "x-auth: changeme" \
   -d '{
         "mode": "simulate",
         "simulate_path": "/path/to/fixtures/Messages",
@@ -621,8 +621,8 @@ def test_create_invoice_template():
 
 ## See Also
 
-- [Email Collector Documentation](../docs/hostagent/email-local-collector.md)
-- [HostAgent API Reference](../docs/api/hostagent.md)
-- [Testing Guide](../docs/contributing.md#testing)
+- [Email Collector Documentation](./email-collector.md)
+- [HostAgent API Reference](../hostagent/index.md)
+- [Testing Guide](../contributing.md#testing)
 - Haven-25: Local Email Collector Epic (beads)
 - Haven-35: Email Collector Test Suite (beads)

@@ -54,7 +54,6 @@ public struct EmailIndexedMessage: Sendable {
     public let flags: Int64
     public let isVIP: Bool
     public let remoteID: String?
-    public let guid: String?
     public let emlxPath: URL?
     public let fileInode: UInt64?
     public let fileMtime: Date?
@@ -73,7 +72,6 @@ public struct EmailIndexedMessage: Sendable {
         flags: Int64,
         isVIP: Bool,
         remoteID: String?,
-        guid: String?,
         emlxPath: URL?,
         fileInode: UInt64?,
         fileMtime: Date?
@@ -91,7 +89,6 @@ public struct EmailIndexedMessage: Sendable {
         self.flags = flags
         self.isVIP = isVIP
         self.remoteID = remoteID
-        self.guid = guid
         self.emlxPath = emlxPath
         self.fileInode = fileInode
         self.fileMtime = fileMtime
@@ -121,16 +118,13 @@ private struct EnvelopeRecord {
     let rowID: Int64
     let subject: String?
     let sender: String?
-    let toList: String?
-    let ccList: String?
-    let bccList: String?
+    var toList: String?
+    var ccList: String?
+    var bccList: String?
     let dateSent: Double?
     let remoteID: String?
-    let guid: String?
     let flags: Int64
     let mailboxURL: URL?
-    let mailboxName: String?
-    let mailboxDisplayName: String?
 }
 
 /// Collector responsible for reading Envelope Index and resolving .emlx paths.
@@ -141,6 +135,7 @@ public actor EmailIndexedCollector {
     private let stateFileURL: URL
     private let envelopeIndexOverride: URL?
     private let stateRetentionLimit = 500
+    private var pendingState: EmailCollectorState?
     
     // VIP flag derived from observed Mail.app bitmask (0x20000).
     private let vipFlagMask: Int64 = 0x20000
@@ -163,6 +158,7 @@ public actor EmailIndexedCollector {
     /// Execute an indexed run and persist state updates.
     public func run(limit: Int) throws -> EmailIndexedRunResult {
         let state = try loadState()
+        pendingState = state
         let dbURL = try locateEnvelopeIndex()
         let records = try readEnvelopeIndex(from: dbURL, after: state.lastRowID, limit: limit)
         
@@ -174,18 +170,29 @@ public actor EmailIndexedCollector {
         let filtered = filterMailboxes(records)
         let resolution = resolveEmlxPaths(for: filtered)
         
-        var nextState = state
-        if let maxRowID = records.map(\.rowID).max() {
-            nextState.lastRowID = max(nextState.lastRowID, maxRowID)
-        }
-        updateState(&nextState, with: resolution.messages)
-        try saveState(nextState)
-        
         return EmailIndexedRunResult(
             messages: resolution.messages,
             warnings: resolution.warnings,
-            lastRowID: nextState.lastRowID
+            lastRowID: state.lastRowID
         )
+    }
+    
+    /// Commit accepted messages and advance state based on contiguous acceptance.
+    @discardableResult
+    public func commitState(
+        acceptedRowIDs: Set<Int64>,
+        acceptedMessages: [EmailIndexedMessage]
+    ) throws -> Int64 {
+        var state = try pendingState ?? loadState()
+        let previous = state.lastRowID
+        let advanced = advance(lastRowID: previous, withAccepted: acceptedRowIDs)
+        state.lastRowID = advanced
+        if !acceptedMessages.isEmpty {
+            updateState(&state, with: acceptedMessages)
+        }
+        try saveState(state)
+        pendingState = state
+        return advanced
     }
     
     // MARK: - Lookup
@@ -243,19 +250,15 @@ public actor EmailIndexedCollector {
         let query = """
             SELECT
                 messages.ROWID,
-                messages.subject,
-                messages.sender,
-                messages.to_list,
-                messages.cc_list,
-                messages.bcc_list,
+                subjects.subject,
+                addresses.address,
                 messages.date_sent,
                 messages.remote_id,
-                messages.guid,
                 messages.flags,
-                mailboxes.url,
-                mailboxes.name,
-                mailboxes.displayName
+                mailboxes.url
             FROM messages
+            LEFT JOIN subjects ON subjects.ROWID = messages.subject
+            LEFT JOIN addresses ON addresses.ROWID = messages.sender
             LEFT JOIN mailboxes ON mailboxes.ROWID = messages.mailbox
             WHERE messages.ROWID > ?
             ORDER BY messages.ROWID ASC
@@ -273,23 +276,25 @@ public actor EmailIndexedCollector {
         sqlite3_bind_int(statement, 2, Int32(limit))
         
         var records: [EnvelopeRecord] = []
+        var messageRowIDs: [Int64] = []
+        
         while true {
             let stepResult = sqlite3_step(statement)
             if stepResult == SQLITE_ROW {
+                let rowID = sqlite3_column_int64(statement, 0)
+                messageRowIDs.append(rowID)
+                
                 let record = EnvelopeRecord(
-                    rowID: sqlite3_column_int64(statement, 0),
+                    rowID: rowID,
                     subject: columnText(statement, index: 1),
                     sender: columnText(statement, index: 2),
-                    toList: columnText(statement, index: 3),
-                    ccList: columnText(statement, index: 4),
-                    bccList: columnText(statement, index: 5),
-                    dateSent: sqlite3_column_type(statement, 6) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 6),
-                    remoteID: columnText(statement, index: 7),
-                    guid: columnText(statement, index: 8),
-                    flags: sqlite3_column_int64(statement, 9),
-                    mailboxURL: decodeMailboxURL(columnText(statement, index: 10)),
-                    mailboxName: columnText(statement, index: 11),
-                    mailboxDisplayName: columnText(statement, index: 12)
+                    toList: nil,
+                    ccList: nil,
+                    bccList: nil,
+                    dateSent: sqlite3_column_type(statement, 3) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 3),
+                    remoteID: columnText(statement, index: 4),
+                    flags: sqlite3_column_int64(statement, 5),
+                    mailboxURL: decodeMailboxURL(columnText(statement, index: 6))
                 )
                 records.append(record)
             } else if stepResult == SQLITE_DONE {
@@ -300,7 +305,95 @@ public actor EmailIndexedCollector {
             }
         }
         
+        // Fetch recipients for all messages
+        if !messageRowIDs.isEmpty {
+            let recipients = try fetchRecipients(db: db, messageRowIDs: messageRowIDs)
+            for i in 0..<records.count {
+                let rowID = records[i].rowID
+                if let recipientInfo = recipients[rowID] {
+                    records[i] = EnvelopeRecord(
+                        rowID: records[i].rowID,
+                        subject: records[i].subject,
+                        sender: records[i].sender,
+                        toList: recipientInfo.toList.isEmpty ? nil : recipientInfo.toList.joined(separator: ", "),
+                        ccList: recipientInfo.ccList.isEmpty ? nil : recipientInfo.ccList.joined(separator: ", "),
+                        bccList: recipientInfo.bccList.isEmpty ? nil : recipientInfo.bccList.joined(separator: ", "),
+                        dateSent: records[i].dateSent,
+                        remoteID: records[i].remoteID,
+                        flags: records[i].flags,
+                        mailboxURL: records[i].mailboxURL
+                    )
+                }
+            }
+        }
+        
         return records
+    }
+    
+    private struct RecipientInfo {
+        var toList: [String] = []
+        var ccList: [String] = []
+        var bccList: [String] = []
+    }
+    
+    private func fetchRecipients(db: OpaquePointer, messageRowIDs: [Int64]) throws -> [Int64: RecipientInfo] {
+        var result: [Int64: RecipientInfo] = [:]
+        
+        // Build placeholders for IN clause
+        let placeholders = messageRowIDs.map { _ in "?" }.joined(separator: ",")
+        
+        let query = """
+            SELECT r.message, r.type, a.address
+            FROM recipients r
+            LEFT JOIN addresses a ON r.address = a.ROWID
+            WHERE r.message IN (\(placeholders))
+            ORDER BY r.message, r.position
+            """
+        
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK, let statement else {
+            let message = String(cString: sqlite3_errmsg(db))
+            throw EmailCollectorError.sqlitePrepareFailed(message)
+        }
+        defer { sqlite3_finalize(statement) }
+        
+        // Bind all message ROWIDs
+        for (index, rowID) in messageRowIDs.enumerated() {
+            sqlite3_bind_int64(statement, Int32(index + 1), rowID)
+        }
+        
+        while true {
+            let stepResult = sqlite3_step(statement)
+            if stepResult == SQLITE_ROW {
+                let messageRowID = sqlite3_column_int64(statement, 0)
+                let type = sqlite3_column_int(statement, 1)
+                let address = columnText(statement, index: 2) ?? ""
+                
+                if result[messageRowID] == nil {
+                    result[messageRowID] = RecipientInfo()
+                }
+                
+                // type: 0 = To, 1 = Cc, 2 = Bcc (observed from Mail.app)
+                switch type {
+                case 0:
+                    result[messageRowID]?.toList.append(address)
+                case 1:
+                    result[messageRowID]?.ccList.append(address)
+                case 2:
+                    result[messageRowID]?.bccList.append(address)
+                default:
+                    // Unknown type, add to To list as fallback
+                    result[messageRowID]?.toList.append(address)
+                }
+            } else if stepResult == SQLITE_DONE {
+                break
+            } else {
+                let message = String(cString: sqlite3_errmsg(db))
+                throw EmailCollectorError.sqliteStepFailed(message)
+            }
+        }
+        
+        return result
     }
     
     private func columnText(_ statement: OpaquePointer, index: Int32) -> String? {
@@ -321,10 +414,18 @@ public actor EmailIndexedCollector {
     
     // MARK: - Filtering
     
+    private func extractMailboxName(from url: URL?) -> String? {
+        guard let url = url else { return nil }
+        // Extract last path component, which is typically the mailbox name
+        // e.g., "file:///path/to/INBOX" -> "INBOX"
+        let name = url.lastPathComponent
+        return name.isEmpty ? nil : name
+    }
+    
     private func filterMailboxes(_ records: [EnvelopeRecord]) -> [EnvelopeRecord] {
         let ignoreKeywords = ["junk", "trash", "spam", "bin", "deleted", "promotion", "promotions"]
         return records.filter { record in
-            guard let mailboxName = (record.mailboxDisplayName ?? record.mailboxName)?.lowercased() else {
+            guard let mailboxName = extractMailboxName(from: record.mailboxURL)?.lowercased() else {
                 return true
             }
             
@@ -355,6 +456,8 @@ public actor EmailIndexedCollector {
                 warnings.append("Missing .emlx file for ROWID \(record.rowID)")
             }
             
+            let mailboxName = extractMailboxName(from: record.mailboxURL)
+            
             let metadata = EmailIndexedMessage(
                 rowID: record.rowID,
                 subject: record.subject,
@@ -363,13 +466,12 @@ public actor EmailIndexedCollector {
                 ccList: splitAddressList(record.ccList),
                 bccList: splitAddressList(record.bccList),
                 dateSent: record.dateSent.map { Date(timeIntervalSinceReferenceDate: $0) },
-                mailboxName: record.mailboxName,
-                mailboxDisplayName: record.mailboxDisplayName,
+                mailboxName: mailboxName,
+                mailboxDisplayName: mailboxName,
                 mailboxPath: record.mailboxURL?.path,
                 flags: record.flags,
                 isVIP: isVIP(flags: record.flags),
                 remoteID: record.remoteID,
-                guid: record.guid,
                 emlxPath: pathResult.path,
                 fileInode: pathResult.fileInfo?.inode,
                 fileMtime: pathResult.fileInfo?.mtime
@@ -496,5 +598,16 @@ public actor EmailIndexedCollector {
                 state.files.removeValue(forKey: key)
             }
         }
+    }
+    
+    private func advance(lastRowID: Int64, withAccepted accepted: Set<Int64>) -> Int64 {
+        guard !accepted.isEmpty else { return lastRowID }
+        var candidate = lastRowID
+        var next = candidate + 1
+        while accepted.contains(next) {
+            candidate = next
+            next += 1
+        }
+        return candidate
     }
 }

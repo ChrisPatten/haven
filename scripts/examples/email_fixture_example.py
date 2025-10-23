@@ -281,7 +281,7 @@ def main():
     print("\nTo use with HostAgent:")
     print(f"  curl -X POST http://localhost:7090/v1/collectors/email_local:run \\")
     print(f"    -H 'Content-Type: application/json' \\")
-    print(f"    -H 'x-auth: change-me' \\")
+    print(f"    -H 'x-auth: changeme' \\")
     print(f"    -d '{{\"mode\":\"simulate\",\"simulate_path\":\"{fixture_dir / 'Messages'}\",\"limit\":10}}'")
 
 

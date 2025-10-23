@@ -499,54 +499,168 @@ def write_emlx_file(output_dir: Path, index: int, template: EmailTemplate, date:
 
 
 def create_envelope_index_db(db_path: Path, metadata_list: List[dict]) -> None:
-    """Create a mock Envelope Index SQLite database"""
+    """Create a mock Envelope Index SQLite database matching real Mail.app schema"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
     
-    # Simplified Envelope Index schema (based on Mail.app structure)
+    # Create addresses table (normalized sender/recipient storage)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
+        CREATE TABLE IF NOT EXISTS addresses (
             ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
-            message_id TEXT,
-            subject TEXT,
-            sender TEXT,
-            date_received INTEGER,
-            date_sent INTEGER,
-            mailbox TEXT,
-            read INTEGER DEFAULT 0,
-            flagged INTEGER DEFAULT 0,
-            deleted INTEGER DEFAULT 0,
-            junk INTEGER DEFAULT 0,
-            remote_id TEXT,
-            original_mailbox TEXT
+            address TEXT COLLATE BINARY NOT NULL,
+            comment TEXT COLLATE BINARY,
+            UNIQUE(address, comment) ON CONFLICT IGNORE
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS addresses_address_index ON addresses(address)")
+    
+    # Create subjects table (normalized subject storage)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS subjects (
+            ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject TEXT COLLATE BINARY NOT NULL,
+            UNIQUE(subject) ON CONFLICT IGNORE
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS subjects_subject_index ON subjects(subject)")
+    
+    # Create summaries table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS summaries (
+            ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+            summary TEXT COLLATE BINARY NOT NULL,
+            UNIQUE(summary) ON CONFLICT IGNORE
         )
     """)
     
+    # Create message_global_data table (simplified, matches real schema semantics)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS message_global_data (
+            ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT COLLATE BINARY NOT NULL,
+            -- Avoid storing recipient lists here; recipients are in the `recipients` table
+            follow_up_start_date INTEGER,
+            follow_up_end_date INTEGER,
+            download_state INTEGER NOT NULL DEFAULT 0,
+            read_later_date INTEGER,
+            send_later_date INTEGER,
+            validation_state INTEGER NOT NULL DEFAULT 0,
+            generated_summary INTEGER,
+            urgent INTEGER,
+            model_analytics TEXT,
+            UNIQUE(message_id) ON CONFLICT IGNORE
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS message_global_data_message_id_index ON message_global_data(message_id)")
+    
+    # Create mailboxes table (matching real schema)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mailboxes (
             ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT,
-            name TEXT
+            url TEXT COLLATE BINARY NOT NULL,
+            total_count INTEGER NOT NULL DEFAULT 0,
+            unread_count INTEGER NOT NULL DEFAULT 0,
+            deleted_count INTEGER NOT NULL DEFAULT 0,
+            unseen_count INTEGER NOT NULL DEFAULT 0,
+            unread_count_adjusted_for_duplicates INTEGER NOT NULL DEFAULT 0,
+            change_identifier TEXT COLLATE BINARY,
+            source INTEGER,
+            alleged_change_identifier TEXT COLLATE BINARY,
+            UNIQUE(url) ON CONFLICT ABORT
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS mailboxes_source_index ON mailboxes(source)")
+    
+    # Create messages table matching real Envelope Index layout where possible
+    # Note: subject is a foreign key (INTEGER) referencing subjects.ROWID in the real DB
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT COLLATE BINARY NOT NULL DEFAULT '',
+            global_message_id INTEGER,
+            remote_id INTEGER,
+            document_id TEXT COLLATE BINARY,
+            sender INTEGER,
+            subject_prefix TEXT COLLATE BINARY,
+            subject INTEGER NOT NULL,
+            summary INTEGER,
+            date_sent INTEGER,
+            date_received INTEGER,
+            mailbox INTEGER NOT NULL,
+            remote_mailbox INTEGER,
+            flags INTEGER NOT NULL DEFAULT 0,
+            read INTEGER NOT NULL DEFAULT 0,
+            flagged INTEGER NOT NULL DEFAULT 0,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            size INTEGER NOT NULL DEFAULT 0,
+            conversation_id INTEGER NOT NULL DEFAULT 0,
+            date_last_viewed INTEGER,
+            list_id_hash INTEGER,
+            unsubscribe_type INTEGER,
+            searchable_message INTEGER,
+            brand_indicator INTEGER,
+            display_date INTEGER,
+            color TEXT COLLATE BINARY,
+            type INTEGER,
+            fuzzy_ancestor INTEGER,
+            automated_conversation INTEGER DEFAULT 0,
+            root_status INTEGER DEFAULT -1,
+            flag_color INTEGER,
+            is_urgent INTEGER NOT NULL DEFAULT 0,
+            junk INTEGER NOT NULL DEFAULT 0
         )
     """)
     
-    # Create some mailboxes
-    mailboxes = [
-        ('imap://mail.example.com/INBOX', 'Inbox'),
-        ('imap://mail.example.com/Sent', 'Sent'),
-        ('imap://mail.example.com/Receipts', 'Inbox/Receipts'),
-        ('imap://mail.example.com/Bills', 'Inbox/Bills'),
-        ('imap://mail.example.com/Junk', 'Junk'),
-        ('imap://mail.example.com/Trash', 'Trash'),
-        ('imap://mail.example.com/Promotions', 'Promotions'),
+    # Create essential indexes (subset of real database)
+    cursor.execute("CREATE INDEX IF NOT EXISTS messages_message_id_mailbox_index ON messages(message_id, mailbox)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS messages_global_message_id_mailbox_index ON messages(global_message_id, mailbox)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS messages_document_id_index ON messages(document_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS messages_sender_index ON messages(sender)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS messages_subject_index ON messages(subject)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS messages_date_received_index ON messages(date_received)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS messages_mailbox_date_received_index ON messages(mailbox, date_received)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS messages_conversation_id_index ON messages(conversation_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS messages_deleted_index ON messages(deleted)")
+    
+    # Create recipients table (match real schema: message -> messages.ROWID)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS recipients (
+            ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+            message INTEGER NOT NULL,
+            address INTEGER NOT NULL,
+            type INTEGER NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS recipients_message_index ON recipients(message)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS recipients_address_index ON recipients(address)")
+    
+    # Create mailboxes with file:// URLs pointing to actual mailbox directories
+    # Files are stored at: {fixture_root}/{mailbox_name}/Data/{filename}.emlx
+    # This matches the real Mail.app structure exactly
+    fixture_root = db_path.parent
+    
+    mailbox_configs = [
+        (f'file://{fixture_root}/INBOX', 'Inbox'),
+        (f'file://{fixture_root}/Sent', 'Sent'),
+        (f'file://{fixture_root}/INBOX/Receipts', 'Inbox/Receipts'),
+        (f'file://{fixture_root}/INBOX/Bills', 'Inbox/Bills'),
+        (f'file://{fixture_root}/Junk', 'Junk'),
+        (f'file://{fixture_root}/Trash', 'Trash'),
+        (f'file://{fixture_root}/Promotions', 'Promotions'),
     ]
     
-    for url, name in mailboxes:
-        cursor.execute("INSERT INTO mailboxes (url, name) VALUES (?, ?)", (url, name))
+    mailbox_id_map = {}
+    for url, name in mailbox_configs:
+        cursor.execute("INSERT OR IGNORE INTO mailboxes (url) VALUES (?)", (url,))
+        # Get the mailbox_id whether it was just inserted or already existed
+        cursor.execute("SELECT ROWID FROM mailboxes WHERE url = ?", (url,))
+        mailbox_id_map[name] = cursor.fetchone()[0]
     
-    # Insert messages
+    # Process messages
+    conversation_counter = 1
     for i, metadata in enumerate(metadata_list):
         # Handle both string and datetime objects
         date_value = metadata['date']
@@ -564,30 +678,102 @@ def create_envelope_index_db(db_path: Path, metadata_list: List[dict]) -> None:
         is_noise = metadata.get('is_noise', False)
         
         if is_noise:
-            mailbox = random.choice(['Junk', 'Promotions'])
+            mailbox_name = random.choice(['Junk', 'Promotions'])
         elif intent == 'receipt':
-            mailbox = 'Inbox/Receipts'
+            mailbox_name = 'Inbox/Receipts'
         elif intent == 'bill':
-            mailbox = 'Inbox/Bills'
+            mailbox_name = 'Inbox/Bills'
         else:
-            mailbox = 'Inbox'
+            mailbox_name = 'Inbox'
         
+        mailbox_id = mailbox_id_map[mailbox_name]
+        
+        # Insert sender address
+        sender_email = metadata['from']
+        cursor.execute("INSERT OR IGNORE INTO addresses (address, comment) VALUES (?, ?)", (sender_email, None))
+        cursor.execute("SELECT ROWID FROM addresses WHERE address = ?", (sender_email,))
+        sender_id = cursor.fetchone()[0]
+        
+        # Insert recipient address
+        recipient_email = metadata['to']
+        cursor.execute("INSERT OR IGNORE INTO addresses (address, comment) VALUES (?, ?)", (recipient_email, None))
+        cursor.execute("SELECT ROWID FROM addresses WHERE address = ?", (recipient_email,))
+        recipient_id = cursor.fetchone()[0]
+        
+        # Insert subject and obtain subject_id (subjects table stores text)
+        subject_text = metadata['subject']
+        cursor.execute("INSERT OR IGNORE INTO subjects (subject) VALUES (?)", (subject_text,))
+        cursor.execute("SELECT ROWID FROM subjects WHERE subject = ?", (subject_text,))
+        subject_id = cursor.fetchone()[0]
+        
+        # Insert message_global_data (store header-level info, not recipient lists)
+        message_id_header = metadata['message_id']
+        cursor.execute("INSERT OR IGNORE INTO message_global_data (message_id) VALUES (?)", (message_id_header,))
+        cursor.execute("SELECT ROWID FROM message_global_data WHERE message_id = ?", (message_id_header,))
+        global_message_id = cursor.fetchone()[0]
+        
+        # Generate conversation_id (simple: hash of subject for threading)
+        conversation_id = abs(hash(subject_text.lower().strip())) % (2**31)
+        
+        # Calculate flags (bit field: 0x1=seen, 0x2=deleted, 0x4=flagged, etc.)
+        is_read = random.choice([0, 1])
+        is_junk = 1 if is_noise else 0
+        flags = 0
+        if is_read:
+            flags |= 0x1  # Seen flag
+        
+        # Generate a synthetic message_id (integer, not the Message-ID header)
+        synthetic_message_id = random.randint(1, 2**63 - 1)
+        
+        # Use the metadata index (which matches the .emlx filename) as remote_id
+        # This allows the collector to find {rowid}.emlx files
+        remote_id_value = metadata.get('index', i + 1)
+        
+        # Insert message. Use the actual Message-ID header text and the raw
+        # subject text so tests can query message_id and subject directly.
         cursor.execute("""
             INSERT INTO messages (
-                message_id, subject, sender, date_received, date_sent,
-                mailbox, read, flagged, junk
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                message_id, global_message_id, sender, subject, 
+                date_sent, date_received, display_date, remote_id,
+                mailbox, flags, read, flagged, deleted,
+                size, conversation_id, junk
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            metadata['message_id'],
-            metadata['subject'],
-            metadata['from'],
+            message_id_header,
+            global_message_id,
+            sender_id,
+            subject_id,
             date_epoch,
             date_epoch,
-            mailbox,
-            random.choice([0, 1]),
-            0,
-            1 if is_noise else 0,
+            date_epoch,
+            remote_id_value,
+            mailbox_id,
+            flags,
+            is_read,
+            0,  # flagged
+            0,  # deleted
+            metadata.get('size', 1024),
+            conversation_id,
+            is_junk,
         ))
+        
+        message_rowid = cursor.lastrowid
+        
+        # Insert recipient (type: 0=To, 1=Cc, 2=Bcc). Use position 0 for single recipient
+        cursor.execute("""
+            INSERT INTO recipients (message, address, type, position)
+            VALUES (?, ?, ?, ?)
+        """, (message_rowid, recipient_id, 0, 0))
+        
+        # Update mailbox counts
+        cursor.execute("""
+            UPDATE mailboxes 
+            SET total_count = total_count + 1,
+                unread_count = unread_count + CASE WHEN ? = 0 THEN 1 ELSE 0 END,
+                unseen_count = unseen_count + CASE WHEN ? = 0 THEN 1 ELSE 0 END,
+                unread_count_adjusted_for_duplicates = unread_count_adjusted_for_duplicates + CASE WHEN ? = 0 THEN 1 ELSE 0 END
+            WHERE ROWID = ?
+        """, (is_read, is_read, is_read, mailbox_id))
     
     conn.commit()
     conn.close()
@@ -654,9 +840,14 @@ Files are numbered sequentially starting from 1.
 
 ## Envelope Index
 
-SQLite database simulating Mail.app's Envelope Index with tables:
-- `messages`: Message metadata (ROWID, subject, sender, date, mailbox, flags)
-- `mailboxes`: Mailbox definitions (INBOX, Sent, Receipts, Bills, Junk, etc.)
+SQLite database matching Mail.app's Envelope Index schema with tables:
+- `messages`: Message metadata with normalized foreign keys (32 columns matching real schema)
+- `mailboxes`: Mailbox definitions with count fields
+- `addresses`: Normalized email addresses (sender/recipients)
+- `subjects`: Normalized subject text
+- `message_global_data`: Message-ID headers and recipient lists
+- `recipients`: Message-to-address relationships
+- `summaries`: Message summaries
 
 ## Catalog
 
@@ -675,7 +866,7 @@ The `catalog.json` file contains metadata for all generated emails:
 ```bash
 curl -X POST http://localhost:7090/v1/collectors/email_local:run \\
   -H "Content-Type: application/json" \\
-  -H "x-auth: change-me" \\
+  -H "x-auth: changeme" \\
   -d '{{
         "mode": "simulate",
         "simulate_path": "{output_dir / 'Messages'}",
@@ -1008,10 +1199,7 @@ def import_user_emails(
     
     print(f"Found {len(all_files)} email files to import ({len(emlx_files)} .emlx, {len(eml_files)} .eml)")
     
-    # Create output structure
-    messages_dir = output_dir / 'Messages'
-    messages_dir.mkdir(parents=True, exist_ok=True)
-    
+    # Create output structure - files go directly into mailbox/Data/ directories
     attachments_dir = output_dir / 'Attachments'
     if include_attachments:
         attachments_dir.mkdir(parents=True, exist_ok=True)
@@ -1019,27 +1207,78 @@ def import_user_emails(
     metadata_list = []
     eml_converted = 0
     
+    # Parse each email, classify it, and write to the appropriate mailbox directory
     for i, source_file in enumerate(all_files):
         try:
-            # Handle .eml files: convert to .emlx format first
+            # Parse email first to determine mailbox
             if source_file.suffix.lower() == '.eml':
-                # Create temporary .emlx file
-                temp_emlx = messages_dir / f"{i + 1}.emlx"
-                convert_eml_to_emlx(source_file, temp_emlx)
-                source_emlx = temp_emlx
+                # Read and parse .eml file
+                content = source_file.read_text(encoding='utf-8', errors='replace')
+                byte_count = len(content.encode('utf-8'))
+                emlx_content = f"{byte_count}\n{content}"
+                msg = email.message_from_string(content, policy=email.policy.default)
                 eml_converted += 1
             else:
-                # Copy .emlx to output with sequential numbering
-                dest_emlx = messages_dir / f"{i + 1}.emlx"
-                shutil.copy2(source_file, dest_emlx)
-                source_emlx = dest_emlx
+                # Parse existing .emlx file
+                emlx_content = source_file.read_text(encoding='utf-8', errors='replace')
+                lines = emlx_content.split('\n')
+                if not lines[0].isdigit():
+                    continue
+                message_text = '\n'.join(lines[1:])
+                msg = email.message_from_string(message_text, policy=email.policy.default)
             
-            # Parse email
+            # Extract basic metadata to classify
+            temp_metadata = {
+                'subject': msg.get('Subject', '(no subject)'),
+                'from': msg.get('From', 'unknown@example.com'),
+                'body_plain': '',
+            }
+            
+            # Get body for classification
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == 'text/plain':
+                        try:
+                            temp_metadata['body_plain'] = part.get_content()
+                            break
+                        except Exception:
+                            pass
+            else:
+                if msg.get_content_type() == 'text/plain':
+                    try:
+                        temp_metadata['body_plain'] = msg.get_content()
+                    except Exception:
+                        temp_metadata['body_plain'] = str(msg.get_payload())
+            
+            # Classify to determine mailbox
+            intent = classify_intent_from_metadata(temp_metadata)
+            is_noise = is_noise_from_metadata(temp_metadata)
+            
+            if is_noise:
+                mailbox_name = 'Junk'
+            elif intent == 'receipt':
+                mailbox_name = 'INBOX/Receipts'
+            elif intent == 'bill':
+                mailbox_name = 'INBOX/Bills'
+            else:
+                mailbox_name = 'INBOX'
+            
+            # Create mailbox Data directory (matches Mail.app structure)
+            mailbox_dir = output_dir / mailbox_name
+            data_dir = mailbox_dir / 'Data'
+            data_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Write .emlx file to mailbox Data directory
+            dest_emlx = data_dir / f"{i + 1}.emlx"
+            dest_emlx.write_text(emlx_content, encoding='utf-8')
+            source_emlx = dest_emlx
+            
+            # Now parse the full email from the written file
             msg, metadata = parse_emlx_file(source_emlx)
             
-            # Classify intent
-            metadata['intent'] = classify_intent_from_metadata(metadata)
-            metadata['is_noise'] = is_noise_from_metadata(metadata)
+            # Use the classifications we already determined
+            metadata['intent'] = intent
+            metadata['is_noise'] = is_noise
             
             # Detect attachments
             attachments = detect_attachments(msg)
@@ -1152,6 +1391,61 @@ Examples:
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Clean up previous generated fixture artifacts safely. Only remove
+    # the specific files/directories this script creates to avoid deleting
+    # unrelated files (for example tests/fixtures/email/message_dropbox or
+    # any .md files the user may have added).
+    def _safe_cleanup_output(out_dir: Path) -> None:
+        candidates = [
+            out_dir / 'Messages',
+            out_dir / 'Attachments',
+            out_dir / 'Envelope Index',
+            out_dir / 'Envelope Index-shm',
+            out_dir / 'Envelope Index-wal',
+            out_dir / 'catalog.json',
+            out_dir / 'README.md',
+            out_dir / 'Inbox',
+            out_dir / 'INBOX',
+            out_dir / 'Sent',
+            out_dir / 'Junk',
+            out_dir / 'Trash',
+            out_dir / 'Promotions',
+        ]
+
+        for p in candidates:
+            try:
+                # Never touch a path named 'message_dropbox'
+                if p.name == 'message_dropbox':
+                    continue
+
+                # Never remove arbitrary .md files except the README.md this
+                # script creates.
+                if p.suffix == '.md' and p.name != 'README.md':
+                    continue
+
+                if p.exists():
+                    if p.is_dir():
+                        print(f"Removing previous fixture directory: {p}")
+                        shutil.rmtree(p)
+                    else:
+                        print(f"Removing previous fixture file: {p}")
+                        p.unlink()
+            except Exception as e:
+                print(f"Warning: failed to remove {p}: {e}")
+
+    _safe_cleanup_output(output_dir)
+    
+    # Auto-detect message_dropbox if no import source specified
+    if not args.import_from:
+        message_dropbox = output_dir / 'message_dropbox'
+        if message_dropbox.exists() and message_dropbox.is_dir():
+            # Check if it has any .emlx or .eml files
+            emlx_files = list(message_dropbox.glob('*.emlx'))
+            eml_files = list(message_dropbox.glob('*.eml'))
+            if emlx_files or eml_files:
+                print(f"✓ Auto-detected message_dropbox with {len(emlx_files) + len(eml_files)} email files")
+                args.import_from = message_dropbox
+    
     # Import mode vs generate mode
     if args.import_from:
         # Import real emails
@@ -1253,7 +1547,7 @@ Examples:
     print(f"\nTo use with HostAgent:")
     print(f'  curl -X POST http://localhost:7090/v1/collectors/email_local:run \\')
     print(f'    -H "Content-Type: application/json" \\')
-    print(f'    -H "x-auth: change-me" \\')
+    print(f'    -H "x-auth: changeme" \\')
     print(f'    -d \'{{"mode":"simulate","simulate_path":"{messages_dir}","limit":{len(metadata_list)}}}\'')
     print(f"\nFixture stats:")
     print(f"  Total: {len(metadata_list)} emails ({mode_label})")

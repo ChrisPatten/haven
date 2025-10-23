@@ -383,7 +383,89 @@ def _fetch_document_response(
 
 def _upsert_thread(cur, payload: DocumentIngestRequest) -> Optional[uuid.UUID]:
     if payload.thread_id:
-        return uuid.UUID(str(payload.thread_id))
+        client_tid = uuid.UUID(str(payload.thread_id))
+        thread_payload = payload.thread
+        if thread_payload:
+            # Client provided both thread_id and thread payload - ensure thread row exists
+            participants = _thread_participants(thread_payload.participants)
+            participant_count = thread_payload.participant_count or (len(participants) if participants else None)
+            first_message_at = thread_payload.first_message_at or payload.content_timestamp
+            last_message_at = thread_payload.last_message_at or payload.content_timestamp
+            
+            cur.execute(
+                """
+                INSERT INTO threads (
+                    thread_id,
+                    external_id,
+                    source_type,
+                    source_provider,
+                    title,
+                    participants,
+                    thread_type,
+                    is_group,
+                    participant_count,
+                    metadata,
+                    first_message_at,
+                    last_message_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (external_id) DO UPDATE
+                SET title = COALESCE(EXCLUDED.title, threads.title),
+                    participants = CASE
+                        WHEN jsonb_array_length(EXCLUDED.participants) > 0 THEN EXCLUDED.participants
+                        ELSE threads.participants
+                    END,
+                    thread_type = COALESCE(EXCLUDED.thread_type, threads.thread_type),
+                    is_group = COALESCE(EXCLUDED.is_group, threads.is_group),
+                    participant_count = COALESCE(EXCLUDED.participant_count, threads.participant_count),
+                    metadata = threads.metadata || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
+                    first_message_at = LEAST(
+                        COALESCE(threads.first_message_at, EXCLUDED.first_message_at),
+                        COALESCE(EXCLUDED.first_message_at, threads.first_message_at)
+                    ),
+                    last_message_at = GREATEST(
+                        COALESCE(threads.last_message_at, EXCLUDED.last_message_at),
+                        COALESCE(EXCLUDED.last_message_at, threads.last_message_at)
+                    ),
+                    updated_at = NOW()
+                RETURNING thread_id
+                """,
+                (
+                    client_tid,
+                    thread_payload.external_id,
+                    thread_payload.source_type or payload.source_type,
+                    thread_payload.source_provider or payload.source_provider,
+                    thread_payload.title,
+                    Json(participants if participants else []),
+                    thread_payload.thread_type,
+                    thread_payload.is_group,
+                    participant_count,
+                    Json(thread_payload.metadata or {}),
+                    first_message_at,
+                    last_message_at,
+                ),
+            )
+            row = cur.fetchone()
+            if row:
+                db_tid = row["thread_id"]
+                if db_tid != client_tid:
+                    logger.warning(
+                        "thread_id_mismatch",
+                        client_thread_id=str(client_tid),
+                        db_thread_id=str(db_tid),
+                        external_id=thread_payload.external_id,
+                    )
+                return db_tid
+            return client_tid
+        else:
+            # Client provided thread_id only - verify it exists
+            cur.execute("SELECT thread_id FROM threads WHERE thread_id = %s", (client_tid,))
+            row = cur.fetchone()
+            if row:
+                return client_tid
+            logger.warning("thread_id_missing_no_payload", thread_id=str(client_tid))
+            return None
+    
     thread_payload = payload.thread
     if not thread_payload:
         return None
@@ -535,11 +617,23 @@ async def forward_to_search(
         for key, value in facets.items()
         if value not in (None, False)
     ]
+    # Only populate the search `url` field for http(s) URLs. Some collectors
+    # (e.g. local mail collectors) emit non-http schemes like `message://...`
+    # which are rejected by pydantic's HttpUrl. Avoid forwarding those to
+    # the search model to reduce validation noise.
+    safe_url = None
+    if canonical_uri and isinstance(canonical_uri, str):
+        lower = canonical_uri.lower()
+        if lower.startswith("http://") or lower.startswith("https://"):
+            safe_url = canonical_uri
+        else:
+            logger.debug("skip_non_http_canonical_uri", doc_id=doc_id, canonical_uri=canonical_uri)
+
     document = DocumentUpsert(
         document_id=doc_id,
         source_id=source_id,
         title=title,
-        url=canonical_uri,
+        url=safe_url,
         text=text,
         metadata=metadata,
         facets=facet_payload,
@@ -578,6 +672,14 @@ def register_document(
             with conn.cursor(row_factory=dict_row) as cur:
                 submission = _ensure_submission(cur, payload)
                 submission_id = submission["submission_id"]
+                # Acquire a row-level lock on the submission to serialize processing of
+                # concurrent requests that share the same idempotency_key. This prevents
+                # race conditions where multiple workers attempt to INSERT the same
+                # document (same external_id + version_number) at the same time.
+                cur.execute(
+                    "SELECT submission_id FROM ingest_submissions WHERE submission_id = %s FOR UPDATE",
+                    (submission_id,),
+                )
                 if submission["result_doc_id"] and submission["status"] != "failed":
                     log.info("ingest_duplicate_submission", submission_id=submission_id)
                     duplicate = _fetch_document_response(
@@ -592,6 +694,47 @@ def register_document(
 
                 people_json = _person_dicts(payload.people)
                 thread_id = _upsert_thread(cur, payload)
+
+                # For immutable source types (email, sms), check if document already exists
+                # These represent a point in time and should never have multiple versions
+                # Note: iMessage is NOT included as messages can be edited
+                immutable_source_types = ("email", "email_local", "sms")
+                if payload.source_type in immutable_source_types:
+                    cur.execute(
+                        """
+                        SELECT doc_id, version_number 
+                        FROM documents 
+                        WHERE external_id = %s AND is_active_version = true
+                        """,
+                        (external_id,),
+                    )
+                    existing_doc = cur.fetchone()
+                    if existing_doc:
+                        log.info(
+                            "ingest_duplicate_immutable_document",
+                            doc_id=str(existing_doc["doc_id"]),
+                            version_number=existing_doc["version_number"],
+                        )
+                        # Update submission to point to existing document
+                        cur.execute(
+                            """
+                            UPDATE ingest_submissions
+                            SET result_doc_id = %s,
+                                status = 'completed',
+                                updated_at = NOW()
+                            WHERE submission_id = %s
+                            """,
+                            (existing_doc["doc_id"], submission_id),
+                        )
+                        duplicate = _fetch_document_response(
+                            cur,
+                            existing_doc["doc_id"],
+                            True,
+                            submission_id=submission_id,
+                        )
+                        conn.commit()
+                        response.status_code = status.HTTP_200_OK
+                        return duplicate
 
                 facet_overrides = payload.facet_overrides or {}
                 source_doc_ids = list(payload.source_doc_ids or [])

@@ -26,7 +26,7 @@ Example (simulate mode):
 ```bash
 curl -X POST http://localhost:7090/v1/collectors/email_local:run \
   -H "Content-Type: application/json" \
-  -H "x-auth: change-me" \
+  -H "x-auth: changeme" \
   -d '{
         "mode": "simulate",
         "simulate_path": "/Users/alex/haven-fixtures/emlx",
@@ -126,4 +126,4 @@ Ensure the HostAgent process has permissions to read the directories referenced 
 
 - `real` mode is stubbed until the Mail cache crawler (haven-54/30/31) is delivered.
 - Attachments are counted but not yet enriched; enrichment happens inside the collector implementation.
-- The handler focuses on orchestration and reporting; ingestion to Gateway is handled by the downstream collector tasks.
+- The handler focuses on orchestration and reporting; ingestion to Gateway is handled by the downstream collector tasks (see [Email Gateway Submission](email-gateway-submission.md) for payload details).

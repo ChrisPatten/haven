@@ -80,6 +80,40 @@ final class EmailServiceTests: XCTestCase {
         XCTAssertNotNil(message.bodyPlainText)
     }
     
+    func testRealFixturesExposeMessageIDs() async throws {
+        let fileURL = URL(fileURLWithPath: #filePath)
+        let repoRoot = fileURL
+            .deletingLastPathComponent() // EmailTests
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // hostagent
+            .deletingLastPathComponent() // repo root
+        let fixturesRoot = repoRoot.appendingPathComponent("tests/fixtures/email", isDirectory: true)
+        let enumerator = FileManager.default.enumerator(
+            at: fixturesRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        var missingIDs: [String] = []
+        var parsedCount = 0
+        var missingDetails: [(String, [String])] = []
+        while let url = enumerator?.nextObject() as? URL {
+            guard url.pathExtension.lowercased() == "emlx" else {
+                continue
+            }
+            let message = try await emailService.parseEmlxFile(at: url)
+            parsedCount += 1
+            if message.messageId == nil || message.messageId?.isEmpty == true {
+                missingIDs.append(url.path)
+                missingDetails.append((url.lastPathComponent, Array(message.headers.keys.sorted())))
+            }
+        }
+        XCTAssertEqual(parsedCount, 20, "Expected to parse 20 .emlx fixtures")
+        XCTAssertTrue(
+            missingIDs.isEmpty,
+            "Missing Message-ID for fixtures: \(missingIDs). Headers: \(missingDetails)"
+        )
+    }
+    
     func testParseNonExistentFile() async {
         let nonExistentURL = URL(fileURLWithPath: "/tmp/nonexistent.emlx")
         

@@ -12,6 +12,7 @@ nav:
       - Repository Overview: guides/README.md
       - Agents Overview: guides/AGENTS.md
       - Email Fixture Generator: guides/email-fixture-generator.md
+      - Local Email Collector: guides/email-collector.md
   - Architecture:
       - Overview: architecture/overview.md
       - Services: architecture/services.md
@@ -21,8 +22,11 @@ nav:
   - HostAgent:
       - Overview: hostagent/index.md
       - Native README: hostagent/hostagent-readme.md
-      - Email Utilities: hostagent/email-utilities.md
-      - Email Local Collector: hostagent/email-local-collector.md
+      - Collectors:
+          - Email Collector:
+            - Email Utilities: hostagent/email-utilities.md
+            - Email Local Collector: hostagent/email-local-collector.md
+            - Email Gateway Submission: hostagent/email-gateway-submission.md
   - API Reference:
       - Overview: api/index.md
       - Gateway API: api/gateway.md
@@ -33,10 +37,9 @@ nav:
       - Graph Reference: reference/graph.md
       - Backup & Restore: reference/BACKUP_RESTORE.md
       - Schema v2 Reference: reference/SCHEMA_V2_REFERENCE.md
-  - Schema:
-      - Database Init SQL: schema/init.sql
-      - Migration Guide: schema/migrations/README.md
-      - Migration v2_001 Email Collector: schema/migrations/v2_001_email_collector.sql
+      - Mail.app Information:
+          - Mail.app Cache Structure: reference/mail_app_cache_structure.md
+          - Envelope Index Schema: reference/Envelope_Index_schema.md
   - Backlog: beads_backlog.md
   - Contributing: contributing.md
   - Changelog: changelog.md

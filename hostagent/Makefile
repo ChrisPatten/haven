@@ -46,6 +46,18 @@ install: release
 	fi
 	@echo "Installation complete!"
 
+# Reset config to default (create ~/.haven if needed, backup existing)
+reset-config:
+	@echo "Resetting hostagent config to default..."
+	@mkdir -p ~/.haven
+	@if [ -f ~/.haven/hostagent.yaml ]; then \
+		cp ~/.haven/hostagent.yaml ~/.haven/hostagent.yaml.bak && \
+		echo "Existing config backed up to ~/.haven/hostagent.yaml.bak"; \
+	fi
+	@cp Resources/default-config.yaml ~/.haven/hostagent.yaml
+	@chmod 600 ~/.haven/hostagent.yaml || true
+	@echo "Default config written to ~/.haven/hostagent.yaml"
+
 # Uninstall binary
 uninstall:
 	@echo "Removing hostagent from /usr/local/bin..."
@@ -133,7 +145,7 @@ health:
 
 # Check capabilities (requires auth)
 capabilities:
-	@curl -s -H "x-auth: change-me" http://localhost:7090/v1/capabilities | jq . || echo "Failed (check auth token)"
+	@curl -s -H "x-auth: changeme" http://localhost:7090/v1/capabilities | jq . || echo "Failed (check auth token)"
 
 # Format code (requires swift-format)
 format:

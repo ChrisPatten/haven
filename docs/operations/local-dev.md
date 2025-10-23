@@ -43,7 +43,7 @@ make -C hostagent launchd  # installs user LaunchAgent
 
 - Grant Full Disk Access to the installed binary or the Terminal you use during development.
 - Logs: `tail -f ~/Library/Logs/Haven/hostagent.log`
-- Health check: `curl -H "x-auth: change-me" http://localhost:7090/v1/health`
+- Health check: `curl -H "x-auth: changeme" http://localhost:7090/v1/health`
 - Development mode: copy `~/Library/Messages/chat.db` to `~/.haven/chat.db` and set `HAVEN_IMESSAGE_CHAT_DB_PATH`.
 
 ## Collectors and Scripts

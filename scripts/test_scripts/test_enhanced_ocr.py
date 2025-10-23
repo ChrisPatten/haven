@@ -25,7 +25,7 @@ def test_ocr_endpoint(image_path: str, recognition_level: str = "fast", include_
     url = "http://localhost:7090/v1/ocr"
     
     # Get auth token from environment or use default
-    auth_token = os.environ.get("HOSTAGENT_AUTH_TOKEN", "change-me")
+    auth_token = os.environ.get("HOSTAGENT_AUTH_TOKEN", "changeme")
     
     headers = {
         "x-auth": auth_token,

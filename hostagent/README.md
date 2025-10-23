@@ -66,7 +66,7 @@ hostagent --config ~/.haven/hostagent-dev.yaml
 curl http://localhost:7090/v1/health
 
 # Authenticate with header
-curl -H "x-auth: change-me" http://localhost:7090/v1/capabilities
+curl -H "x-auth: changeme" http://localhost:7090/v1/capabilities
 ```
 
 ### Auto-Start with LaunchAgent
@@ -91,7 +91,7 @@ tail -f ~/Library/Logs/Haven/hostagent.log
 
 ## API Reference
 
-All endpoints require the `x-auth` header (default: `x-auth: change-me`).
+All endpoints require the `x-auth` header (default: `x-auth: changeme`).
 
 ### Core Endpoints
 
@@ -279,7 +279,7 @@ services:
   gateway_api:
     environment:
       - HOST_AGENT_URL=http://host.docker.internal:7090
-      - HOST_AGENT_AUTH=${HAVEN_AUTH_SECRET:-change-me}
+      - HOST_AGENT_AUTH=${HAVEN_AUTH_SECRET:-changeme}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 ```
@@ -348,7 +348,7 @@ python scripts/collectors/collector_imessage.py --simulate "Hi"
 
 **After (Host Agent):**
 ```bash
-curl -H "x-auth: change-me" \
+curl -H "x-auth: changeme" \
   -X POST http://localhost:7090/v1/collectors/imessage:run \
   -H "Content-Type: application/json" \
   -d '{"mode": "tail"}'
@@ -363,7 +363,7 @@ curl -H "x-auth: change-me" \
 
 **After (Host Agent):**
 ```bash
-curl -H "x-auth: change-me" \
+curl -H "x-auth: changeme" \
   -X POST http://localhost:7090/v1/ocr \
   -F "file=@/path/to/image.jpg"
 ```
