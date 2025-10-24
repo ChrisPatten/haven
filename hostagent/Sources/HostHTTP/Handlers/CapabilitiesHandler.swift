@@ -66,6 +66,11 @@ public struct CapabilitiesHandler {
                     permissions: [:],
                     status: "stub"
                 ),
+                mailImap: StubModuleCapability(
+                    enabled: config.modules.mailImap.enabled,
+                    permissions: [:],
+                    status: "stub"
+                ),
                 notes: StubModuleCapability(
                     enabled: config.modules.notes.enabled,
                     permissions: [:],
@@ -100,8 +105,22 @@ struct ModulesCapabilities: Codable {
     let calendar: StubModuleCapability
     let reminders: StubModuleCapability
     let mail: StubModuleCapability
+    let mailImap: StubModuleCapability
     let notes: StubModuleCapability
     let face: FaceModuleCapability
+    
+    enum CodingKeys: String, CodingKey {
+        case imessage
+        case ocr
+        case fswatch
+        case contacts
+        case calendar
+        case reminders
+        case mail
+        case mailImap = "mail_imap"
+        case notes
+        case face
+    }
 }
 
 struct ModuleCapability<T: Codable>: Codable {
@@ -157,4 +176,3 @@ struct FSWatchConfigInfo: Codable {
         case watchesCount = "watches_count"
     }
 }
-

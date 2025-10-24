@@ -73,7 +73,22 @@ public struct ModulesConfig: Codable {
     public var calendar: StubModuleConfig
     public var reminders: StubModuleConfig
     public var mail: MailModuleConfig
+    public var mailImap: MailImapModuleConfig
     public var notes: StubModuleConfig
+    
+    enum CodingKeys: String, CodingKey {
+        case imessage
+        case ocr
+        case entity
+        case face
+        case fswatch
+        case contacts
+        case calendar
+        case reminders
+        case mail
+        case mailImap = "mail_imap"
+        case notes
+    }
     
     public init(imessage: IMessageModuleConfig = IMessageModuleConfig(),
                 ocr: OCRModuleConfig = OCRModuleConfig(),
@@ -84,6 +99,7 @@ public struct ModulesConfig: Codable {
                 calendar: StubModuleConfig = StubModuleConfig(),
                 reminders: StubModuleConfig = StubModuleConfig(),
                 mail: MailModuleConfig = MailModuleConfig(),
+                mailImap: MailImapModuleConfig = MailImapModuleConfig(),
                 notes: StubModuleConfig = StubModuleConfig()) {
         self.imessage = imessage
         self.ocr = ocr
@@ -94,6 +110,7 @@ public struct ModulesConfig: Codable {
         self.calendar = calendar
         self.reminders = reminders
         self.mail = mail
+        self.mailImap = mailImap
         self.notes = notes
     }
     
@@ -119,6 +136,7 @@ public struct ModulesConfig: Codable {
         } else {
             mail = MailModuleConfig()
         }
+        mailImap = try container.decodeIfPresent(MailImapModuleConfig.self, forKey: .mailImap) ?? MailImapModuleConfig()
         notes = try container.decode(StubModuleConfig.self, forKey: .notes)
     }
 }
@@ -318,6 +336,123 @@ public struct LoggingConfig: Codable {
 }
 
 // MARK: - Mail Module Configuration
+
+public struct MailImapModuleConfig: Codable {
+    public var enabled: Bool
+    public var cache: MailImapCacheConfig
+    public var accounts: [MailImapAccountConfig]
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case cache
+        case accounts
+    }
+    
+    public init(enabled: Bool = false,
+                cache: MailImapCacheConfig = MailImapCacheConfig(),
+                accounts: [MailImapAccountConfig] = []) {
+        self.enabled = enabled
+        self.cache = cache
+        self.accounts = accounts
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        cache = try container.decodeIfPresent(MailImapCacheConfig.self, forKey: .cache) ?? MailImapCacheConfig()
+        accounts = try container.decodeIfPresent([MailImapAccountConfig].self, forKey: .accounts) ?? []
+    }
+}
+
+public struct MailImapCacheConfig: Codable {
+    public var dir: String
+    public var maxMb: Int
+    
+    enum CodingKeys: String, CodingKey {
+        case dir
+        case maxMb = "max_mb"
+    }
+    
+    public init(dir: String = "~/Library/Caches/Haven/remote_mail",
+                maxMb: Int = 100) {
+        self.dir = dir
+        self.maxMb = maxMb
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        dir = try container.decodeIfPresent(String.self, forKey: .dir) ?? "~/Library/Caches/Haven/remote_mail"
+        maxMb = try container.decodeIfPresent(Int.self, forKey: .maxMb) ?? 100
+    }
+}
+
+public struct MailImapAccountConfig: Codable {
+    public var id: String
+    public var host: String
+    public var port: Int
+    public var tls: Bool
+    public var username: String
+    public var auth: MailImapAuthConfig
+    public var folders: [String]
+    
+    enum CodingKeys: String, CodingKey {
+        case id
+        case host
+        case port
+        case tls
+        case username
+        case auth
+        case folders
+    }
+    
+    public init(id: String = "",
+                host: String = "",
+                port: Int = 993,
+                tls: Bool = true,
+                username: String = "",
+                auth: MailImapAuthConfig = MailImapAuthConfig(),
+                folders: [String] = []) {
+        self.id = id
+        self.host = host
+        self.port = port
+        self.tls = tls
+        self.username = username
+        self.auth = auth
+        self.folders = folders
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? ""
+        host = try container.decodeIfPresent(String.self, forKey: .host) ?? ""
+        port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 993
+        tls = try container.decodeIfPresent(Bool.self, forKey: .tls) ?? true
+        username = try container.decodeIfPresent(String.self, forKey: .username) ?? ""
+        auth = try container.decodeIfPresent(MailImapAuthConfig.self, forKey: .auth) ?? MailImapAuthConfig()
+        folders = try container.decodeIfPresent([String].self, forKey: .folders) ?? []
+    }
+}
+
+public struct MailImapAuthConfig: Codable {
+    public var kind: String
+    public var secretRef: String
+    
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case secretRef = "secret_ref"
+    }
+    
+    public init(kind: String = "app_password", secretRef: String = "") {
+        self.kind = kind
+        self.secretRef = secretRef
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "app_password"
+        secretRef = try container.decodeIfPresent(String.self, forKey: .secretRef) ?? ""
+    }
+}
 
 public struct MailModuleConfig: Codable {
     public var enabled: Bool
@@ -667,6 +802,14 @@ public class ConfigLoader {
         if config.gateway.baseUrl.isEmpty {
             throw ConfigError.validationError("Gateway base URL cannot be empty")
         }
+        
+        if config.modules.mail.enabled && config.modules.mailImap.enabled {
+            throw ConfigError.validationError("modules.mail and modules.mail_imap cannot both be enabled at the same time")
+        }
+    }
+    
+    internal func validateConfiguration(_ config: HavenConfig) throws {
+        try validate(config)
     }
 }
 

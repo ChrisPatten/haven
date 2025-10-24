@@ -106,6 +106,13 @@ modules:
         exclude_folders: []
         vip_only: false
         require_list_unsubscribe: false
+
+  mail_imap:
+    enabled: false
+    cache:
+      dir: ~/Library/Caches/Haven/remote_mail
+      max_mb: 100
+    accounts: []
   
   notes:
     enabled: false
