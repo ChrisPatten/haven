@@ -62,7 +62,7 @@ public struct HavenLogger {
             // Human readable text: [lvl] category: message key=val ...
             var parts = ["[\(level)] \(category): \(message)"]
             if !metadata.isEmpty {
-                let meta = metadata.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+                let meta = Self.formatMetadataSpaced(metadata)
                 parts.append(meta)
             }
             let out = parts.joined(separator: " ")
@@ -76,6 +76,7 @@ public struct HavenLogger {
             pairs.append("lvl=\(level)")
             pairs.append("mod=\(category)")
             pairs.append("msg=\"\(message)\"")
+            // Ensure deterministic ordering
             for (k, v) in metadata.sorted(by: { $0.key < $1.key }) {
                 pairs.append("\(k)=\"\(v)\"")
             }
@@ -119,6 +120,69 @@ public struct HavenLogger {
         case "critical", "fatal": return 50
         default: return 20 // default to info
         }
+    }
+
+    // Format metadata into a single spaced key=value string. Values are stringified using
+    // `String(describing:)`. Keys are sorted for deterministic output.
+    private static func formatMetadataSpaced(_ metadata: [String: Any]) -> String {
+        let parts = metadata.sorted(by: { $0.key < $1.key }).map { key, value -> String in
+            let s = String(describing: value)
+            return "\(key)=\(s)"
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// Return true if the provided logging level is enabled under the current minimum level.
+    public static func isLevelEnabled(_ level: String) -> Bool {
+        return HavenLogger.priority(for: level) >= HavenLogger.minimumLevelPriority
+    }
+
+    /// Convenience for checking whether debug-level logging is enabled.
+    public static func isDebugEnabled() -> Bool {
+        return isLevelEnabled("debug")
+    }
+
+    /// Type-erased Encodable wrapper. Useful for encoding an `any Encodable` value.
+    public struct AnyEncodable: Encodable {
+        private let _encode: (Encoder) throws -> Void
+
+        public init(_ base: Encodable) {
+            self._encode = { encoder in
+                try base.encode(to: encoder)
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            try _encode(encoder)
+        }
+    }
+
+    /// Encode `value` as pretty JSON using ISO8601 dates, but only perform work when debug logging is enabled.
+    /// Returns the pretty JSON string on success, or `String(describing: value)` as a fallback.
+    public static func dumpJSONIfDebug(_ value: Any) -> String? {
+        guard isDebugEnabled() else { return nil }
+
+        // Prefer JSONSerialization for Foundation-native container types
+        if JSONSerialization.isValidJSONObject(value) {
+            if let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]),
+               let s = String(data: data, encoding: .utf8) {
+                return s
+            }
+        }
+
+        // Try to encode as Encodable via type erasure
+        if let enc = value as? Encodable {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let boxed = AnyEncodable(enc)
+            if let data = try? encoder.encode(boxed), let s = String(data: data, encoding: .utf8) {
+                return s
+            }
+        }
+
+        // Last resort: fallback to String description
+        return String(describing: value)
     }
 }
 

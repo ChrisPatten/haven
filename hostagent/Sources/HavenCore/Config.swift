@@ -324,17 +324,29 @@ public struct MailModuleConfig: Codable {
     public var sourcePath: String?
     public var filters: MailFiltersConfig
     public var state: MailStateConfig
+    public var defaultOrder: String?
+    public var defaultSince: String?
+    public var defaultUntil: String?
+    public var allowOverride: Bool
     
     public init(
         enabled: Bool = false,
         sourcePath: String? = nil,
         filters: MailFiltersConfig = MailFiltersConfig(),
-        state: MailStateConfig = MailStateConfig()
+        state: MailStateConfig = MailStateConfig(),
+        defaultOrder: String? = nil,
+        defaultSince: String? = nil,
+        defaultUntil: String? = nil,
+        allowOverride: Bool = true
     ) {
         self.enabled = enabled
         self.sourcePath = sourcePath
         self.filters = filters
         self.state = state
+        self.defaultOrder = defaultOrder
+        self.defaultSince = defaultSince
+        self.defaultUntil = defaultUntil
+        self.allowOverride = allowOverride
     }
     
     public init(from decoder: Decoder) throws {
@@ -343,6 +355,10 @@ public struct MailModuleConfig: Codable {
         sourcePath = try container.decodeIfPresent(String.self, forKey: .sourcePath)
         filters = try container.decodeIfPresent(MailFiltersConfig.self, forKey: .filters) ?? MailFiltersConfig()
         state = try container.decodeIfPresent(MailStateConfig.self, forKey: .state) ?? MailStateConfig()
+        defaultOrder = try container.decodeIfPresent(String.self, forKey: .defaultOrder)
+        defaultSince = try container.decodeIfPresent(String.self, forKey: .defaultSince)
+        defaultUntil = try container.decodeIfPresent(String.self, forKey: .defaultUntil)
+        allowOverride = try container.decodeIfPresent(Bool.self, forKey: .allowOverride) ?? true
     }
 
     enum CodingKeys: String, CodingKey {
@@ -350,6 +366,10 @@ public struct MailModuleConfig: Codable {
         case sourcePath = "source_path"
         case filters
         case state
+        case defaultOrder = "default_order"
+        case defaultSince = "default_since"
+        case defaultUntil = "default_until"
+        case allowOverride = "allow_override"
     }
 }
 

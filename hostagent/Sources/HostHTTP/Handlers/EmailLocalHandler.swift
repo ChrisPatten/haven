@@ -100,8 +100,8 @@ public actor EmailLocalHandler {
         var isVIP: Bool
         var remoteID: String?
         var emlxPath: String?
-        var fileInode: UInt64?
-        var fileMtime: TimeInterval?
+    var fileInode: UInt64?
+    var fileMtime: Date?
 
         init(message: EmailIndexedMessage) {
             self.rowID = message.rowID
@@ -119,12 +119,12 @@ public actor EmailLocalHandler {
             self.remoteID = message.remoteID
             self.emlxPath = message.emlxPath?.path
             self.fileInode = message.fileInode
-            self.fileMtime = message.fileMtime?.timeIntervalSince1970
+            self.fileMtime = message.fileMtime
         }
 
         func toEmailIndexedMessage() -> EmailIndexedMessage? {
             let pathURL = emlxPath.map { URL(fileURLWithPath: $0) }
-            let mtime = fileMtime.map { Date(timeIntervalSince1970: $0) }
+            let mtime = fileMtime
             return EmailIndexedMessage(
                 rowID: rowID,
                 subject: subject,
@@ -220,12 +220,18 @@ public actor EmailLocalHandler {
         // Accept either `simulate_path` (back-compat) or the preferred `source_path`.
         let simulatePath: String?
         let sourcePath: String?
+        let order: String?
+        let since: String?
+        let until: String?
 
         enum CodingKeys: String, CodingKey {
             case mode
             case limit
             case simulatePath = "simulate_path"
             case sourcePath = "source_path"
+            case order
+            case since
+            case until
         }
     }
     
@@ -240,6 +246,8 @@ public actor EmailLocalHandler {
         case noEmlxFiles(String)
         case invalidRequestBody
         case lockUnavailable(String)
+        case overrideNotAllowed(String)
+        case invalidOrder(String)
         
         var errorDescription: String? {
             switch self {
@@ -263,6 +271,10 @@ public actor EmailLocalHandler {
                 return "Request body must be valid JSON"
             case .lockUnavailable(let reason):
                 return "Email collector lock unavailable: \(reason)"
+            case .overrideNotAllowed(let param):
+                return "Override of '\(param)' not allowed (allow_override is false in config)"
+            case .invalidOrder(let order):
+                return "Invalid order '\(order)': must be 'asc' or 'desc'"
             }
         }
         
@@ -280,6 +292,8 @@ public actor EmailLocalHandler {
                 return 400
             case .lockUnavailable:
                 return 423
+            case .overrideNotAllowed, .invalidOrder:
+                return 400
             }
         }
     }
@@ -431,6 +445,9 @@ public actor EmailLocalHandler {
         let mode: String
         let limit: Int
         let sourcePath: String?
+        let order: String?
+        let since: Date?
+        let until: Date?
     }
     
     private struct RunOutcome {
@@ -468,17 +485,46 @@ public actor EmailLocalHandler {
             guard let path = params.sourcePath else {
                 throw HandlerError.simulatePathRequired
             }
-            return try await runSimulateMode(at: path, limit: params.limit, stats: &stats)
+            return try await runSimulateMode(at: path, limit: params.limit, order: params.order, stats: &stats)
         case "real":
-            return try await runRealMode(sourcePath: params.sourcePath, limit: params.limit, stats: &stats)
+            return try await runRealMode(sourcePath: params.sourcePath, limit: params.limit, params: params, stats: &stats)
         default:
             throw HandlerError.invalidMode(params.mode)
         }
     }
     
-    private func runSimulateMode(at path: String, limit: Int, stats: inout CollectorStats) async throws -> RunOutcome {
-        let files = try collectSimulateTargets(at: path, limit: limit)
+    private func runSimulateMode(at path: String, limit: Int, order: String?, stats: inout CollectorStats) async throws -> RunOutcome {
+        var files = try collectSimulateTargets(at: path, limit: limit)
         var warnings: [String] = []
+        
+        // Apply sorting if order is specified
+        if let orderValue = order?.lowercased() {
+            let fileManager = FileManager.default
+            // Get file modification dates for sorting
+            var filesWithDates: [(URL, Date?)] = files.map { url in
+                let attrs = try? fileManager.attributesOfItem(atPath: url.path)
+                let modDate = attrs?[.modificationDate] as? Date
+                return (url, modDate)
+            }
+            
+            if orderValue == "desc" {
+                filesWithDates.sort { (lhs, rhs) in
+                    guard let lhsDate = lhs.1, let rhsDate = rhs.1 else {
+                        return lhs.1 != nil
+                    }
+                    return lhsDate > rhsDate
+                }
+            } else {
+                filesWithDates.sort { (lhs, rhs) in
+                    guard let lhsDate = lhs.1, let rhsDate = rhs.1 else {
+                        return rhs.1 != nil
+                    }
+                    return lhsDate < rhsDate
+                }
+            }
+            files = filesWithDates.map { $0.0 }
+        }
+        
         let targets = files.enumerated().map { index, url in
             SubmissionTarget(key: "simulate-\(index)", fileURL: url, indexedMessage: nil, mailboxLabel: "simulate")
         }
@@ -496,7 +542,7 @@ public actor EmailLocalHandler {
         return RunOutcome(partial: partial, warnings: warnings)
     }
     
-    private func runRealMode(sourcePath: String?, limit: Int, stats: inout CollectorStats) async throws -> RunOutcome {
+    private func runRealMode(sourcePath: String?, limit: Int, params: RunParameters, stats: inout CollectorStats) async throws -> RunOutcome {
         do {
             // If sourcePath is provided, create a collector configured for that directory
             let collector: EmailIndexedCollector
@@ -512,7 +558,7 @@ public actor EmailLocalHandler {
                 collector = indexedCollector
             }
             
-            let result = try await collector.run(limit: limit)
+            let result = try await collector.run(limit: limit, order: params.order, since: params.since, until: params.until)
             var warnings = result.warnings
             let fileManager = FileManager.default
             
@@ -547,9 +593,20 @@ public actor EmailLocalHandler {
                 guard let rawEmlxPath = message.emlxPath else {
                     let warning = "Indexed message \(message.rowID) missing .emlx path"
                     warnings.append(warning)
-                    logger.warning("Indexed message missing .emlx path", metadata: [
-                        "rowid": "\(message.rowID)"
-                    ])
+                    // Emit a debug-level full representation of the indexed message with human-readable timestamps.
+                    let snapshot = IndexedMessageSnapshot(message: message)
+                    if let json = HavenLogger.dumpJSONIfDebug(snapshot) {
+                        logger.debug("Indexed message missing .emlx path - full indexed snapshot: \(json)")
+                    } else {
+                        // Either debug is disabled or encoding failed; log a compact description
+                        logger.debug("Indexed message missing .emlx path - snapshot: \(String(describing: snapshot))")
+                    }
+                        logger.warning("Indexed message missing .emlx path", metadata: [
+                            "rowid": "\(message.rowID)",
+                            "mailbox": message.mailboxName ?? "unknown",
+                            "subject": message.subject ?? "nil",
+                            "date_sent": "\(iso8601String(from: message.dateSent))"
+                        ])
                     stats.errorsEncountered += 1
                     continue
                 }
@@ -914,6 +971,9 @@ public actor EmailLocalHandler {
         var mode = "real"
         var limit = 100
         var simulatePath: String?
+        var order: String?
+        var since: Date?
+        var until: Date?
 
         if let body = request.body, !body.isEmpty {
             do {
@@ -942,8 +1002,49 @@ public actor EmailLocalHandler {
                     mode = "simulate"
                     simulatePath = pSim
                 }
+                
+                // Handle order, since, until with config fallback and override check
+                let allowOverride = config.modules.mail.allowOverride
+                
+                if let providedOrder = runRequest.order {
+                    guard allowOverride else {
+                        throw HandlerError.overrideNotAllowed("order")
+                    }
+                    order = providedOrder
+                } else if let defaultOrder = config.modules.mail.defaultOrder {
+                    order = defaultOrder
+                }
+                
+                if let providedSince = runRequest.since {
+                    guard allowOverride else {
+                        throw HandlerError.overrideNotAllowed("since")
+                    }
+                    since = parseISO8601Date(providedSince)
+                } else if let defaultSince = config.modules.mail.defaultSince {
+                    since = parseISO8601Date(defaultSince)
+                }
+                
+                if let providedUntil = runRequest.until {
+                    guard allowOverride else {
+                        throw HandlerError.overrideNotAllowed("until")
+                    }
+                    until = parseISO8601Date(providedUntil)
+                } else if let defaultUntil = config.modules.mail.defaultUntil {
+                    until = parseISO8601Date(defaultUntil)
+                }
             } catch {
                 throw HandlerError.invalidRequestBody
+            }
+        } else {
+            // No request body, use config defaults
+            if let defaultOrder = config.modules.mail.defaultOrder {
+                order = defaultOrder
+            }
+            if let defaultSince = config.modules.mail.defaultSince {
+                since = parseISO8601Date(defaultSince)
+            }
+            if let defaultUntil = config.modules.mail.defaultUntil {
+                until = parseISO8601Date(defaultUntil)
             }
         }
 
@@ -958,8 +1059,34 @@ public actor EmailLocalHandler {
         if mode == "simulate" && simulatePath == nil {
             throw HandlerError.simulatePathRequired
         }
+        
+        // Validate order if provided
+        if let orderValue = order {
+            let normalized = orderValue.lowercased()
+            guard normalized == "asc" || normalized == "desc" else {
+                throw HandlerError.invalidOrder(orderValue)
+            }
+        }
 
-        return RunParameters(mode: mode, limit: limit, sourcePath: simulatePath)
+        return RunParameters(mode: mode, limit: limit, sourcePath: simulatePath, order: order, since: since, until: until)
+    }
+    
+    private func parseISO8601Date(_ dateString: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: dateString) {
+            return date
+        }
+        // Try without fractional seconds
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: dateString)
+    }
+
+    private func iso8601String(from date: Date?) -> String {
+        guard let date else { return "" }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
     
     // MARK: - Response Helpers

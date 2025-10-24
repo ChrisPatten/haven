@@ -101,6 +101,48 @@ final class EmailIndexedCollectorTests: XCTestCase {
             )
         }
     }
+    
+    func testRunWithOrderDesc() async throws {
+        let mailbox = try builder.createMailbox(name: "INBOX", displayName: "Inbox")
+        // Add messages with different dates
+        let date1 = Date(timeIntervalSince1970: 1_600_000_000) // Sept 13, 2020
+        let date2 = Date(timeIntervalSince1970: 1_650_000_000) // April 15, 2022
+        let date3 = Date(timeIntervalSince1970: 1_700_000_000) // Nov 14, 2023
+        
+        try builder.addMessage(mailbox: mailbox, subject: "Oldest", remoteID: "4001", flags: 0, dateSent: date1)
+        try builder.addMessage(mailbox: mailbox, subject: "Middle", remoteID: "4002", flags: 0, dateSent: date2)
+        try builder.addMessage(mailbox: mailbox, subject: "Newest", remoteID: "4003", flags: 0, dateSent: date3)
+        
+        let collector = EmailIndexedCollector(mailRoot: builder.mailRoot, stateFileURL: stateURL)
+        
+        // Test descending order (newest first)
+        let descResult = try await collector.run(limit: 10, order: "desc")
+        XCTAssertEqual(descResult.messages.count, 3)
+        XCTAssertEqual(descResult.messages[0].subject, "Newest")
+        XCTAssertEqual(descResult.messages[1].subject, "Middle")
+        XCTAssertEqual(descResult.messages[2].subject, "Oldest")
+    }
+    
+    func testRunWithDateFilters() async throws {
+        let mailbox = try builder.createMailbox(name: "INBOX", displayName: "Inbox")
+        let date1 = Date(timeIntervalSince1970: 1_600_000_000) // Sept 13, 2020
+        let date2 = Date(timeIntervalSince1970: 1_650_000_000) // April 15, 2022
+        let date3 = Date(timeIntervalSince1970: 1_700_000_000) // Nov 14, 2023
+        
+        try builder.addMessage(mailbox: mailbox, subject: "Old", remoteID: "5001", flags: 0, dateSent: date1)
+        try builder.addMessage(mailbox: mailbox, subject: "Target", remoteID: "5002", flags: 0, dateSent: date2)
+        try builder.addMessage(mailbox: mailbox, subject: "Recent", remoteID: "5003", flags: 0, dateSent: date3)
+        
+        let collector = EmailIndexedCollector(mailRoot: builder.mailRoot, stateFileURL: stateURL)
+        
+        // Filter to only get the middle message
+        let since = Date(timeIntervalSince1970: 1_640_000_000) // Dec 20, 2021
+        let until = Date(timeIntervalSince1970: 1_660_000_000) // Aug 8, 2022
+        let result = try await collector.run(limit: 10, since: since, until: until)
+        
+        XCTAssertEqual(result.messages.count, 1)
+        XCTAssertEqual(result.messages[0].subject, "Target")
+    }
 }
 
 // MARK: - Test Fixture Builder
@@ -156,8 +198,8 @@ final class MailFixtureBuilder {
         return MailboxDescriptor(id: mailboxID, path: mailboxDir)
     }
     
-    func addMessage(mailbox: MailboxDescriptor, subject: String, remoteID: String, flags: Int64) throws {
-        let dateSent = Date().timeIntervalSinceReferenceDate
+    func addMessage(mailbox: MailboxDescriptor, subject: String, remoteID: String, flags: Int64, dateSent: Date? = nil) throws {
+        let dateSentValue = (dateSent ?? Date()).timeIntervalSinceReferenceDate
         try withDatabase { db in
             let subjectID = try insertRow(db: db, sql: "INSERT INTO subjects (subject) VALUES (?)") { stmt in
                 sqlite3_bind_text(stmt, 1, subject, -1, SQLITE_TRANSIENT)
@@ -183,7 +225,7 @@ final class MailFixtureBuilder {
             
             sqlite3_bind_int64(statement, 1, subjectID)
             sqlite3_bind_int64(statement, 2, senderID)
-            sqlite3_bind_double(statement, 3, dateSent)
+            sqlite3_bind_double(statement, 3, dateSentValue)
             sqlite3_bind_text(statement, 4, remoteID, -1, SQLITE_TRANSIENT)
             sqlite3_bind_text(statement, 5, UUID().uuidString, -1, SQLITE_TRANSIENT)
             sqlite3_bind_int64(statement, 6, flags)
@@ -259,12 +301,22 @@ final class MailFixtureBuilder {
                 bcc_list TEXT
             );
             """
+        let createRecipients = """
+            CREATE TABLE IF NOT EXISTS recipients (
+                ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+                message INTEGER,
+                type INTEGER,
+                address INTEGER,
+                position INTEGER
+            );
+            """
 
         if sqlite3_exec(db, createMailboxes, nil, nil, nil) != SQLITE_OK ||
             sqlite3_exec(db, createMessages, nil, nil, nil) != SQLITE_OK ||
             sqlite3_exec(db, createSubjects, nil, nil, nil) != SQLITE_OK ||
             sqlite3_exec(db, createAddresses, nil, nil, nil) != SQLITE_OK ||
-            sqlite3_exec(db, createMessageGlobalData, nil, nil, nil) != SQLITE_OK {
+            sqlite3_exec(db, createMessageGlobalData, nil, nil, nil) != SQLITE_OK ||
+            sqlite3_exec(db, createRecipients, nil, nil, nil) != SQLITE_OK {
             throw NSError(domain: "MailFixtureBuilder", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed to create tables"])
         }
     }

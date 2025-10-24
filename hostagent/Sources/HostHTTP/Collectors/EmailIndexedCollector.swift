@@ -101,7 +101,7 @@ private struct EmailCollectorState: Codable {
         var rowID: Int64
         var path: String
         var inode: UInt64?
-        var mtime: TimeInterval?
+            var mtime: Date?
     }
     
     var lastRowID: Int64
@@ -125,6 +125,7 @@ private struct EnvelopeRecord {
     let remoteID: String?
     let flags: Int64
     let mailboxURL: URL?
+    let mailboxDisplayName: String?
 }
 
 /// Collector responsible for reading Envelope Index and resolving .emlx paths.
@@ -156,11 +157,11 @@ public actor EmailIndexedCollector {
     }
     
     /// Execute an indexed run and persist state updates.
-    public func run(limit: Int) throws -> EmailIndexedRunResult {
+    public func run(limit: Int, order: String? = nil, since: Date? = nil, until: Date? = nil) throws -> EmailIndexedRunResult {
         let state = try loadState()
         pendingState = state
         let dbURL = try locateEnvelopeIndex()
-        let records = try readEnvelopeIndex(from: dbURL, after: state.lastRowID, limit: limit)
+        let records = try readEnvelopeIndex(from: dbURL, after: state.lastRowID, limit: limit, order: order, since: since, until: until)
         
         guard !records.isEmpty else {
             logger.debug("No new messages in Envelope Index", metadata: ["last_rowid": "\(state.lastRowID)"])
@@ -238,7 +239,7 @@ public actor EmailIndexedCollector {
     
     // MARK: - Reading
     
-    private func readEnvelopeIndex(from dbURL: URL, after lastRowID: Int64, limit: Int) throws -> [EnvelopeRecord] {
+    private func readEnvelopeIndex(from dbURL: URL, after lastRowID: Int64, limit: Int, order: String? = nil, since: Date? = nil, until: Date? = nil) throws -> [EnvelopeRecord] {
         var db: OpaquePointer?
         let openResult = sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READONLY, nil)
         guard openResult == SQLITE_OK, let db else {
@@ -246,6 +247,22 @@ public actor EmailIndexedCollector {
             throw EmailCollectorError.sqliteOpenFailed(message)
         }
         defer { sqlite3_close(db) }
+        
+        // Build query with optional date filters and sort order
+        var whereClauses = ["messages.ROWID > ?"]
+        var bindIndex = 2 // Start at 2 since 1 is for ROWID
+        
+        if since != nil {
+            whereClauses.append("messages.date_sent >= ?")
+            bindIndex += 1
+        }
+        if until != nil {
+            whereClauses.append("messages.date_sent <= ?")
+            bindIndex += 1
+        }
+        
+        let whereClause = whereClauses.joined(separator: " AND ")
+        let sortOrder = (order?.lowercased() == "desc") ? "DESC" : "ASC"
         
         let query = """
             SELECT
@@ -260,8 +277,8 @@ public actor EmailIndexedCollector {
             LEFT JOIN subjects ON subjects.ROWID = messages.subject
             LEFT JOIN addresses ON addresses.ROWID = messages.sender
             LEFT JOIN mailboxes ON mailboxes.ROWID = messages.mailbox
-            WHERE messages.ROWID > ?
-            ORDER BY messages.ROWID ASC
+            WHERE \(whereClause)
+            ORDER BY messages.date_sent \(sortOrder), messages.ROWID \(sortOrder)
             LIMIT ?
             """
         
@@ -272,8 +289,21 @@ public actor EmailIndexedCollector {
         }
         defer { sqlite3_finalize(statement) }
         
-        sqlite3_bind_int64(statement, 1, lastRowID)
-        sqlite3_bind_int(statement, 2, Int32(limit))
+        // Bind parameters
+        var currentBindIndex: Int32 = 1
+        sqlite3_bind_int64(statement, currentBindIndex, lastRowID)
+        currentBindIndex += 1
+        
+        if let sinceDate = since {
+            sqlite3_bind_double(statement, currentBindIndex, sinceDate.timeIntervalSinceReferenceDate)
+            currentBindIndex += 1
+        }
+        if let untilDate = until {
+            sqlite3_bind_double(statement, currentBindIndex, untilDate.timeIntervalSinceReferenceDate)
+            currentBindIndex += 1
+        }
+        
+        sqlite3_bind_int(statement, currentBindIndex, Int32(limit))
         
         var records: [EnvelopeRecord] = []
         var messageRowIDs: [Int64] = []
@@ -294,7 +324,8 @@ public actor EmailIndexedCollector {
                     dateSent: sqlite3_column_type(statement, 3) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 3),
                     remoteID: columnText(statement, index: 4),
                     flags: sqlite3_column_int64(statement, 5),
-                    mailboxURL: decodeMailboxURL(columnText(statement, index: 6))
+                    mailboxURL: decodeMailboxURL(columnText(statement, index: 6)),
+                    mailboxDisplayName: nil
                 )
                 records.append(record)
             } else if stepResult == SQLITE_DONE {
@@ -321,7 +352,8 @@ public actor EmailIndexedCollector {
                         dateSent: records[i].dateSent,
                         remoteID: records[i].remoteID,
                         flags: records[i].flags,
-                        mailboxURL: records[i].mailboxURL
+                        mailboxURL: records[i].mailboxURL,
+                        mailboxDisplayName: records[i].mailboxDisplayName
                     )
                 }
             }
@@ -406,7 +438,9 @@ public actor EmailIndexedCollector {
     
     private func decodeMailboxURL(_ value: String?) -> URL? {
         guard let value else { return nil }
-        if value.starts(with: "file://") || value.starts(with: "FILE://") {
+        // If the value contains a URL scheme (e.g. imap://, file://) prefer URL(string:).
+        // Otherwise treat it as a filesystem path.
+        if value.contains("://") {
             return URL(string: value)
         }
         return URL(fileURLWithPath: value)
@@ -467,7 +501,7 @@ public actor EmailIndexedCollector {
                 bccList: splitAddressList(record.bccList),
                 dateSent: record.dateSent.map { Date(timeIntervalSinceReferenceDate: $0) },
                 mailboxName: mailboxName,
-                mailboxDisplayName: mailboxName,
+                mailboxDisplayName: record.mailboxDisplayName ?? mailboxName,
                 mailboxPath: record.mailboxURL?.path,
                 flags: record.flags,
                 isVIP: isVIP(flags: record.flags),
@@ -561,13 +595,14 @@ public actor EmailIndexedCollector {
         
         let data = try Data(contentsOf: stateFileURL)
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
+        decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(EmailCollectorState.self, from: data)
     }
     
     private func saveState(_ state: EmailCollectorState) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(state)
         let directory = stateFileURL.deletingLastPathComponent()
         if !fileManager.fileExists(atPath: directory.path) {
@@ -584,7 +619,7 @@ public actor EmailIndexedCollector {
                 rowID: message.rowID,
                 path: path,
                 inode: message.fileInode,
-                mtime: message.fileMtime?.timeIntervalSince1970
+                mtime: message.fileMtime
             )
         }
         
