@@ -2,6 +2,7 @@ import Foundation
 @preconcurrency import Vision
 import CoreImage
 import OSLog
+import ImageIO
 
 /// Vision-based OCR service for macOS
 public actor OCRService {
@@ -10,15 +11,24 @@ public actor OCRService {
     private let languages: [String]
     private let recognitionLevel: String
     private let includeLayout: Bool
+    private let maxImageDimension: Int
     
+    /// - Parameters:
+    ///   - timeoutMs: OCR timeout in milliseconds (default 2000)
+    ///   - languages: recognition language hints
+    ///   - recognitionLevel: "fast" or "accurate"
+    ///   - includeLayout: whether to return layout regions
+    ///   - maxImageDimension: maximum pixel dimension (width/height) to feed into Vision; larger images will be downscaled to this to speed processing (default 1600)
     public init(timeoutMs: Int = 2000, 
                 languages: [String] = ["en"],
                 recognitionLevel: String = "fast",
-                includeLayout: Bool = true) {
+                includeLayout: Bool = true,
+                maxImageDimension: Int = 1600) {
         self.timeoutMs = timeoutMs
         self.languages = languages
         self.recognitionLevel = recognitionLevel
         self.includeLayout = includeLayout
+        self.maxImageDimension = maxImageDimension
     }
     
     /// Process image from file path or data
@@ -91,35 +101,55 @@ public actor OCRService {
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         
         return try await withCheckedThrowingContinuation { continuation in
+            // Protect against multiple resumes from concurrent sources (timeout vs handler)
+            var resumed = false
+            let resumeLock = NSLock()
+
+            func safeResumeReturning(_ value: (String, [OCRBox], [OCRRegion]?, [String]?)) {
+                resumeLock.lock()
+                defer { resumeLock.unlock() }
+                if resumed { return }
+                resumed = true
+                continuation.resume(returning: value)
+            }
+
+            func safeResumeThrowing(_ error: Error) {
+                resumeLock.lock()
+                defer { resumeLock.unlock() }
+                if resumed { return }
+                resumed = true
+                continuation.resume(throwing: error)
+            }
+
             // Add timeout
             let timeoutTask = Task {
                 try await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
-                continuation.resume(throwing: OCRError.timeout)
+                safeResumeThrowing(OCRError.timeout)
             }
-            
+
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     try handler.perform([request])
                     timeoutTask.cancel()
-                    
+
                     guard let results = request.results else {
-                        continuation.resume(throwing: OCRError.noResults)
+                        safeResumeThrowing(OCRError.noResults)
                         return
                     }
-                    
+
                     var fullText = ""
                     var boxes: [OCRBox] = []
                     var regions: [OCRRegion] = []
                     var detectedLanguageSet = Set<String>()
-                    
+
                     for observation in results {
                         guard let candidate = observation.topCandidates(1).first else { continue }
                         let text = candidate.string
                         fullText += text + "\n"
-                        
+
                         // Extract bounding box (Vision uses bottom-left origin, convert to top-left)
                         let visionBox = observation.boundingBox
-                        
+
                         // Convert from bottom-left to top-left coordinate system
                         let normalizedBox = [
                             Float(visionBox.origin.x),
@@ -127,7 +157,7 @@ public actor OCRService {
                             Float(visionBox.width),
                             Float(visionBox.height)
                         ]
-                        
+
                         let box = OCRBox(
                             text: text,
                             bbox: normalizedBox,
@@ -135,7 +165,7 @@ public actor OCRService {
                             confidence: Float(observation.confidence)
                         )
                         boxes.append(box)
-                        
+
                         // Build enhanced region if layout is requested
                         if includeLayout {
                             // For language detection, we rely on the request's configuration
@@ -145,7 +175,7 @@ public actor OCRService {
                             if let lang = detectedLang {
                                 detectedLanguageSet.insert(lang)
                             }
-                            
+
                             let region = OCRRegion(
                                 text: text,
                                 boundingBox: BoundingBox(
@@ -160,30 +190,42 @@ public actor OCRService {
                             regions.append(region)
                         }
                     }
-                    
+
                     let detectedLanguages = includeLayout ? Array(detectedLanguageSet) : nil
                     let returnRegions = includeLayout ? regions : nil
-                    
-                    continuation.resume(returning: (
-                        fullText.trimmingCharacters(in: .whitespacesAndNewlines), 
-                        boxes, 
-                        returnRegions,
-                        detectedLanguages
-                    ))
+
+                    safeResumeReturning(
+                        (fullText.trimmingCharacters(in: .whitespacesAndNewlines), boxes, returnRegions, detectedLanguages)
+                    )
                 } catch {
                     timeoutTask.cancel()
-                    continuation.resume(throwing: error)
+                    safeResumeThrowing(error)
                 }
             }
         }
     }
     
     private func createCGImage(from data: Data) -> CGImage? {
-        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
-            return nil
+        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+
+        // First try to create a downscaled thumbnail to speed up Vision processing.
+        // If that fails, fall back to creating the full image.
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxImageDimension,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+
+        if let thumb = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) {
+            return thumb
         }
-        return cgImage
+
+        // Fallback: full resolution image
+        if let full = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) {
+            return full
+        }
+
+        return nil
     }
     
     public func healthCheck() -> OCRHealth {

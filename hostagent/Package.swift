@@ -26,7 +26,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.6"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.3"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        .package(url: "https://github.com/MailCore/mailcore2.git", branch: "master")
     ],
     targets: [
         // Core: Configuration, logging, auth, shared utilities
@@ -69,6 +70,16 @@ let package = Package(
             dependencies: ["HavenCore"],
             path: "Sources/Email"
         ),
+
+        // IMAP: Remote email fetching via MailCore2
+        .target(
+            name: "IMAP",
+            dependencies: [
+                "HavenCore",
+                .product(name: "MailCore2", package: "mailcore2")
+            ],
+            path: "Sources/IMAP"
+        ),
         
         // IMessages target intentionally omitted (no Sources/IMessages in this repo)
         
@@ -85,6 +96,7 @@ let package = Package(
             dependencies: [
                 "HavenCore",
                 "HostAgentEmail",
+                "IMAP",
                 "OCR",
                 "Entity",
                 "Face",
@@ -166,6 +178,11 @@ let package = Package(
             name: "SubmissionTests",
             dependencies: ["HostAgentEmail", "Email", "HavenCore"],
             path: "Tests/SubmissionTests"
+        ),
+        .testTarget(
+            name: "IMAPTests",
+            dependencies: ["IMAP", "HavenCore"],
+            path: "Tests/IMAPTests"
         )
     ]
 )

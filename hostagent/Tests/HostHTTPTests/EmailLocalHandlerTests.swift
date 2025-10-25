@@ -454,7 +454,9 @@ final class EmailLocalHandlerTests: XCTestCase {
         func buildDocumentPayload(
             email: EmailMessage,
             intent: IntentClassification?,
-            relevance: Double?
+            relevance: Double?,
+            sourceType: String?,
+            sourceIdPrefix: String?
         ) async throws -> EmailDocumentPayload {
             builtPayloadEmails.append(email)
             let body = email.bodyPlainText ?? email.bodyHTML ?? "(empty email body)"
@@ -525,7 +527,9 @@ final class EmailLocalHandlerTests: XCTestCase {
             messageId: String?,
             intent: IntentClassification?,
             relevance: Double?,
-            enrichment: EmailAttachmentEnrichment?
+            enrichment: EmailAttachmentEnrichment?,
+            sourceType: String?,
+            sourceIdPrefix: String?
         ) async throws -> GatewayFileSubmissionResponse {
             if let error = attachmentSubmissionError {
                 throw error

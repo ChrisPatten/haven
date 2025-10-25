@@ -7,7 +7,9 @@ public protocol EmailCollecting: Sendable {
     func buildDocumentPayload(
         email: EmailMessage,
         intent: IntentClassification?,
-        relevance: Double?
+        relevance: Double?,
+        sourceType: String?,
+        sourceIdPrefix: String?
     ) async throws -> EmailDocumentPayload
 
     func submitEmailDocument(_ payload: EmailDocumentPayload) async throws -> GatewaySubmissionResponse
@@ -18,8 +20,46 @@ public protocol EmailCollecting: Sendable {
         messageId: String?,
         intent: IntentClassification?,
         relevance: Double?,
-        enrichment: EmailAttachmentEnrichment?
+        enrichment: EmailAttachmentEnrichment?,
+        sourceType: String?,
+        sourceIdPrefix: String?
     ) async throws -> GatewayFileSubmissionResponse
+}
+
+public extension EmailCollecting {
+    func buildDocumentPayload(
+        email: EmailMessage,
+        intent: IntentClassification? = nil,
+        relevance: Double? = nil
+    ) async throws -> EmailDocumentPayload {
+        try await buildDocumentPayload(
+            email: email,
+            intent: intent,
+            relevance: relevance,
+            sourceType: nil,
+            sourceIdPrefix: nil
+        )
+    }
+    
+    func submitEmailAttachment(
+        fileURL: URL,
+        attachment: EmailAttachment,
+        messageId: String?,
+        intent: IntentClassification? = nil,
+        relevance: Double? = nil,
+        enrichment: EmailAttachmentEnrichment? = nil
+    ) async throws -> GatewayFileSubmissionResponse {
+        try await submitEmailAttachment(
+            fileURL: fileURL,
+            attachment: attachment,
+            messageId: messageId,
+            intent: intent,
+            relevance: relevance,
+            enrichment: enrichment,
+            sourceType: nil,
+            sourceIdPrefix: nil
+        )
+    }
 }
 
 public enum EmailCollectorError: Error, LocalizedError {
@@ -261,8 +301,18 @@ public actor EmailCollector {
     private let gatewayClient: GatewaySubmissionClient
     private let emailService: EmailService
     private let logger: HavenLogger
+    private let defaultSourceType: String
+    private let defaultSourceIdPrefix: String
     
-    public init(gatewayConfig: GatewayConfig, authToken: String, session: URLSession? = nil, emailService: EmailService? = nil, logger: HavenLogger = HavenLogger(category: "email-collector")) {
+    public init(
+        gatewayConfig: GatewayConfig,
+        authToken: String,
+        session: URLSession? = nil,
+        emailService: EmailService? = nil,
+        logger: HavenLogger = HavenLogger(category: "email-collector"),
+        sourceType: String = "email_local",
+        sourceIdPrefix: String? = nil
+    ) {
         self.gatewayClient = GatewaySubmissionClient(config: gatewayConfig, authToken: authToken, session: session)
         if let providedService = emailService {
             self.emailService = providedService
@@ -270,15 +320,27 @@ public actor EmailCollector {
             self.emailService = EmailService()
         }
         self.logger = logger
+        self.defaultSourceType = sourceType
+        if let explicitPrefix = sourceIdPrefix {
+            self.defaultSourceIdPrefix = explicitPrefix
+        } else if sourceType == "email_local" {
+            self.defaultSourceIdPrefix = "email"
+        } else {
+            self.defaultSourceIdPrefix = sourceType
+        }
     }
     
     public func buildDocumentPayload(
         email: EmailMessage,
         intent: IntentClassification? = nil,
-        relevance: Double? = nil
+        relevance: Double? = nil,
+        sourceType overrideSourceType: String? = nil,
+        sourceIdPrefix: String? = nil
     ) async throws -> EmailDocumentPayload {
         let messageId = normalizeMessageId(email.messageId)
-        let sourceId = buildSourceId(messageId: messageId, email: email)
+        let resolvedSourceType = overrideSourceType ?? defaultSourceType
+        let resolvedSourceIdPrefix = sourceIdPrefix ?? defaultSourceIdPrefix
+        let sourceId = buildSourceId(messageId: messageId, email: email, prefix: resolvedSourceIdPrefix)
         
         let rawBody = selectBody(from: email)
         let normalizedBody = normalizeIngestText(rawBody)
@@ -327,7 +389,7 @@ public actor EmailCollector {
         }
         
         return EmailDocumentPayload(
-            sourceType: "email_local",
+            sourceType: resolvedSourceType,
             sourceId: sourceId,
             title: email.subject,
             canonicalUri: messageId.map { "message://\($0)" },
@@ -368,7 +430,9 @@ public actor EmailCollector {
         messageId: String?,
         intent: IntentClassification? = nil,
         relevance: Double? = nil,
-        enrichment: EmailAttachmentEnrichment? = nil
+        enrichment: EmailAttachmentEnrichment? = nil,
+        sourceType overrideSourceType: String? = nil,
+        sourceIdPrefix: String? = nil
     ) async throws -> GatewayFileSubmissionResponse {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             throw EmailCollectorError.attachmentFileNotFound(fileURL)
@@ -384,6 +448,8 @@ public actor EmailCollector {
         let sha = sha256Hex(of: data)
         let filename = attachment.filename ?? fileURL.lastPathComponent
         let pathComponent = messageId ?? sha
+        let resolvedSourceType = overrideSourceType ?? defaultSourceType
+        let resolvedSourceIdPrefix = sourceIdPrefix ?? defaultSourceIdPrefix
         let metaIntent = intent.map { classification in
             EmailIntentPayload(
                 primaryIntent: classification.primaryIntent.rawValue,
@@ -394,8 +460,8 @@ public actor EmailCollector {
         }
         
         let meta = EmailAttachmentMeta(
-            source: "email_local",
-            path: "email/\(pathComponent)/\(filename)",
+            source: resolvedSourceType,
+            path: "\(resolvedSourceIdPrefix)/\(pathComponent)/\(filename)",
             filename: filename,
             mimeType: attachment.mimeType,
             sha256: sha,
@@ -425,9 +491,9 @@ public actor EmailCollector {
     
     // MARK: - Helpers
     
-    private func buildSourceId(messageId: String?, email: EmailMessage) -> String {
+    private func buildSourceId(messageId: String?, email: EmailMessage, prefix: String) -> String {
         if let messageId, !messageId.isEmpty {
-            return "email:\(messageId)"
+            return "\(prefix):\(messageId)"
         }
         var seedComponents: [String] = []
         if let date = email.date {
@@ -440,7 +506,7 @@ public actor EmailCollector {
             seedComponents.append(from)
         }
         let seed = seedComponents.joined(separator: "|")
-        return "email:\(sha256Hex(of: seed))"
+        return "\(prefix):\(sha256Hex(of: seed))"
     }
     
     private func selectBody(from email: EmailMessage) -> String {

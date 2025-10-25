@@ -1,6 +1,15 @@
 {
   "pins" : [
     {
+      "identity" : "mailcore2",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/MailCore/mailcore2.git",
+      "state" : {
+        "branch" : "master",
+        "revision" : "7417b2e8dd7e2c028aadb72056e4d1428c0627c4"
+      }
+    },
+    {
       "identity" : "swift-argument-parser",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-argument-parser.git",

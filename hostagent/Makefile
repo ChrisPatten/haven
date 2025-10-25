@@ -17,7 +17,7 @@ help:
 
 # Build debug version
 build:
-	swift build
+	arch -x86_64 swift build
 
 # Build release version
 release:

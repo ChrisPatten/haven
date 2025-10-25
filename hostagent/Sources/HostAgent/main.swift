@@ -202,6 +202,7 @@ struct HavenHostAgent: AsyncParsableCommand {
         let emailHandler = EmailHandler(config: config)
         let emailIndexedCollector = EmailIndexedCollector()
         let emailLocalHandler = EmailLocalHandler(config: config, indexedCollector: emailIndexedCollector)
+        let emailImapHandler = EmailImapHandler(config: config)
         
         let handlers: [RouteHandler] = [
             // Core endpoints
@@ -264,6 +265,9 @@ struct HavenHostAgent: AsyncParsableCommand {
             },
             PatternRouteHandler(method: "GET", pattern: "/v1/collectors/email_local/state") { req, ctx in
                 await emailLocalHandler.handleState(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "POST", pattern: "/v1/collectors/email_imap:run") { req, ctx in
+                await emailImapHandler.handleRun(request: req, context: ctx)
             },
             
             // Email utility endpoints

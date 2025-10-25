@@ -187,9 +187,7 @@ public actor EmailService {
         }
         
         let data = try Data(contentsOf: path)
-        guard let content = String(data: data, encoding: .utf8) else {
-            throw EmailServiceError.invalidEmlxFormat("Unable to decode file as UTF-8")
-        }
+        let content = try decodeEmlxPayload(from: data)
         
         // Parse .emlx format: first line is byte count, followed by RFC 2822 message
         let lines = content.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
@@ -205,16 +203,38 @@ public actor EmailService {
         let rfc2822Content = parts[0]
         
         // Parse RFC 2822 message
-        return try parseRFC2822Message(rfc2822Content)
+        return try parseRFC822String(rfc2822Content)
+    }
+    
+    /// Parse raw RFC 822 data into an email message.
+    public func parseRFC822Data(_ data: Data) throws -> EmailMessage {
+        if let utf8 = String(data: data, encoding: .utf8) {
+            return try parseRFC822String(utf8)
+        }
+        if let latin1 = String(data: data, encoding: .isoLatin1) {
+            return try parseRFC822String(latin1)
+        }
+        logger.error("Failed to decode RFC822 payload", metadata: ["length": "\(data.count)"])
+        throw EmailServiceError.invalidEmlxFormat("Unable to decode RFC822 data as UTF-8 or ISO-8859-1")
+    }
+    
+    /// Parse an RFC 822 string representation into an email message.
+    public func parseRFC822String(_ content: String) throws -> EmailMessage {
+        return try parseRFC2822Message(content)
     }
     
     /// Parse an RFC 2822 email message
     private func parseRFC2822Message(_ content: String) throws -> EmailMessage {
+        // Normalize line endings to \n so splitting headers/body works
+        let normalizedContent = content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
         var message = EmailMessage()
-        message.rawContent = content
+        message.rawContent = normalizedContent
         
         // Split headers and body
-        let parts = content.components(separatedBy: "\n\n")
+    let parts = normalizedContent.components(separatedBy: "\n\n")
         guard parts.count >= 1 else {
             throw EmailServiceError.parsingFailed("Invalid message format")
         }
@@ -488,6 +508,16 @@ public actor EmailService {
             secondaryIntents: secondaryIntents,
             extractedEntities: entities
         )
+    }
+    
+    private func decodeEmlxPayload(from data: Data) throws -> String {
+        if let utf8 = String(data: data, encoding: .utf8) {
+            return utf8
+        }
+        if let latin1 = String(data: data, encoding: .isoLatin1) {
+            return latin1
+        }
+        throw EmailServiceError.invalidEmlxFormat("Unable to decode .emlx payload as UTF-8 or ISO-8859-1")
     }
     
     /// Redact PII from text (email addresses, phone numbers, account numbers)

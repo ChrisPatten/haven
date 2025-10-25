@@ -27,6 +27,9 @@ public actor IMessageHandler {
         var startTime: Date
         var endTime: Date?
         var durationMs: Int?
+        // Earliest/latest message timestamps touched during this run (Apple epoch units)
+        var earliestMessageTimestamp: Int64?
+        var latestMessageTimestamp: Int64?
         
         var toDict: [String: Any] {
             var dict: [String: Any] = [
@@ -41,6 +44,29 @@ public actor IMessageHandler {
             }
             if let durationMs = durationMs {
                 dict["duration_ms"] = durationMs
+            }
+            // Include earliest/latest touched message timestamps if present
+            func formatAppleEpoch(_ timestamp: Int64) -> String {
+                let appleEpoch = Date(timeIntervalSince1970: 978307200) // 2001-01-01
+                let seconds: TimeInterval
+                if timestamp > 10_000_000_000_000 {
+                    // Nanoseconds
+                    seconds = Double(timestamp) / 1_000_000_000
+                } else if timestamp > 10_000_000 {
+                    // Micro or milliseconds space - try micro -> ms heuristics
+                    seconds = Double(timestamp) / 1_000_000
+                } else {
+                    seconds = Double(timestamp)
+                }
+                let date = appleEpoch.addingTimeInterval(seconds)
+                return ISO8601DateFormatter().string(from: date)
+            }
+
+            if let earliest = earliestMessageTimestamp {
+                dict["earliest_touched_message_timestamp"] = formatAppleEpoch(earliest)
+            }
+            if let latest = latestMessageTimestamp {
+                dict["latest_touched_message_timestamp"] = formatAppleEpoch(latest)
             }
             return dict
         }
@@ -134,7 +160,9 @@ public actor IMessageHandler {
             threadsProcessed: 0,
             attachmentsProcessed: 0,
             documentsCreated: 0,
-            startTime: startTime
+            startTime: startTime,
+            earliestMessageTimestamp: nil,
+            latestMessageTimestamp: nil
         )
         
         do {
@@ -173,12 +201,19 @@ public actor IMessageHandler {
             ])
             
             // Build response
-            let response: [String: Any] = [
+            // Add earliest/latest touched timestamps at top level for easy consumption
+            var response: [String: Any] = [
                 "status": failureCount == 0 ? "success" : "partial",
                 "posted": successCount,
                 "failed": failureCount,
                 "stats": stats.toDict
             ]
+            if let earliest = stats.earliestMessageTimestamp {
+                response["earliest_touched_message_timestamp"] = appleEpochToISO8601(earliest)
+            }
+            if let latest = stats.latestMessageTimestamp {
+                response["latest_touched_message_timestamp"] = appleEpochToISO8601(latest)
+            }
             
             let responseData = try JSONSerialization.data(withJSONObject: response, options: [.prettyPrinted, .sortedKeys])
             
@@ -313,14 +348,24 @@ public actor IMessageHandler {
                 openResult = sqlite3_open_v2(immutableUri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil)
             }
         } else {
-            // For snapshots, use standard approach
-            openResult = sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil)
-            
+            // For snapshots, prefer opening with immutable URI up-front to avoid WAL/SHM creation
+            // which can cause SQLITE_CANTOPEN when the environment disallows auxiliary files.
+            let immutableUri = "file:\(dbPath)?mode=ro&immutable=1"
+            openResult = sqlite3_open_v2(immutableUri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil)
+
             if openResult != SQLITE_OK {
-                logger.warning("Snapshot open failed; retry immutable URI", metadata: ["code": String(openResult)])
+                logger.warning("Snapshot immutable open failed; trying basic readonly", metadata: ["code": String(openResult)])
                 if db != nil { sqlite3_close(db); db = nil }
-                let immutableUri = "file:\(dbPath)?mode=ro&immutable=1"
-                openResult = sqlite3_open_v2(immutableUri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil)
+                // Try a basic readonly open as a fallback
+                openResult = sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil)
+            }
+
+            if openResult != SQLITE_OK {
+                logger.warning("Snapshot basic readonly failed; retrying immutable with nolock", metadata: ["code": String(openResult)])
+                if db != nil { sqlite3_close(db); db = nil }
+                // As a final attempt, try immutable with nolock
+                let noLockImmutable = "file:\(dbPath)?mode=ro&nolock=1&immutable=1"
+                openResult = sqlite3_open_v2(noLockImmutable, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil)
             }
         }
         
@@ -356,6 +401,17 @@ public actor IMessageHandler {
         // Get messages and threads
         let messages = try fetchMessages(db: db!, params: params)
         stats.messagesProcessed = messages.count
+
+        // Record earliest / latest message timestamps (if we fetched any)
+        if !messages.isEmpty {
+            let dates = messages.map { $0.date }
+            if let minDate = dates.min() {
+                stats.earliestMessageTimestamp = minDate
+            }
+            if let maxDate = dates.max() {
+                stats.latestMessageTimestamp = maxDate
+            }
+        }
         
         let threads = try fetchThreads(db: db!, messageIds: Set(messages.map { $0.chatId }))
         stats.threadsProcessed = threads.count
@@ -558,6 +614,7 @@ public actor IMessageHandler {
         let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
         guard prepareResult == SQLITE_OK else {
             let errorMsg = String(cString: sqlite3_errmsg(db))
+            logger.error("Failed to prepare message query", metadata: ["error": errorMsg, "code": String(prepareResult)])
             throw CollectorError.queryFailed("Failed to prepare message query: \(errorMsg) (code: \(prepareResult))")
         }
         defer { sqlite3_finalize(stmt) }
@@ -644,6 +701,7 @@ public actor IMessageHandler {
         let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
         guard prepareResult == SQLITE_OK else {
             let errorMsg = String(cString: sqlite3_errmsg(db))
+            logger.error("Failed to prepare thread query", metadata: ["error": errorMsg, "code": String(prepareResult)])
             throw CollectorError.queryFailed("Failed to prepare thread query: \(errorMsg) (code: \(prepareResult))")
         }
         defer { sqlite3_finalize(stmt) }
@@ -706,6 +764,7 @@ public actor IMessageHandler {
         let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
         guard prepareResult == SQLITE_OK else {
             let errorMsg = String(cString: sqlite3_errmsg(db))
+            logger.error("Failed to prepare participants query", metadata: ["error": errorMsg, "code": String(prepareResult)])
             throw CollectorError.queryFailed("Failed to prepare participants query: \(errorMsg) (code: \(prepareResult))")
         }
         defer { sqlite3_finalize(stmt) }
@@ -735,6 +794,7 @@ public actor IMessageHandler {
         let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
         guard prepareResult == SQLITE_OK else {
             let errorMsg = String(cString: sqlite3_errmsg(db))
+            logger.error("Failed to prepare attachments query", metadata: ["error": errorMsg, "code": String(prepareResult)])
             throw CollectorError.queryFailed("Failed to prepare attachments query: \(errorMsg) (code: \(prepareResult))")
         }
         defer { sqlite3_finalize(stmt) }

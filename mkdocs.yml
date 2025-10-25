@@ -26,6 +26,7 @@ nav:
           - Email Collector:
             - Email Utilities: hostagent/email-utilities.md
             - Email Local Collector: hostagent/email-local-collector.md
+            - Email IMAP Collector: hostagent/email-imap-collector.md
             - Email Gateway Submission: hostagent/email-gateway-submission.md
   - API Reference:
       - Overview: api/index.md

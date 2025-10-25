@@ -11,6 +11,12 @@ public struct HavenLogger {
     private static var minimumLevelPriority: Int = HavenLogger.priority(for: "info")
     // Logging output format: "json", "text", or "logfmt"
     private static var outputFormat: String = "json"
+    // Shared ISO8601 formatter with fractional seconds for stable timestamps
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
     
     public init(category: String) {
         self.category = category
@@ -44,8 +50,11 @@ public struct HavenLogger {
         if msgPriority < HavenLogger.minimumLevelPriority {
             return
         }
+        // compute single timestamp for this log entry
+        let ts = Self.iso8601Formatter.string(from: Date())
+
         var logData: [String: Any] = [
-            "ts": ISO8601DateFormatter().string(from: Date()),
+            "ts": ts,
             "lvl": level,
             "mod": category,
             "msg": message
@@ -60,7 +69,7 @@ public struct HavenLogger {
         switch fmt {
         case "text":
             // Human readable text: [lvl] category: message key=val ...
-            var parts = ["[\(level)] \(category): \(message)"]
+            var parts = ["\(ts) [\(level)] \(category): \(message)"]
             if !metadata.isEmpty {
                 let meta = Self.formatMetadataSpaced(metadata)
                 parts.append(meta)
@@ -72,7 +81,7 @@ public struct HavenLogger {
         case "logfmt":
             // key=value format for log collectors
             var pairs: [String] = []
-            pairs.append("ts=\(ISO8601DateFormatter().string(from: Date()))")
+            pairs.append("ts=\(ts)")
             pairs.append("lvl=\(level)")
             pairs.append("mod=\(category)")
             pairs.append("msg=\"\(message)\"")
@@ -91,9 +100,9 @@ public struct HavenLogger {
                 os_log("%{public}@", log: osLog, type: osLogType, jsonString)
                 print(jsonString)
             } else {
-                // Fallback to text
-                os_log("[%{public}@] %{public}@: %{public}@", log: osLog, type: osLogType, level, category, message)
-                print("[\(level)] \(category): \(message)")
+                // Fallback to text (include timestamp)
+                os_log("%{public}@ [%{public}@] %{public}@: %{public}@", log: osLog, type: osLogType, ts, level, category, message)
+                print("\(ts) [\(level)] \(category): \(message)")
             }
         }
     }
