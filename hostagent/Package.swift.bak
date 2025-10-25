@@ -1,0 +1,359 @@
+// swift-tools-version: 5.9
+import PackageDescription
+
+let package = Package(
+    name: "haven-hostagent",
+    platforms: [
+        .macOS(.v14)
+    ],
+    products: [
+        .executable(
+            name: "hostagent",
+            targets: ["HostAgent"]
+        ),
+        .library(
+            name: "HavenCore",
+            targets: ["HavenCore"]
+        ),
+        .plugin(
+            name: "GenerateBuildInfo",
+            targets: ["GenerateBuildInfo"]
+        )
+    ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.62.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.6"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.5.3"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        .package(url: "https://github.com/MailCore/mailcore2.git", branch: "master")
+    ],
+    targets: [
+        .target(
+            name: "HavenCore",
+            dependencies: [
+                .product(name: "Yams", package: "Yams"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Crypto", package: "swift-crypto")
+            ],
+            path: "Sources/HavenCore",
+            plugins: ["GenerateBuildInfo"]
+        ),
+        .target(
+            name: "OCR",
+            dependencies: ["HavenCore"],
+            path: "Sources/OCR"
+        ),
+        .target(
+            name: "Entity",
+            dependencies: ["HavenCore"],
+            path: "Sources/Entity",
+            exclude: ["README.md"]
+        ),
+        .target(
+            name: "Face",
+            dependencies: ["HavenCore"],
+            path: "Sources/Face"
+        ),
+        .target(
+            name: "Email",
+            dependencies: ["HavenCore"],
+            path: "Sources/Email"
+        ),
+        .target(
+            name: "IMAP",
+            dependencies: [
+                "HavenCore",
+                .product(name: "MailCore2", package: "mailcore2")
+            ],
+            path: "Sources/IMAP"
+        ),
+        .target(
+            name: "FSWatch",
+            dependencies: ["HavenCore"],
+            path: "Sources/FSWatch"
+        ),
+        .target(
+            name: "HostHTTP",
+            dependencies: [
+                "HavenCore",
+                "HostAgentEmail",
+                "IMAP",
+                "OCR",
+                "Entity",
+                "Face",
+                "Email",
+                "FSWatch",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOFoundationCompat", package: "swift-nio")
+            ],
+            path: "Sources/HostHTTP",
+            exclude: ["Handlers/EmailLocalHandler.swift"]
+        ),
+        .plugin(
+            name: "GenerateBuildInfo",
+            capability: .buildTool()
+        ),
+        .executableTarget(
+            name: "HostAgent",
+            dependencies: [
+                "HavenCore",
+                "HostHTTP",
+                "HostAgentEmail",
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
+            ],
+            path: "Sources/HostAgent",
+            exclude: ["Collectors", "Submission"]
+        ),
+        .target(
+            name: "HostAgentEmail",
+            dependencies: [
+                "HavenCore",
+                "Email"
+            ],
+            path: "Sources/HostAgent",
+            exclude: ["main.swift"],
+            sources: [
+                "Collectors",
+                "Submission"
+            ],
+            resources: [
+                .process("Resources/Collectors/schemas/collector_run_request.schema.json")
+            ]
+        ),
+        .testTarget(
+            name: "HavenCoreTests",
+            dependencies: ["HavenCore"],
+            path: "Tests/HavenCoreTests"
+        ),
+        .testTarget(
+            name: "OCRTests",
+            dependencies: ["OCR", "HavenCore"],
+            path: "Tests/OCRTests",
+            resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "FSWatchTests",
+            dependencies: ["FSWatch", "HavenCore"],
+            path: "Tests/FSWatchTests"
+        ),
+        .testTarget(
+            name: "EmailTests",
+            dependencies: ["Email", "HavenCore"],
+            path: "Tests/EmailTests",
+            resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "HostHTTPTests",
+            dependencies: ["HostHTTP", "HostAgentEmail", "HavenCore"],
+            path: "Tests/HostHTTPTests",
+            resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "SubmissionTests",
+            dependencies: ["HostAgentEmail", "Email", "HavenCore"],
+            path: "Tests/SubmissionTests"
+        ),
+        .testTarget(
+            name: "IMAPTests",
+            dependencies: ["IMAP", "HavenCore"],
+            path: "Tests/IMAPTests"
+        )
+    ]
+)
+
+
+let package = Package(
+    name: "haven-hostagent",
+    platforms: [
+        .macOS(.v14)
+    ],
+    products: [
+        .executable(
+            name: "hostagent",
+            targets: ["HostAgent"]
+        ),
+        .library(
+            name: "HavenCore",
+            targets: ["HavenCore"]
+        ),
+        .plugin(
+            name: "GenerateBuildInfo",
+            targets: ["GenerateBuildInfo"]
+        )
+    ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.62.0"),
+    // GRDB removed: not used by any current target
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.6"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.5.3"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        .package(url: "https://github.com/MailCore/mailcore2.git", branch: "master")
+    ],
+    targets: [
+        // Core: Configuration, logging, auth, shared utilities
+        .target(
+            name: "HavenCore",
+            dependencies: [
+                .product(name: "Yams", package: "Yams"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Crypto", package: "swift-crypto")
+            ],
+            path: "Sources/HavenCore",
+            plugins: ["GenerateBuildInfo"]
+        ),
+        
+        // OCR: Vision framework integration
+        .target(
+            name: "OCR",
+            dependencies: ["HavenCore"],
+            path: "Sources/OCR"
+        ),
+        
+        // Entity: Natural Language entity extraction
+        .target(
+            name: "Entity",
+            dependencies: ["HavenCore"],
+            path: "Sources/Entity",
+            exclude: ["README.md"]
+        ),
+        
+        // Face: Vision framework face detection
+        .target(
+            name: "Face",
+            dependencies: ["HavenCore"],
+            path: "Sources/Face"
+        ),
+        
+        // Email: .emlx parsing and metadata extraction
+        .target(
+            name: "Email",
+            dependencies: ["HavenCore"],
+            path: "Sources/Email"
+        ),
+
+        // IMAP: Remote email fetching via MailCore2
+        .target(
+            name: "IMAP",
+            dependencies: [
+                "HavenCore",
+                .product(name: "MailCore2", package: "mailcore2")
+            ],
+            path: "Sources/IMAP"
+        ),
+        
+        // IMessages target intentionally omitted (no Sources/IMessages in this repo)
+        
+        // FSWatch: File system monitoring
+        .target(
+            name: "FSWatch",
+            dependencies: ["HavenCore"],
+            path: "Sources/FSWatch"
+        ),
+        
+        // HostHTTP: SwiftNIO HTTP server
+        .target(
+            name: "HostHTTP",
+            dependencies: [
+                "HavenCore",
+                "HostAgentEmail",
+                "IMAP",
+                "OCR",
+                "Entity",
+                "Face",
+                "Email",
+                "FSWatch",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOFoundationCompat", package: "swift-nio")
+            ],
+            path: "Sources/HostHTTP",
+            exclude: ["Handlers/EmailLocalHandler.swift"]
+        ),
+        
+        // Build plugin to generate BuildInfo before compilation
+        .plugin(
+            name: "GenerateBuildInfo",
+            capability: .buildTool()
+        ),
+        
+        // Main executable
+        .executableTarget(
+            name: "HostAgent",
+            dependencies: [
+                "HavenCore",
+                "HostHTTP",
+                "HostAgentEmail",
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
+            ],
+            path: "Sources/HostAgent",
+            exclude: ["Collectors", "Submission"]
+        ),
+        
+        // HostAgent email submission helpers
+        .target(
+            name: "HostAgentEmail",
+            dependencies: [
+                "HavenCore",
+                "Email"
+            ],
+            path: "Sources/HostAgent",
+            exclude: ["main.swift"],
+            sources: [
+                "Collectors",
+                "Submission"
+            ],
+            resources: [
+                // Package resources are relative to the target path. We keep
+                // collector schemas under Sources/HostAgent/Resources so
+                // Bundle.module can access them in runtime and tests.
+                .process("Resources/Collectors/schemas/collector_run_request.schema.json")
+            ]
+        ),
+        
+        // Tests
+        .testTarget(
+            name: "HavenCoreTests",
+            dependencies: ["HavenCore"],
+            path: "Tests/HavenCoreTests"
+        ),
+        .testTarget(
+            name: "OCRTests",
+            dependencies: ["OCR", "HavenCore"],
+            path: "Tests/OCRTests",
+            resources: [.copy("Fixtures")]
+        ),
+        // IMessagesTests omitted (test fixture retained in tree but not part of Package.swift)
+        .testTarget(
+            name: "FSWatchTests",
+            dependencies: ["FSWatch", "HavenCore"],
+            path: "Tests/FSWatchTests"
+        ),
+        .testTarget(
+            name: "EmailTests",
+            dependencies: ["Email", "HavenCore"],
+            path: "Tests/EmailTests",
+            resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "HostHTTPTests",
+            dependencies: ["HostHTTP", "HostAgentEmail", "HavenCore"],
+            path: "Tests/HostHTTPTests",
+            resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "SubmissionTests",
+            dependencies: ["HostAgentEmail", "Email", "HavenCore"],
+            path: "Tests/SubmissionTests"
+        ),
+        .testTarget(
+            name: "IMAPTests",
+            dependencies: ["IMAP", "HavenCore"],
+            path: "Tests/IMAPTests"
+        )
+    ]
+)

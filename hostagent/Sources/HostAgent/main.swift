@@ -199,11 +199,9 @@ struct HavenHostAgent: AsyncParsableCommand {
         let gatewayClient = GatewayClient(config: config.gateway, authToken: config.auth.secret)
         let iMessageHandler = IMessageHandler(config: config, gatewayClient: gatewayClient)
         
-        // Initialize email handlers
-        let emailHandler = EmailHandler(config: config)
-        let emailIndexedCollector = EmailIndexedCollector()
-        let emailLocalHandler = EmailLocalHandler(config: config, indexedCollector: emailIndexedCollector)
-        let emailImapHandler = EmailImapHandler(config: config)
+    // Initialize email handlers
+    let emailHandler = EmailHandler(config: config)
+    let emailImapHandler = EmailImapHandler(config: config)
         
         let handlers: [RouteHandler] = [
             // Core endpoints
@@ -259,7 +257,6 @@ struct HavenHostAgent: AsyncParsableCommand {
             PatternRouteHandler(method: "POST", pattern: "/v1/collectors/*") { req, ctx in
                 let dispatch: [String: (HTTPRequest, RequestContext) async -> HTTPResponse] = [
                     "imessage": { r, c in await iMessageHandler.handleRun(request: r, context: c) },
-                    "email_local": { r, c in await emailLocalHandler.handleRun(request: r, context: c) },
                     "email_imap": { r, c in await emailImapHandler.handleRun(request: r, context: c) }
                 ]
 
@@ -271,12 +268,7 @@ struct HavenHostAgent: AsyncParsableCommand {
             PatternRouteHandler(method: "GET", pattern: "/v1/collectors/imessage/state") { req, ctx in
                 await iMessageHandler.handleState(request: req, context: ctx)
             },
-            PatternRouteHandler(method: "POST", pattern: "/v1/collectors/email_local:run") { req, ctx in
-                await emailLocalHandler.handleRun(request: req, context: ctx)
-            },
-            PatternRouteHandler(method: "GET", pattern: "/v1/collectors/email_local/state") { req, ctx in
-                await emailLocalHandler.handleState(request: req, context: ctx)
-            },
+            // removed email_local collector endpoints; only email_imap is supported
             PatternRouteHandler(method: "POST", pattern: "/v1/collectors/email_imap:run") { req, ctx in
                 await emailImapHandler.handleRun(request: req, context: ctx)
             },

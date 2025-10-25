@@ -1,43 +1,9 @@
-import Foundation
-import Darwin
-import HavenCore
-import Email
-import HostAgentEmail
-
-/// Handler for local email collector orchestration
-public actor EmailLocalHandler {
-    private let config: HavenConfig
-    private let emailService: EmailService
-    private let logger = HavenLogger(category: "email-local-handler")
-    private let indexedCollector: EmailIndexedCollector
-    private let emailCollector: any EmailCollecting
-    private var runState: SubmissionRunState
-    private let runStateFileURL: URL
-    private let clearOnNewRun: Bool
-    private let lockFileURL: URL
-    private var lockHandle: FileHandle?
-    private let rejectedLogWriter: RejectedEmailLogWriter
-    private let rejectedRetentionDays: Int
-    
-    // State tracking
-    private var isRunning: Bool = false
-    private var lastRunTime: Date?
-    private var lastRunStatus: RunStatus = .idle
-    private var lastRunStats: CollectorStats?
-    private var lastRunError: String?
-    
-    private enum RunStatus: String {
-        case idle
-        case running
-        case completed
-        case partial
-        case failed
-    }
-    
-    private struct CollectorStats: Codable {
-        var messagesProcessed: Int
-        var documentsCreated: Int
-        var attachmentsProcessed: Int
+ #if false
+// EmailLocalHandler removed
+// The local email collector (email_local) has been removed. Only IMAP-based email collection
+// via EmailImapHandler is supported. This file is left intentionally minimal so it does not
+// contribute collector functionality. If you need to fully delete this file from the repo
+// use git to remove it.
         var errorsEncountered: Int
         var startTime: Date
         var endTime: Date?
@@ -1398,3 +1364,5 @@ private actor RejectedEmailLogWriter {
         }
     }
 }
+
+#endif

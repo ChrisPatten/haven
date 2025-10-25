@@ -22,7 +22,6 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.62.0"),
-    // GRDB removed: not used by any current target
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.6"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.3"),
@@ -30,7 +29,6 @@ let package = Package(
         .package(url: "https://github.com/MailCore/mailcore2.git", branch: "master")
     ],
     targets: [
-        // Core: Configuration, logging, auth, shared utilities
         .target(
             name: "HavenCore",
             dependencies: [
@@ -41,37 +39,27 @@ let package = Package(
             path: "Sources/HavenCore",
             plugins: ["GenerateBuildInfo"]
         ),
-        
-        // OCR: Vision framework integration
         .target(
             name: "OCR",
             dependencies: ["HavenCore"],
             path: "Sources/OCR"
         ),
-        
-        // Entity: Natural Language entity extraction
         .target(
             name: "Entity",
             dependencies: ["HavenCore"],
             path: "Sources/Entity",
             exclude: ["README.md"]
         ),
-        
-        // Face: Vision framework face detection
         .target(
             name: "Face",
             dependencies: ["HavenCore"],
             path: "Sources/Face"
         ),
-        
-        // Email: .emlx parsing and metadata extraction
         .target(
             name: "Email",
             dependencies: ["HavenCore"],
             path: "Sources/Email"
         ),
-
-        // IMAP: Remote email fetching via MailCore2
         .target(
             name: "IMAP",
             dependencies: [
@@ -80,17 +68,11 @@ let package = Package(
             ],
             path: "Sources/IMAP"
         ),
-        
-        // IMessages target intentionally omitted (no Sources/IMessages in this repo)
-        
-        // FSWatch: File system monitoring
         .target(
             name: "FSWatch",
             dependencies: ["HavenCore"],
             path: "Sources/FSWatch"
         ),
-        
-        // HostHTTP: SwiftNIO HTTP server
         .target(
             name: "HostHTTP",
             dependencies: [
@@ -107,16 +89,13 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio")
             ],
-            path: "Sources/HostHTTP"
+            path: "Sources/HostHTTP",
+            exclude: ["Handlers/EmailLocalHandler.swift"]
         ),
-        
-        // Build plugin to generate BuildInfo before compilation
         .plugin(
             name: "GenerateBuildInfo",
             capability: .buildTool()
         ),
-        
-        // Main executable
         .executableTarget(
             name: "HostAgent",
             dependencies: [
@@ -128,8 +107,6 @@ let package = Package(
             path: "Sources/HostAgent",
             exclude: ["Collectors", "Submission"]
         ),
-        
-        // HostAgent email submission helpers
         .target(
             name: "HostAgentEmail",
             dependencies: [
@@ -143,14 +120,9 @@ let package = Package(
                 "Submission"
             ],
             resources: [
-                // Package resources are relative to the target path. We keep
-                // collector schemas under Sources/HostAgent/Resources so
-                // Bundle.module can access them in runtime and tests.
                 .process("Resources/Collectors/schemas/collector_run_request.schema.json")
             ]
         ),
-        
-        // Tests
         .testTarget(
             name: "HavenCoreTests",
             dependencies: ["HavenCore"],
@@ -162,7 +134,6 @@ let package = Package(
             path: "Tests/OCRTests",
             resources: [.copy("Fixtures")]
         ),
-        // IMessagesTests omitted (test fixture retained in tree but not part of Package.swift)
         .testTarget(
             name: "FSWatchTests",
             dependencies: ["FSWatch", "HavenCore"],

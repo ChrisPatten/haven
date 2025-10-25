@@ -1,0 +1,11 @@
+// EmailLocalHandler removed on branch collector-api
+// This file has been moved/removed and is intentionally not part of the build.
+
+/*
+ The local email collector implementation previously lived here. It was large and
+ is no longer included in the hostagent build. The IMAP-based collector is the
+ supported method for email collection (`email_imap`).
+
+ The original implementation is preserved in git history; this placeholder file
+ exists so operations that expect the original path can find an indicator.
+*/
