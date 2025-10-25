@@ -1,0 +1,22 @@
+{
+  "collector" : "email_imap",
+  "errors" : [
+    "e1"
+  ],
+  "finished_at" : "2025-10-25T00:00:05Z",
+  "run_id" : "test-run",
+  "started_at" : "2025-10-25T00:00:00Z",
+  "status" : "ok",
+  "stats" : {
+    "batches" : 1,
+    "earliest_touched" : "2025-10-24T00:00:00Z",
+    "latest_touched" : "2025-10-25T00:00:00Z",
+    "matched" : 9,
+    "scanned" : 10,
+    "skipped" : 2,
+    "submitted" : 7
+  },
+  "warnings" : [
+    "w1"
+  ]
+}

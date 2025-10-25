@@ -340,17 +340,45 @@ public actor EmailImapHandler {
     }
     
     private func encodeResponse(_ response: ImapRunResponse) -> HTTPResponse {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        // Emit an adapter-standard payload so RunRouter can decode and incorporate it into
+        // the canonical RunResponse envelope. Fields required by RunResponse.AdapterResult
+        // are: scanned, matched, submitted, skipped, earliest_touched, latest_touched,
+        // warnings, errors.
+        var obj: [String: Any] = [:]
+        // scanned -> number of messages processed
+        obj["scanned"] = response.processed
+        // matched -> best-effort: treat as processed (no separate matched count available)
+        obj["matched"] = response.processed
+        obj["submitted"] = response.submitted
+        // skipped -> messages processed but not submitted
+        obj["skipped"] = max(0, response.processed - response.submitted)
+
+        if let since = response.since {
+            obj["earliest_touched"] = RunResponse.iso8601UTC(since)
+        } else {
+            obj["earliest_touched"] = nil
+        }
+        if let before = response.before {
+            obj["latest_touched"] = RunResponse.iso8601UTC(before)
+        } else {
+            obj["latest_touched"] = nil
+        }
+
+        // No explicit warnings in IMAP run results currently.
+        obj["warnings"] = [String]()
+        // Map errors to their reasons for visibility to the router
+        obj["errors"] = response.errors.map { $0.reason }
+
         do {
-            let data = try encoder.encode(response)
+            // Use JSONSerialization to allow mixed Any -> Data conversion with sorted keys
+            let final = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .prettyPrinted])
             return HTTPResponse(
                 statusCode: 200,
                 headers: ["Content-Type": "application/json; charset=utf-8"],
-                body: data
+                body: final
             )
         } catch {
-            logger.error("Failed to encode IMAP run response", metadata: ["error": error.localizedDescription])
+            logger.error("Failed to encode IMAP adapter payload", metadata: ["error": error.localizedDescription])
             return HTTPResponse.internalError(message: "Failed to encode response")
         }
     }

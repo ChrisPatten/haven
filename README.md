@@ -1,10 +1,6 @@
 # Haven PDP MVP
 
-Haven is a personal data plane that turns local iMessage history into a searchable knowledge base. The minimum viable product ingests conversations, catalogs normalized threads/messages in Postgres, generates semantic embeddings in Qdrant, and exposes hybrid search plus summarization through a FastAPI gateway.
-
-## Documentation Map
-- [`documentation/technical_reference.md`](documentation/technical_reference.md) – deep dive on architecture, services, and configuration.
-- [`documentation/functional_guide.md`](documentation/functional_guide.md) – user workflows, API behavior, operating runbooks, and troubleshooting.
+Haven is a personal data plane that turns iMessage history, files, and email into a searchable knowledge base. It features hybrid lexical/vector search, summarization, and image enrichment powered by large language models. The hostagent collects data locally on your Mac, while the gateway and backend services run in Docker containers.
 
 ## Components
 - **iMessage Collector (CLI / optional compose profile)** – `scripts/collectors/collector_imessage.py` copies `~/Library/Messages/chat.db`, normalizes new messages, enriches image attachments, and posts catalog events to the gateway.
