@@ -2,6 +2,7 @@ import Foundation
 import ArgumentParser
 import HavenCore
 import HostHTTP
+import HostAgentEmail
 import Face
 import FSWatch
 
@@ -254,6 +255,16 @@ struct HavenHostAgent: AsyncParsableCommand {
             // TODO: Add more handlers
             // - POST /v1/collectors/imessage:run (IMessageHandler)
             // - GET /v1/collectors/imessage/state (IMessageHandler)
+            // Generic collector run router: validates request JSON strictly and dispatches to adapters
+            PatternRouteHandler(method: "POST", pattern: "/v1/collectors/*") { req, ctx in
+                let dispatch: [String: (HTTPRequest, RequestContext) async -> HTTPResponse] = [
+                    "imessage": { r, c in await iMessageHandler.handleRun(request: r, context: c) },
+                    "email_local": { r, c in await emailLocalHandler.handleRun(request: r, context: c) },
+                    "email_imap": { r, c in await emailImapHandler.handleRun(request: r, context: c) }
+                ]
+
+                return await RunRouter.handle(request: req, context: ctx, dispatchMap: dispatch)
+            },
             PatternRouteHandler(method: "POST", pattern: "/v1/collectors/imessage:run") { req, ctx in
                 await iMessageHandler.handleRun(request: req, context: ctx)
             },

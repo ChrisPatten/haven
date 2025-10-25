@@ -13,6 +13,7 @@
 * When I ask you to create documentation, consider it an "Otherwise" scenario. Review the existing mkdocs yaml and the documentation structure and create or update accordingly (including both creating/updating .md files and configuring it in the mkdocs yaml).
 * **NEVER** edit the files in .beads/ directly. All changes must be made via the beads MCP server or the `bd` CLI tool to ensure proper versioning and tracking.
 * When writing commit messages, include the relevant beads issue ID in the footer as `Refs: beads:#<id>`. Do not include references to the files in the .beads/ directory in commit messages.
+* When executing swift commands, prepend them with arch -x86_64 to ensure compatibility with Intel-based dependencies.
 
 
 ---

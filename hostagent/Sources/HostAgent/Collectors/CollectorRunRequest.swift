@@ -1,6 +1,8 @@
 import Foundation
 import HavenCore
 
+
+
 // DTO for collector run requests. Strict decoding: unknown fields cause a decoding error.
 public struct CollectorRunRequest: Codable {
     public enum Mode: String, Codable {
