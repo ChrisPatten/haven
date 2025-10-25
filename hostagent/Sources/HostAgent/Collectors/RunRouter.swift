@@ -1,38 +1,5 @@
 import Foundation
 import HavenCore
-
-public struct RunResponse: Encodable {
-    public var status: String
-    public var collector: String
-    public var run_id: String?
-    public var started_at: String
-    public var finished_at: String?
-    public var stats: [String: Int]?
-    public var warnings: [String]?
-    public var errors: [String]?
-    public var inner_status_code: Int?
-    public var inner_body: String?
-
-    public init(status: String, collector: String, runId: String? = nil, startedAt: Date = Date(), finishedAt: Date? = nil, stats: [String: Int]? = nil, warnings: [String]? = nil, errors: [String]? = nil, innerStatus: Int? = nil, innerBody: String? = nil) {
-        self.status = status
-        self.collector = collector
-        self.run_id = runId
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        self.started_at = fmt.string(from: startedAt)
-        if let finishedAt = finishedAt {
-            self.finished_at = fmt.string(from: finishedAt)
-        } else {
-            self.finished_at = nil
-        }
-        self.stats = stats
-        self.warnings = warnings
-        self.errors = errors
-        self.inner_status_code = innerStatus
-        self.inner_body = innerBody
-    }
-}
-
 public enum RunRouterError: Error {
     case invalidJSON(String)
 }
@@ -63,17 +30,75 @@ public struct RunRouter {
             return HTTPResponse.notFound(message: "Unknown collector '\(collectorName)'")
         }
 
+        // Create the RunResponse envelope before invoking the handler so we capture start time
+        var runResp = RunResponse(collector: collectorName, runID: UUID().uuidString, startedAt: Date())
+
         // Call underlying handler and capture response
         let inner = await handler(request, context)
 
-        // Build RunResponse envelope
-        var innerBodyString: String? = nil
-        if let body = inner.body, let s = String(data: body, encoding: .utf8) {
-            innerBodyString = s
+        // Attempt to parse the inner body as an adapter result payload and incorporate into runResp
+        if let body = inner.body {
+            // Try decode into a payload that conforms to RunResponse.AdapterResult
+            struct AdapterPayload: Codable, RunResponse.AdapterResult {
+                let scanned: Int
+                let matched: Int
+                let submitted: Int
+                let skipped: Int
+                let earliest_touched: String?
+                let latest_touched: String?
+                let warnings: [String]
+                let errors: [String]
+
+                // Convert the string timestamps to Date for the AdapterResult protocol
+                var earliestTouched: Date? {
+                    guard let s = earliest_touched else { return nil }
+                    return AdapterPayload.parseISO8601(s)
+                }
+                var latestTouched: Date? {
+                    guard let s = latest_touched else { return nil }
+                    return AdapterPayload.parseISO8601(s)
+                }
+
+                private static func parseISO8601(_ s: String) -> Date? {
+                    let fmt = ISO8601DateFormatter()
+                    fmt.timeZone = TimeZone(secondsFromGMT: 0)
+                    fmt.formatOptions = [.withInternetDateTime]
+                    return fmt.date(from: s)
+                }
+            }
+
+            do {
+                let dec = JSONDecoder()
+                let payload = try dec.decode(AdapterPayload.self, from: body)
+                runResp.incorporateAdapterResult(payload)
+            } catch {
+                // If decode fails, and non-2xx, capture raw body text for visibility
+                if !(200...299).contains(inner.statusCode), let s = String(data: body, encoding: .utf8) {
+                    runResp.errors.append(s)
+                }
+            }
         }
 
-        let status: String = (200...299).contains(inner.statusCode) ? "ok" : "error"
-        let runResp = RunResponse(status: status, collector: collectorName, runId: nil, startedAt: Date(), finishedAt: Date(), stats: nil, warnings: nil, errors: nil, innerStatus: inner.statusCode, innerBody: innerBodyString)
+        // Map inner status -> standard RunResponse.Status and finish
+        let statusEnum: RunResponse.Status = (200...299).contains(inner.statusCode) ? .ok : .error
+        runResp.finish(status: statusEnum, finishedAt: Date())
+
+        // Serialize RunResponse to JSON and add helper fields (inner status/body) for visibility
+        do {
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.sortedKeys, .prettyPrinted]
+            let data = try enc.encode(runResp)
+            if var obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                obj["inner_status_code"] = inner.statusCode
+                if let body = inner.body, let s = String(data: body, encoding: .utf8) {
+                    obj["inner_body"] = s
+                }
+                let finalData = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .prettyPrinted])
+                return HTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: finalData)
+            }
+        } catch {
+            // Fall back to returning the RunResponse directly
+        }
 
         return HTTPResponse.ok(json: runResp)
     }

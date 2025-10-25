@@ -210,13 +210,25 @@ public actor IMessageHandler {
             ]
             if let earliest = stats.earliestMessageTimestamp {
                 response["earliest_touched_message_timestamp"] = appleEpochToISO8601(earliest)
+                // Standardized adapter field
+                response["earliest_touched"] = appleEpochToISO8601(earliest)
             }
             if let latest = stats.latestMessageTimestamp {
                 response["latest_touched_message_timestamp"] = appleEpochToISO8601(latest)
+                // Standardized adapter field
+                response["latest_touched"] = appleEpochToISO8601(latest)
             }
-            
+
+            // Adapter-standard fields for RunRouter normalization
+            response["scanned"] = stats.messagesProcessed
+            response["matched"] = stats.documentsCreated
+            response["submitted"] = successCount
+            response["skipped"] = failureCount
+            response["warnings"] = [String]()
+            response["errors"] = failureCount > 0 ? ["Some documents failed to post"] : [String]()
+
             let responseData = try JSONSerialization.data(withJSONObject: response, options: [.prettyPrinted, .sortedKeys])
-            
+
             return HTTPResponse(
                 statusCode: 200,
                 headers: ["Content-Type": "application/json"],
