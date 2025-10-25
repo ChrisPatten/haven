@@ -141,6 +141,12 @@ let package = Package(
             sources: [
                 "Collectors",
                 "Submission"
+            ],
+            resources: [
+                // Package resources are relative to the target path. We keep
+                // collector schemas under Sources/HostAgent/Resources so
+                // Bundle.module can access them in runtime and tests.
+                .process("Resources/Collectors/schemas/collector_run_request.schema.json")
             ]
         ),
         

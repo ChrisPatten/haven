@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CollectorRunRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["simulate", "real"]
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "order": {
+      "type": "string",
+      "enum": ["asc", "desc"]
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 12
+    },
+    "date_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "since": { "type": "string", "format": "date-time" },
+        "until": { "type": "string", "format": "date-time" }
+      }
+    },
+    "time_window": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Fallback lookback window in seconds when date_range is not provided"
+    }
+  }
+}

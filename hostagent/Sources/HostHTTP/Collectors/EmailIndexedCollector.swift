@@ -272,7 +272,8 @@ public actor EmailIndexedCollector {
                 messages.date_sent,
                 messages.remote_id,
                 messages.flags,
-                mailboxes.url
+                mailboxes.url,
+                mailboxes.displayName
             FROM messages
             LEFT JOIN subjects ON subjects.ROWID = messages.subject
             LEFT JOIN addresses ON addresses.ROWID = messages.sender
@@ -325,7 +326,7 @@ public actor EmailIndexedCollector {
                     remoteID: columnText(statement, index: 4),
                     flags: sqlite3_column_int64(statement, 5),
                     mailboxURL: decodeMailboxURL(columnText(statement, index: 6)),
-                    mailboxDisplayName: nil
+                        mailboxDisplayName: columnText(statement, index: 7)
                 )
                 records.append(record)
             } else if stepResult == SQLITE_DONE {
