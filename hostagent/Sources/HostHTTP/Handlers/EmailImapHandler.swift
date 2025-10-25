@@ -260,8 +260,36 @@ public actor EmailImapHandler {
         guard let body = request.body, !body.isEmpty else {
             return ImapRunRequest()
         }
+
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+
+        // First, try to decode the collector-specific IMAP request shape.
+        if let specific = try? decoder.decode(ImapRunRequest.self, from: body) {
+            return specific
+        }
+
+        // Fallback: decode the unified CollectorRunRequest and map fields.
+        // RunRouter already strictly validates the unified DTO shape, so decoding
+        // should succeed for requests that use the unified format.
+        if let unified = try? decoder.decode(CollectorRunRequest.self, from: body) {
+            var mapped = ImapRunRequest()
+            mapped.limit = unified.limit
+            mapped.order = unified.order?.rawValue
+            mapped.concurrency = unified.concurrency
+            mapped.since = unified.dateRange?.since
+            mapped.before = unified.dateRange?.until
+            // mode.simulate -> dry run
+            if let m = unified.mode {
+                mapped.dryRun = (m == .simulate)
+            }
+            // time_window has no direct IMAP equivalent; map conservatively to batchSize
+            mapped.batchSize = unified.timeWindow
+            return mapped
+        }
+
+        // If we reached here, throw the decoding error from a strict decode to provide
+        // a helpful diagnostic to the caller.
         return try decoder.decode(ImapRunRequest.self, from: body)
     }
     
