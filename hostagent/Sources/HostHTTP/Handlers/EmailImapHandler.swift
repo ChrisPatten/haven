@@ -38,8 +38,9 @@ public actor EmailImapHandler {
             return HTTPResponse.badRequest(message: "mail_imap module is disabled")
         }
         
-        // Parse OpenAPI-generated RunRequest
+        // Parse request using OpenAPI-generated types
         var runRequest: Components.Schemas.RunRequest?
+        
         if let body = request.body, !body.isEmpty {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
@@ -51,7 +52,7 @@ public actor EmailImapHandler {
             }
         }
         
-        // Extract parameters from RunRequest
+        // Extract parameters
         var accountId: String?
         var folder: String?
         var limit: Int?

@@ -143,6 +143,7 @@ public actor IMessageHandler {
         var params = CollectorParams()
         params.configChatDbPath = config.modules.imessage.chatDbPath
         var runRequest: Components.Schemas.RunRequest?
+        
         if let body = request.body, !body.isEmpty {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
@@ -150,7 +151,7 @@ public actor IMessageHandler {
             do {
                 runRequest = try decoder.decode(Components.Schemas.RunRequest.self, from: body)
                 
-                // Map the unified RunRequest to CollectorParams
+                // Extract parameters from RunRequest
                 params.mode = runRequest!.mode.rawValue
                 params.limit = runRequest!.limit
                 params.order = runRequest!.order.rawValue
