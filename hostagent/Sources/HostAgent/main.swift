@@ -263,9 +263,6 @@ struct HavenHostAgent: AsyncParsableCommand {
                 await fsWatchHandler.handleRemoveWatch(request: req, context: ctx)
             },
             
-            // TODO: Add more handlers
-            // - POST /v1/collectors/imessage:run (IMessageHandler)
-            // - GET /v1/collectors/imessage/state (IMessageHandler)
             // Generic collector run router: validates request JSON strictly and dispatches to adapters
             PatternRouteHandler(method: "POST", pattern: "/v1/collectors/*") { req, ctx in
                 let dispatch: [String: (HTTPRequest, RequestContext) async -> HTTPResponse] = [
@@ -275,15 +272,10 @@ struct HavenHostAgent: AsyncParsableCommand {
 
                 return await RunRouter.handle(request: req, context: ctx, dispatchMap: dispatch)
             },
-            PatternRouteHandler(method: "POST", pattern: "/v1/collectors/imessage:run") { req, ctx in
-                await iMessageHandler.handleRun(request: req, context: ctx)
-            },
+            
+            // Collector state endpoint
             PatternRouteHandler(method: "GET", pattern: "/v1/collectors/imessage/state") { req, ctx in
                 await iMessageHandler.handleState(request: req, context: ctx)
-            },
-            // removed email_local collector endpoints; only email_imap is supported
-            PatternRouteHandler(method: "POST", pattern: "/v1/collectors/email_imap:run") { req, ctx in
-                await emailImapHandler.handleRun(request: req, context: ctx)
             },
             
             // Email utility endpoints
