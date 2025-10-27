@@ -3,6 +3,7 @@ import HavenCore
 import OCR
 import Entity
 import SQLite3
+import CommonCrypto
 
 /// Handler for iMessage collector endpoints
 public actor IMessageHandler {
@@ -47,15 +48,29 @@ public actor IMessageHandler {
             }
             // Include earliest/latest touched message timestamps if present
             func formatAppleEpoch(_ timestamp: Int64) -> String {
+                // Heuristic to convert Apple epoch values into seconds. The
+                // chat DB stores timestamps in different units across OS
+                // versions and contexts (seconds, milliseconds, microseconds,
+                // or nanoseconds). Use sensible thresholds to detect units and
+                // convert to seconds for Date arithmetic.
                 let appleEpoch = Date(timeIntervalSince1970: 978307200) // 2001-01-01
                 let seconds: TimeInterval
-                if timestamp > 10_000_000_000_000 {
-                    // Nanoseconds
-                    seconds = Double(timestamp) / 1_000_000_000
-                } else if timestamp > 10_000_000 {
-                    // Micro or milliseconds space - try micro -> ms heuristics
-                    seconds = Double(timestamp) / 1_000_000
+                // Typical ranges for 2020s:
+                // seconds:   ~1e9
+                // millis:    ~1e12
+                // micros:    ~1e15
+                // nanos:     ~1e18
+                if timestamp > 1_000_000_000_000_000 {
+                    // Treat as nanoseconds -> divide by 1e9
+                    seconds = Double(timestamp) / 1_000_000_000.0
+                } else if timestamp > 1_000_000_000_000 {
+                    // Treat as microseconds -> divide by 1e6
+                    seconds = Double(timestamp) / 1_000_000.0
+                } else if timestamp > 1_000_000_000 {
+                    // Treat as milliseconds -> divide by 1e3
+                    seconds = Double(timestamp) / 1_000.0
                 } else {
+                    // Seconds
                     seconds = Double(timestamp)
                 }
                 let date = appleEpoch.addingTimeInterval(seconds)
@@ -123,16 +138,80 @@ public actor IMessageHandler {
             )
         }
         
-        // Parse request parameters
+        // Parse request parameters.
+        // Prefer the strict unified CollectorRunRequest shape; collector-specific
+        // options must be nested under `collector_options`. Fall back to the
+        // legacy top-level shape for backward compatibility.
         var params = CollectorParams()
         params.configChatDbPath = config.modules.imessage.chatDbPath
         if let body = request.body, !body.isEmpty {
-            if let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
-                params.mode = json["mode"] as? String ?? params.mode
-                params.batchSize = json["batch_size"] as? Int ?? params.batchSize
-                params.threadLookbackDays = json["thread_lookback_days"] as? Int ?? params.threadLookbackDays
-                params.messageLookbackDays = json["message_lookback_days"] as? Int ?? params.messageLookbackDays
-                params.chatDbPath = json["chat_db_path"] as? String ?? params.chatDbPath
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+
+            // Decode a lightweight local DTO matching the unified CollectorRunRequest
+            // shape for the fields we care about (avoid importing HostAgent to
+            // prevent circular module dependencies).
+                struct UnifiedRunDTO: Codable {
+                struct DateRange: Codable {
+                    let since: Date?
+                    let until: Date?
+                }
+                let mode: String?
+                let timeWindow: Int?
+                let dateRange: DateRange?
+                let limit: Int?
+                let order: String?
+                enum CodingKeys: String, CodingKey {
+                    case mode
+                    case timeWindow = "time_window"
+                    case dateRange = "date_range"
+                    case limit
+                    case order
+                }
+            }
+
+                if let unified = try? decoder.decode(UnifiedRunDTO.self, from: body) {
+                    // Map unified fields we care about
+                    if let m = unified.mode { params.mode = m }
+                    if let tw = unified.timeWindow { params.batchSize = tw }
+                    if let l = unified.limit { params.limit = l }
+                    if let o = unified.order { params.order = o }
+                    if let since = unified.dateRange?.since { params.since = since }
+                    if let until = unified.dateRange?.until { params.until = until }
+
+                    // Collector-specific options must be provided under collector_options
+                    if let json = try? JSONSerialization.jsonObject(with: body, options: []) as? [String: Any],
+                       let coll = json["collector_options"] as? [String: Any] {
+                        // Support multiple aliases for batch size: batch_size, batchSize, and limit
+                        params.batchSize = coll["batch_size"] as? Int ?? coll["batchSize"] as? Int ?? params.batchSize
+                        // Allow collector limit and order overrides
+                        params.limit = coll["limit"] as? Int ?? params.limit
+                        params.order = coll["order"] as? String ?? params.order
+                        params.threadLookbackDays = coll["thread_lookback_days"] as? Int ?? coll["threadLookbackDays"] as? Int ?? params.threadLookbackDays
+                        params.messageLookbackDays = coll["message_lookback_days"] as? Int ?? coll["messageLookbackDays"] as? Int ?? params.messageLookbackDays
+                        params.chatDbPath = coll["chat_db_path"] as? String ?? coll["chatDbPath"] as? String ?? params.chatDbPath
+                    }
+                } else {
+                // Legacy support: accept collector-specific keys at top-level
+                    if let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+                        params.mode = json["mode"] as? String ?? params.mode
+                        // Support legacy aliases for batch size (batch_size, limit)
+                        params.batchSize = json["batch_size"] as? Int ?? json["limit"] as? Int ?? params.batchSize
+                        params.limit = json["limit"] as? Int ?? params.limit
+                        params.order = json["order"] as? String ?? params.order
+                        params.threadLookbackDays = json["thread_lookback_days"] as? Int ?? params.threadLookbackDays
+                        params.messageLookbackDays = json["message_lookback_days"] as? Int ?? params.messageLookbackDays
+                        params.chatDbPath = json["chat_db_path"] as? String ?? params.chatDbPath
+
+                        // Optional date_range (legacy) or top-level since/until
+                        let iso = ISO8601DateFormatter()
+                        if let dr = json["date_range"] as? [String: Any] {
+                            if let s = dr["since"] as? String, let d = iso.date(from: s) { params.since = d }
+                            if let u = dr["until"] as? String, let d = iso.date(from: u) { params.until = d }
+                        }
+                        if let s = json["since"] as? String, let d = iso.date(from: s) { params.since = d }
+                        if let u = json["until"] as? String, let d = iso.date(from: u) { params.until = d }
+                    }
             }
         }
         
@@ -175,6 +254,23 @@ public actor IMessageHandler {
             for document in result {
                 do {
                     try await postDocumentToGateway(document)
+
+                    // Update earliest/latest to reflect only successfully submitted docs.
+                    if let contentTs = document["content_timestamp"] as? String,
+                       let contentDate = ISO8601DateFormatter().date(from: contentTs) {
+                        let appleTs = dateToAppleEpoch(contentDate)
+                        if let prev = stats.earliestMessageTimestamp {
+                            if appleTs < prev { stats.earliestMessageTimestamp = appleTs }
+                        } else {
+                            stats.earliestMessageTimestamp = appleTs
+                        }
+                        if let prev = stats.latestMessageTimestamp {
+                            if appleTs > prev { stats.latestMessageTimestamp = appleTs }
+                        } else {
+                            stats.latestMessageTimestamp = appleTs
+                        }
+                    }
+
                     successCount += 1
                 } catch {
                     logger.error("Failed to post document to gateway", metadata: [
@@ -212,11 +308,18 @@ public actor IMessageHandler {
                 response["earliest_touched_message_timestamp"] = appleEpochToISO8601(earliest)
                 // Standardized adapter field
                 response["earliest_touched"] = appleEpochToISO8601(earliest)
+            } else {
+                // Ensure adapter payload always contains the key (null when unknown)
+                response["earliest_touched_message_timestamp"] = NSNull()
+                response["earliest_touched"] = NSNull()
             }
             if let latest = stats.latestMessageTimestamp {
                 response["latest_touched_message_timestamp"] = appleEpochToISO8601(latest)
                 // Standardized adapter field
                 response["latest_touched"] = appleEpochToISO8601(latest)
+            } else {
+                response["latest_touched_message_timestamp"] = NSNull()
+                response["latest_touched"] = NSNull()
             }
 
             // Adapter-standard fields for RunRouter normalization
@@ -287,8 +390,14 @@ public actor IMessageHandler {
     private struct CollectorParams {
         var mode: String = "tail"
         var batchSize: Int = 500
+        var limit: Int? = nil
+        var order: String? = nil
+        var since: Date? = nil
+        var until: Date? = nil
         var threadLookbackDays: Int = 90
-        var messageLookbackDays: Int = 30
+    // If zero, no implicit lookback is applied. Use explicit `since` or
+    // `message_lookback_days` to constrain the query.
+    var messageLookbackDays: Int = 0
         var chatDbPath: String = ""
         var configChatDbPath: String = ""
         
@@ -410,54 +519,112 @@ public actor IMessageHandler {
             sqlite3_finalize(pragmaStmt)
         }
         
-        // Get messages and threads
-        let messages = try fetchMessages(db: db!, params: params)
-        stats.messagesProcessed = messages.count
+        // Load persisted state (last and earliest processed row IDs)
+        var lastProcessedRowId: Int64? = nil
+        var earliestProcessedRowIdCache: Int64? = nil
+        do {
+            if let state = try loadIMessageState() {
+                lastProcessedRowId = state.last
+                earliestProcessedRowIdCache = state.earliest
+            }
+        } catch {
+            logger.warning("Failed to load iMessage collector state", metadata: ["error": error.localizedDescription])
+        }
 
-        // Record earliest / latest message timestamps (if we fetched any)
-        if !messages.isEmpty {
-            let dates = messages.map { $0.date }
-            if let minDate = dates.min() {
-                stats.earliestMessageTimestamp = minDate
-            }
-            if let maxDate = dates.max() {
-                stats.latestMessageTimestamp = maxDate
-            }
-        }
-        
-        let threads = try fetchThreads(db: db!, messageIds: Set(messages.map { $0.chatId }))
-        stats.threadsProcessed = threads.count
-        
-        // Build thread lookup
-        var threadLookup: [Int64: ThreadData] = [:]
-        for thread in threads {
-            threadLookup[thread.rowId] = thread
-        }
-        
-        // Build documents
+        // Retrieve candidate message ROWIDs within the lookback window (ascending)
+        let rowIds = try fetchMessageRowIds(db: db!, params: params)
+        // Track total candidates
+        stats.messagesProcessed = rowIds.count
+
+        // NOTE: Do NOT set earliest/latest here from the scanned result set.
+        // earliest/latest should reflect submitted documents only. These will be
+        // updated during the posting loop in `handleRun` after a document is
+        // successfully submitted to the Gateway.
+
+        // Compose processing order based on cached state
+        // Convert optional since/until dates to Apple epoch Int64 for comparisons
+        let sinceEpoch: Int64? = params.since != nil ? dateToAppleEpoch(params.since!) : nil
+        let untilEpoch: Int64? = params.until != nil ? dateToAppleEpoch(params.until!) : nil
+
+        let orderedRowIds = composeProcessingOrder(
+            searchResultAsc: rowIds,
+            lastProcessedId: lastProcessedRowId,
+            order: params.order,
+            since: params.since,
+            before: params.until,
+            oldestCachedId: earliestProcessedRowIdCache
+        )
+
+        // Build thread lookup for messages we will process by fetching threads for all chat IDs encountered
+        // We'll lazily fetch the thread when processing each message to avoid fetching unnecessary threads.
+
         var documents: [[String: Any]] = []
-        for message in messages {
-            guard let thread = threadLookup[message.chatId] else {
-                continue
+        var processedCount = 0
+        var earliestProcessedRowId: Int64? = nil
+
+        // Iterate ordered rows and prepare documents. Stop when since/until reached
+        // or when batch/limit thresholds are met.
+        var stopProcessing = false
+        for rowId in orderedRowIds {
+            // Fetch the message row
+            guard let message = try fetchMessageByRowId(db: db!, rowId: rowId) else { continue }
+
+            // If date bounds are specified, check them and stop processing when reached
+            if let s = sinceEpoch {
+                if message.date < s {
+                    // We've reached messages older than `since` — stop processing
+                    break
+                }
             }
-            
+            if let u = untilEpoch {
+                if message.date > u {
+                    // We've reached messages newer than `until` (before) — stop processing
+                    break
+                }
+            }
+
+            // Fetch thread for message
+            let threads = try fetchThreads(db: db!, messageIds: Set([message.chatId]))
+            guard let thread = threads.first(where: { $0.rowId == message.chatId }) else { continue }
+
             // Enrich attachments if present
             var enrichedAttachments: [[String: Any]] = []
             if !message.attachments.isEmpty {
                 enrichedAttachments = try await enrichAttachments(message.attachments, db: db!)
                 stats.attachmentsProcessed += message.attachments.count
             }
-            
+
             let document = try buildDocument(message: message, thread: thread, attachments: enrichedAttachments)
             documents.append(document)
             stats.documentsCreated += 1
-            
-            // Respect batch size
-            if documents.count >= params.batchSize {
-                break
+            processedCount += 1
+
+            // Track earliest processed rowId
+            if let prev = earliestProcessedRowId {
+                if rowId < prev { earliestProcessedRowId = rowId }
+            } else {
+                earliestProcessedRowId = rowId
             }
+
+            // Persist last/earliest processed IDs after each document is prepared
+            do {
+                let lastToSave = max(lastProcessedRowId ?? 0, rowId)
+                try saveIMessageState(last: lastToSave, earliest: earliestProcessedRowId)
+            } catch {
+                logger.warning("Failed to save iMessage collector state", metadata: ["error": error.localizedDescription])
+            }
+
+            // Respect overall limit (if provided) and batch size
+            if let lim = params.limit, lim > 0, documents.count >= lim {
+                stopProcessing = true
+            }
+            if documents.count >= params.batchSize {
+                stopProcessing = true
+            }
+
+            if stopProcessing { break }
         }
-        
+
         return documents
     }
     
@@ -608,31 +775,49 @@ public actor IMessageHandler {
     private func fetchMessages(db: OpaquePointer, params: CollectorParams) throws -> [MessageData] {
         var messages: [MessageData] = []
         
-        // Calculate lookback timestamp
-        let lookbackDate = Date().addingTimeInterval(-Double(params.messageLookbackDays) * 24 * 3600)
-        let lookbackTimestamp = dateToAppleEpoch(lookbackDate)
-        
-        let query = """
-            SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.handle_id, m.date, m.date_read,
-                   m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service
-            FROM message m
-            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-            WHERE m.date >= ?
-            ORDER BY m.date DESC
-            LIMIT ?
-            """
-        
-        var stmt: OpaquePointer?
-        let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
+        // Determine whether to apply a date lower-bound. Preference order:
+        // 1) explicit params.since
+        // 2) messageLookbackDays > 0
+        // 3) no date constraint (scan all messages)
+
+        var lowerBoundEpoch: Int64? = nil
+        if let since = params.since {
+            lowerBoundEpoch = dateToAppleEpoch(since)
+        } else if params.messageLookbackDays > 0 {
+            let lookbackDate = Date().addingTimeInterval(-Double(params.messageLookbackDays) * 24 * 3600)
+            lowerBoundEpoch = dateToAppleEpoch(lookbackDate)
+        }
+
+     var query = """
+         SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.handle_id, m.date, m.date_read,
+             m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service
+         FROM message m
+         JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+
+         """
+
+        if lowerBoundEpoch != nil {
+            query += "WHERE m.date >= ?\n"
+        }
+        query += "ORDER BY m.date DESC\nLIMIT ?\n"
+
+    // Log the query for diagnostics (helps when dynamic query composition causes syntax errors)
+    logger.debug("Preparing message query", metadata: ["query": query])
+    var stmt: OpaquePointer?
+    let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
         guard prepareResult == SQLITE_OK else {
             let errorMsg = String(cString: sqlite3_errmsg(db))
             logger.error("Failed to prepare message query", metadata: ["error": errorMsg, "code": String(prepareResult)])
             throw CollectorError.queryFailed("Failed to prepare message query: \(errorMsg) (code: \(prepareResult))")
         }
         defer { sqlite3_finalize(stmt) }
-        
-        sqlite3_bind_int64(stmt, 1, lookbackTimestamp)
-        sqlite3_bind_int(stmt, 2, Int32(params.batchSize * 2)) // Fetch more to allow filtering
+
+        var bindIndex: Int32 = 1
+        if let lb = lowerBoundEpoch {
+            sqlite3_bind_int64(stmt, bindIndex, lb)
+            bindIndex += 1
+        }
+        sqlite3_bind_int(stmt, bindIndex, Int32(params.batchSize * 2)) // Fetch more to allow filtering
         
         while sqlite3_step(stmt) == SQLITE_ROW {
             let rowId = sqlite3_column_int64(stmt, 0)
@@ -693,6 +878,131 @@ public actor IMessageHandler {
         }
         
         return messages
+    }
+
+    private func fetchMessageRowIds(db: OpaquePointer, params: CollectorParams) throws -> [Int64] {
+        var ids: [Int64] = []
+        // Determine effective lower-bound (explicit since preferred)
+        var lowerBoundEpoch: Int64? = nil
+        if let since = params.since {
+            lowerBoundEpoch = dateToAppleEpoch(since)
+        } else if params.messageLookbackDays > 0 {
+            let lookbackDate = Date().addingTimeInterval(-Double(params.messageLookbackDays) * 24 * 3600)
+            lowerBoundEpoch = dateToAppleEpoch(lookbackDate)
+        }
+
+        var query = """
+            SELECT m.ROWID
+            FROM message m
+
+            """
+        if lowerBoundEpoch != nil {
+            query += "WHERE m.date >= ?\n"
+        }
+        query += "ORDER BY m.ROWID ASC\n"
+
+    // Log the query to help diagnose SQL syntax issues when dynamically composing the WHERE clause
+    logger.debug("Preparing message rowid query", metadata: ["query": query])
+    var stmt: OpaquePointer?
+    let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
+        guard prepareResult == SQLITE_OK else {
+            let errorMsg = String(cString: sqlite3_errmsg(db))
+            logger.error("Failed to prepare message rowid query", metadata: ["error": errorMsg, "code": String(prepareResult)])
+            throw CollectorError.queryFailed("Failed to prepare message rowid query: \(errorMsg) (code: \(prepareResult))")
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        if let lb = lowerBoundEpoch {
+            sqlite3_bind_int64(stmt, 1, lb)
+        }
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let rowId = sqlite3_column_int64(stmt, 0)
+            ids.append(rowId)
+        }
+
+        return ids
+    }
+
+    private func fetchMessageByRowId(db: OpaquePointer, rowId: Int64) throws -> MessageData? {
+        let query = """
+            SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.handle_id, m.date, m.date_read,
+                   m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service
+            FROM message m
+            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            WHERE m.ROWID = ?
+            LIMIT 1
+            """
+
+        var stmt: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
+        guard prepareResult == SQLITE_OK else {
+            let errorMsg = String(cString: sqlite3_errmsg(db))
+            logger.error("Failed to prepare single message query", metadata: ["error": errorMsg, "code": String(prepareResult)])
+            throw CollectorError.queryFailed("Failed to prepare single message query: \(errorMsg) (code: \(prepareResult))")
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_int64(stmt, 1, rowId)
+
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            let rowId = sqlite3_column_int64(stmt, 0)
+            let guid = String(cString: sqlite3_column_text(stmt, 1))
+
+            let text: String?
+            if let textPtr = sqlite3_column_text(stmt, 2) {
+                text = String(cString: textPtr)
+            } else {
+                text = nil
+            }
+
+            let attributedBody: Data?
+            if sqlite3_column_type(stmt, 3) == SQLITE_BLOB {
+                if let bytes = sqlite3_column_blob(stmt, 3) {
+                    let count = sqlite3_column_bytes(stmt, 3)
+                    attributedBody = Data(bytes: bytes, count: Int(count))
+                } else {
+                    attributedBody = nil
+                }
+            } else {
+                attributedBody = nil
+            }
+
+            let handleId = sqlite3_column_int64(stmt, 4)
+            let date = sqlite3_column_int64(stmt, 5)
+            let dateRead = sqlite3_column_type(stmt, 6) != SQLITE_NULL ? sqlite3_column_int64(stmt, 6) : nil
+            let dateDelivered = sqlite3_column_type(stmt, 7) != SQLITE_NULL ? sqlite3_column_int64(stmt, 7) : nil
+            let isFromMe = sqlite3_column_int(stmt, 8) != 0
+            let isRead = sqlite3_column_int(stmt, 9) != 0
+            let chatId = sqlite3_column_int64(stmt, 10)
+
+            let service: String?
+            if let servicePtr = sqlite3_column_text(stmt, 11) {
+                service = String(cString: servicePtr)
+            } else {
+                service = nil
+            }
+
+            let attachments = try fetchAttachments(db: db, messageRowId: rowId)
+
+            return MessageData(
+                rowId: rowId,
+                guid: guid,
+                text: text,
+                attributedBody: attributedBody,
+                handleId: handleId,
+                date: date,
+                dateRead: dateRead,
+                dateDelivered: dateDelivered,
+                isFromMe: isFromMe,
+                isRead: isRead,
+                chatId: chatId,
+                service: service,
+                attachments: attachments
+            )
+        }
+
+        return nil
     }
     
     private func fetchThreads(db: OpaquePointer, messageIds: Set<Int64>) throws -> [ThreadData] {
@@ -759,6 +1069,100 @@ public actor IMessageHandler {
         }
         
         return threads
+    }
+
+    // MARK: - State persistence for iMessage collector
+
+    private func iMessageCacheDirURL() -> URL {
+        // Prefer the user's standard Caches directory: ~/Library/Caches/Haven
+        if let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            return caches.appendingPathComponent("Haven", isDirectory: true)
+        }
+
+        // Fallback for older installations: ~/.haven/cache
+        let raw = "~/.haven/cache"
+        let expanded = NSString(string: raw).expandingTildeInPath
+        return URL(fileURLWithPath: expanded, isDirectory: true)
+    }
+
+    private func iMessageCacheFileURL() -> URL {
+        let dir = iMessageCacheDirURL()
+        let fileName = "imessage_state.json"
+        return dir.appendingPathComponent(fileName)
+    }
+
+    private func loadIMessageState() throws -> (last: Int64?, earliest: Int64?)? {
+        let url = iMessageCacheFileURL()
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        let decoder = JSONDecoder()
+        let obj = try decoder.decode([String: Int64].self, from: data)
+        let last = obj["last_processed_rowid"]
+        let earliest = obj["earliest_processed_rowid"]
+        return (last: last, earliest: earliest)
+    }
+
+    private func saveIMessageState(last: Int64, earliest: Int64?) throws {
+        let url = iMessageCacheFileURL()
+        let dir = url.deletingLastPathComponent()
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dir.path) {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        var obj: [String: Int64] = ["last_processed_rowid": last]
+        if let e = earliest { obj["earliest_processed_rowid"] = e }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        let data = try encoder.encode(obj)
+        try data.write(to: url, options: .atomic)
+    }
+
+    // Compose processing order for message ROWIDs (ascending list input)
+    private func composeProcessingOrder(
+        searchResultAsc: [Int64],
+        lastProcessedId: Int64?,
+        order: String?,
+        since: Date?,
+        before: Date?,
+        oldestCachedId: Int64? = nil
+    ) -> [Int64] {
+        let uidsSortedAsc = searchResultAsc.sorted()
+        let normalizedOrder = order?.lowercased()
+
+        // If the caller provides an explicit oldestCachedId, use that to
+        // determine the cached range. Otherwise, fall back to treating all IDs <=
+        // lastProcessedId as cached (best-effort given stored state only records
+        // the most-recent ID).
+        let cachedIds: [Int64]
+        if let oldest = oldestCachedId, let last = lastProcessedId {
+            cachedIds = uidsSortedAsc.filter { $0 >= oldest && $0 <= last }
+        } else if let last = lastProcessedId {
+            cachedIds = uidsSortedAsc.filter { $0 <= last }
+        } else {
+            cachedIds = []
+        }
+        let newerAsc = uidsSortedAsc.filter { id in
+            if let last = lastProcessedId { return id > last }
+            return true
+        }
+
+        if normalizedOrder == "desc" {
+            // Process newer messages newest->oldest, then older-than-cache newest->oldest
+            let newDesc = Array(newerAsc.reversed())
+            if let oldestCached = cachedIds.first {
+                let olderThanCacheDesc = Array(uidsSortedAsc.filter { $0 < oldestCached }.reversed())
+                return newDesc + olderThanCacheDesc
+            } else {
+                // No cached ids: just return all in descending order
+                return Array(uidsSortedAsc.reversed())
+            }
+        } else {
+            // Ascending ordering: process all matching messages in ascending order.
+            // The version tracker will handle deduplication for already-processed messages,
+            // so we don't need to skip the cached range at the ordering level.
+            return uidsSortedAsc
+        }
     }
     
     private func fetchParticipants(db: OpaquePointer, chatRowId: Int64) throws -> [String] {
@@ -1121,19 +1525,24 @@ public actor IMessageHandler {
     
     private func appleEpochToISO8601(_ timestamp: Int64) -> String {
         let appleEpoch = Date(timeIntervalSince1970: 978307200) // 2001-01-01 00:00:00 UTC
-        
+        // Heuristic to detect stored unit and convert to seconds.
+        // Use thresholds that separate seconds / milliseconds / microseconds / nanoseconds
+        // for timestamps in the 2000s-2030s range.
         let seconds: TimeInterval
-        if timestamp > 10_000_000_000_000 {
-            // Microseconds
-            seconds = Double(timestamp) / 1_000_000_000
-        } else if timestamp > 10_000_000 {
-            // Milliseconds
-            seconds = Double(timestamp) / 1_000_000
+        if timestamp > 1_000_000_000_000_000 {
+            // nanoseconds -> divide by 1e9
+            seconds = Double(timestamp) / 1_000_000_000.0
+        } else if timestamp > 1_000_000_000_000 {
+            // microseconds -> divide by 1e6
+            seconds = Double(timestamp) / 1_000_000.0
+        } else if timestamp > 1_000_000_000 {
+            // milliseconds -> divide by 1e3
+            seconds = Double(timestamp) / 1_000.0
         } else {
-            // Seconds
+            // seconds
             seconds = Double(timestamp)
         }
-        
+
         let date = appleEpoch.addingTimeInterval(seconds)
         return ISO8601DateFormatter().string(from: date)
     }
@@ -1221,9 +1630,6 @@ public actor IMessageHandler {
         return hash.map { String(format: "%02x", $0) }.joined()
     }
 }
-
-// Import CommonCrypto for SHA256
-import CommonCrypto
 
 // MARK: - Error Types
 

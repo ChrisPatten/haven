@@ -247,6 +247,19 @@ def _prune_version_tracker_by_age(max_age_seconds: int = 15 * 60) -> None:
         logger.debug("prune_version_tracker_by_age_failed", exc_info=True)
 
 
+def _prune_version_tracker(min_seen_rowid: Optional[int] = None) -> None:
+    """Compatibility wrapper used by some callers.
+
+    Historically callers passed a min_seen_rowid but the pruning logic is age-based.
+    Keep a simple wrapper that currently delegates to the age-based pruner so
+    existing call sites keep working.
+    """
+    try:
+        _prune_version_tracker_by_age()
+    except Exception:
+        logger.debug("prune_version_tracker_wrapper_failed", exc_info=True)
+
+
 @dataclass
 class CollectorState:
     last_seen_rowid: int = 0       # The floor: don't scan below this (when backlog complete)
@@ -451,15 +464,30 @@ def apple_time_to_utc(raw_value: Optional[int]) -> Optional[str]:
     if value == 0:
         return None
 
-    # Heuristic to support second / microsecond / nanosecond precision values
-    if value > 10_000_000_000_000:
-        delta = timedelta(microseconds=value / 1_000)
-    elif value > 10_000_000:
-        delta = timedelta(seconds=value / 1_000_000)
+    # Heuristic to detect the unit of the stored timestamp. The chat DB may
+    # store seconds, milliseconds, microseconds or nanoseconds depending on
+    # OS/version/context. Use thresholds appropriate for timestamps in the
+    # 2000s-2030s range.
+    #
+    # Typical magnitudes (approx):
+    #  - seconds: 1e9
+    #  - milliseconds: 1e12
+    #  - microseconds: 1e15
+    #  - nanoseconds: 1e18
+    if value > 1_000_000_000_000_000:
+        # nanoseconds -> seconds
+        seconds = float(value) / 1_000_000_000.0
+    elif value > 1_000_000_000_000:
+        # microseconds -> seconds
+        seconds = float(value) / 1_000_000.0
+    elif value > 1_000_000_000:
+        # milliseconds -> seconds
+        seconds = float(value) / 1_000.0
     else:
-        delta = timedelta(seconds=value)
+        # seconds
+        seconds = float(value)
 
-    ts = APPLE_EPOCH + delta
+    ts = APPLE_EPOCH + timedelta(seconds=seconds)
     return ts.astimezone(timezone.utc).isoformat()
 
 

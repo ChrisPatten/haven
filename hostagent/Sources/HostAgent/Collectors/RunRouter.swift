@@ -89,6 +89,17 @@ public struct RunRouter {
             enc.outputFormatting = [.sortedKeys, .prettyPrinted]
             let data = try enc.encode(runResp)
             if var obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // Ensure stats.earliest_touched and stats.latest_touched keys are present
+                if var stats = obj["stats"] as? [String: Any] {
+                    if stats["earliest_touched"] == nil {
+                        stats["earliest_touched"] = NSNull()
+                    }
+                    if stats["latest_touched"] == nil {
+                        stats["latest_touched"] = NSNull()
+                    }
+                    obj["stats"] = stats
+                }
+
                 obj["inner_status_code"] = inner.statusCode
                 if let body = inner.body, let s = String(data: body, encoding: .utf8) {
                     obj["inner_body"] = s

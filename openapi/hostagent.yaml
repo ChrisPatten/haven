@@ -1,0 +1,504 @@
+openapi: 3.0.3
+info:
+  title: Haven HostAgent API
+  version: "0.1.0"
+  description: |
+    HostAgent is the macOS-native collector that exposes local-only HTTP endpoints
+    for OCR, entity extraction, collectors control, and health/capabilities. This
+    is a lightweight, canonical OpenAPI description for documentation purposes.
+servers:
+  - url: http://localhost:7090
+    description: Local HostAgent (default dev port)
+paths:
+  /v1/health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /v1/capabilities:
+    get:
+      summary: Host capabilities
+      description: Returns a list of capabilities and enabled modules on the host.
+      responses:
+        '200':
+          description: Capabilities
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  services:
+                    type: array
+                    items:
+                      type: string
+                    example: ["ocr","fswatch","collectors"]
+
+  /v1/ocr:
+    post:
+      summary: OCR extraction
+      description: Accepts an image payload (or a reference) and returns extracted text and basic entities.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                image_url:
+                  type: string
+                image_base64:
+                  type: string
+              anyOf:
+                - required: [image_url]
+                - required: [image_base64]
+      responses:
+        '200':
+          description: OCR result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  text:
+                    type: string
+                    example: "Extracted text from image..."
+                  entities:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                        text:
+                          type: string
+
+  /v1/entities:
+    post:
+      summary: Entity extraction
+      description: Extract named entities from supplied text payload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+      responses:
+        '200':
+          description: Extracted entities
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entities:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                        text:
+                          type: string
+
+  /v1/collectors/imessage:run:
+    post:
+      summary: Trigger iMessage collector run (local)
+      description: Starts an on-demand iMessage collection run (simulate/local fixtures supported).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollectorRunRequest'
+      responses:
+        '202':
+          description: Accepted - collection started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id:
+                    type: string
+                  status:
+                    type: string
+
+  /v1/collectors/{collector}:run:
+    post:
+      summary: Run a named collector (generic)
+      description: Dispatch to a registered collector adapter by name. Collector-specific options are validated against the CollectorRunRequest schema.
+      parameters:
+        - name: collector
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Collector identifier (e.g. imessage, email_imap)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollectorRunRequest'
+      responses:
+        '200':
+          description: Run started or completed (adapter-dependent)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+
+  /v1/collectors/imessage/state:
+    get:
+      summary: iMessage collector state
+      responses:
+        '200':
+          description: Current collector state and last run stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_running:
+                    type: boolean
+                  last_run_status:
+                    type: string
+                  last_run_time:
+                    type: string
+                    format: date-time
+                  last_run_stats:
+                    type: object
+                  last_run_error:
+                    type: string
+
+  /v1/collectors/email_imap:run:
+    post:
+      summary: Trigger email IMAP collector run
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollectorRunRequest'
+      responses:
+        '200':
+          description: Run result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+
+  /v1/metrics:
+    get:
+      summary: Prometheus-format metrics
+      responses:
+        '200':
+          description: Plain text Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /v1/modules:
+    get:
+      summary: List configured modules
+      responses:
+        '200':
+          description: Modules configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  modules:
+                    type: object
+
+  /v1/face/detect:
+    post:
+      summary: Face detection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                image_url:
+                  type: string
+                image_base64:
+                  type: string
+      responses:
+        '200':
+          description: Detection results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  faces:
+                    type: array
+                    items:
+                      type: object
+
+  /v1/fs-watches/events:
+    get:
+      summary: Poll FSWatch events
+      responses:
+        '200':
+          description: List of filesystem events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /v1/fs-watches/events:clear:
+    post:
+      summary: Clear FSWatch events
+      responses:
+        '204':
+          description: Cleared
+
+  /v1/fs-watches:
+    get:
+      summary: List file system watches
+      responses:
+        '200':
+          description: Watches
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+    post:
+      summary: Add a new filesystem watch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path:
+                  type: string
+      responses:
+        '201':
+          description: Watch created
+          content:
+            application/json:
+              schema:
+                type: object
+    delete:
+      summary: Remove a filesystem watch (by id)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Removed
+
+  /v1/email/parse:
+    post:
+      summary: Parse raw email content
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                raw:
+                  type: string
+      responses:
+        '200':
+          description: Parsed email
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /v1/email/metadata:
+    post:
+      summary: Extract metadata from email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                raw:
+                  type: string
+      responses:
+        '200':
+          description: Metadata extracted
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /v1/email/classify-intent:
+    post:
+      summary: Classify email intent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                raw:
+                  type: string
+      responses:
+        '200':
+          description: Intent classification
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /v1/email/redact-pii:
+    post:
+      summary: Redact PII from email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                raw:
+                  type: string
+      responses:
+        '200':
+          description: Redacted content
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /v1/email/is-noise:
+    post:
+      summary: Determine if email is noise
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                raw:
+                  type: string
+      responses:
+        '200':
+          description: Noise determination
+          content:
+            application/json:
+              schema:
+                type: object
+
+components:
+  schemas:
+    CollectorRunRequest:
+      $schema: "https://json-schema.org/draft/2020-12/schema"
+      title: CollectorRunRequest
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          type: string
+          enum: [simulate, real]
+        limit:
+          type: integer
+          minimum: 1
+        order:
+          type: string
+          enum: [asc, desc]
+        concurrency:
+          type: integer
+          minimum: 1
+          maximum: 12
+        date_range:
+          type: object
+          additionalProperties: false
+          properties:
+            since:
+              type: string
+              format: date-time
+            until:
+              type: string
+              format: date-time
+        time_window:
+          type: integer
+          minimum: 1
+          description: "Fallback lookback window in seconds when date_range is not provided"
+        collector_options:
+          type: object
+          description: >-
+            Collector-specific options. This free-form object may contain adapter
+            specific fields (for example `reset` or `dry_run` for the IMAP collector).
+            Keys and values are passed to the collector adapter and are not validated
+            by the unified schema.
+          additionalProperties: true
+          example:
+            reset: true
+            dry_run: false
+    RunResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          description: "ok|error|partial"
+        collector:
+          type: string
+        run_id:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        stats:
+          type: object
+          properties:
+            scanned:
+              type: integer
+            matched:
+              type: integer
+            submitted:
+              type: integer
+            skipped:
+              type: integer
+            earliest_touched:
+              type: string
+            latest_touched:
+              type: string
+            batches:
+              type: integer
+        warnings:
+          type: array
+          items:
+            type: string
+        errors:
+          type: array
+          items:
+            type: string

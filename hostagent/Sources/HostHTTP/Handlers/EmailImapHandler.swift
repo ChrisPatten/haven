@@ -49,28 +49,38 @@ public actor EmailImapHandler {
             return HTTPResponse.badRequest(message: "IMAP account not found")
         }
         
-        let folder = runRequest.folder ?? account.folders.first ?? "INBOX"
+        // Determine folders to process: explicit folder in the request wins, otherwise
+        // process all configured folders (or INBOX if none configured).
+        let foldersToProcess: [String]
+        if let reqFolder = runRequest.folder, !reqFolder.isEmpty {
+            foldersToProcess = [reqFolder]
+        } else if !account.folders.isEmpty {
+            foldersToProcess = account.folders
+        } else {
+            foldersToProcess = ["INBOX"]
+        }
+
         // limit: if omitted or 0 -> unlimited. If provided >0, honor it but clamp to maxLimit when maxLimit > 0.
         let providedLimit = runRequest.limit ?? 0
         let maxLimit = runRequest.maxLimit ?? 0
-        let limit: Int
+        let globalLimit: Int
         if providedLimit == 0 {
-            limit = 0 // 0 means unlimited
+            globalLimit = 0 // 0 means unlimited
         } else if maxLimit > 0 {
-            limit = min(max(providedLimit, 1), maxLimit)
+            globalLimit = min(max(providedLimit, 1), maxLimit)
         } else {
-            limit = max(providedLimit, 1)
+            globalLimit = max(providedLimit, 1)
         }
         let fetchConcurrency = max(1, min(runRequest.concurrency ?? 4, 12))
         let dryRun = runRequest.dryRun ?? false
-        
+
         let sinceDate = runRequest.since
         let beforeDate = runRequest.before
-        
+
         guard let authResolution = resolveAuth(for: account, request: runRequest) else {
             return HTTPResponse.badRequest(message: "Unable to resolve IMAP credentials")
         }
-        
+
         let security: ImapSessionConfiguration.Security = account.tls ? .tls : .plaintext
         let imapConfig = ImapSessionConfiguration(
             hostname: account.host,
@@ -82,7 +92,7 @@ public actor EmailImapHandler {
             fetchConcurrency: fetchConcurrency,
             allowsInsecurePlainAuth: !account.tls
         )
-        
+
         let imapSession: ImapSession
         do {
             imapSession = try ImapSession(configuration: imapConfig, secretResolver: authResolution.resolver)
@@ -93,165 +103,221 @@ public actor EmailImapHandler {
             ])
             return HTTPResponse.internalError(message: "Failed to initialize IMAP session")
         }
-        
-        let searchResult: [UInt32]
-        do {
-            searchResult = try await imapSession.searchMessages(folder: folder, since: sinceDate, before: beforeDate)
-        } catch {
-            logger.error("IMAP search failed", metadata: [
-                "account": account.debugIdentifier,
-                "folder": folder,
-                "error": error.localizedDescription
-            ])
-            return HTTPResponse.internalError(message: "IMAP search failed: \(error.localizedDescription)")
-        }
-        
-        // Determine ordering and skip previously processed messages using a small on-disk cache
-        let uidsSortedAsc = searchResult.sorted()
-        var lastProcessedUid: UInt32 = 0
-        do {
-            if let v = try loadLastProcessedUid(account: account, folder: folder) {
-                lastProcessedUid = v
-            }
-        } catch {
-            logger.warning("Failed to load IMAP account state", metadata: ["account": account.responseIdentifier, "folder": folder, "error": error.localizedDescription])
-        }
 
-        if runRequest.reset ?? false {
-            logger.info("IMAP run requested reset; ignoring persisted last_processed_uid", metadata: ["account": account.responseIdentifier, "folder": folder])
-            lastProcessedUid = 0
-        }
+        // Helper: process one folder and return per-folder results. The helper respects
+        // the globalLimit (0 == unlimited) by checking submitted counts and stopping
+        // early if globalLimit is reached.
+        func processFolder(_ folder: String, remainingGlobalLimit: Int) async -> (totalFound: Int, processed: Int, submitted: Int, results: [ImapMessageResult], errors: [ImapRunError], earliestTouched: Date?, latestTouched: Date?) {
+            do {
+                let searchResult = try await imapSession.searchMessages(folder: folder, since: sinceDate, before: beforeDate)
+                let uidsSortedAsc = searchResult.sorted()
 
-        let normalizedOrder = runRequest.order?.lowercased()
-        let unprocessed: [UInt32] = uidsSortedAsc.filter { $0 > lastProcessedUid }
-        let orderedUIDsAsc: [UInt32] = unprocessed
-        let orderedUIDsDesc: [UInt32] = Array(unprocessed.reversed())
-
-        let orderedUIDs: [UInt32]
-        if normalizedOrder == "desc" {
-            orderedUIDs = orderedUIDsDesc
-        } else {
-            // default to asc
-            orderedUIDs = orderedUIDsAsc
-        }
-
-        // Determine how many to process. limit == 0 means unlimited -> process all available
-        let totalAvailable = orderedUIDs.count
-        let toProcessCount: Int = (limit == 0) ? totalAvailable : min(limit, totalAvailable)
-        if toProcessCount == 0 {
-            let response = ImapRunResponse(
-                accountId: account.responseIdentifier,
-                folder: folder,
-                totalFound: searchResult.count,
-                processed: 0,
-                submitted: 0,
-                dryRun: dryRun,
-                since: sinceDate,
-                before: beforeDate,
-                results: [],
-                errors: []
-            )
-            return encodeResponse(response)
-        }
-        
-        var processedCount = 0
-        var submittedCount = 0
-        var results: [ImapMessageResult] = []
-        var errors: [ImapRunError] = []
-        let sourcePrefix = "email_imap/\(account.responseIdentifier)"
-
-        // Batch parameters
-        let defaultBatchSize = runRequest.batchSize ?? 200
-        let batchSize = max(1, defaultBatchSize)
-
-        // Process in batches of `batchSize` up to toProcessCount
-        var processedSoFar = 0
-        while processedSoFar < toProcessCount {
-            let remaining = toProcessCount - processedSoFar
-            let thisBatchSize = min(batchSize, remaining)
-            let startIndex = processedSoFar
-            let endIndex = processedSoFar + thisBatchSize
-            let batchUIDs = Array(orderedUIDs[startIndex..<endIndex])
-
-            logger.info("Processing IMAP batch", metadata: ["account": account.responseIdentifier, "folder": folder, "batch_start": "\(startIndex)", "batch_count": "\(batchUIDs.count)"])
-
-            for uid in batchUIDs {
+                var lastProcessedUid: UInt32 = 0
+                var earliestProcessedUidCache: UInt32? = nil
                 do {
-                    let data = try await imapSession.fetchRFC822(folder: folder, uid: uid)
-                    let message = try await emailService.parseRFC822Data(data)
-                    processedCount += 1
-
-                    let payload = try await emailCollector.buildDocumentPayload(
-                        email: message,
-                        intent: nil,
-                        relevance: nil,
-                        sourceType: "email",
-                        sourceIdPrefix: sourcePrefix
-                    )
-
-                    if dryRun {
-                        let entry = ImapMessageResult(
-                            uid: uid,
-                            messageId: payload.metadata.messageId,
-                            status: "dry_run",
-                            submissionId: nil,
-                            docId: nil,
-                            duplicate: nil
-                        )
-                        results.append(entry)
-                        continue
-                    }
-
-                    let submission = try await emailCollector.submitEmailDocument(payload)
-                    submittedCount += 1
-
-                    let entry = ImapMessageResult(
-                        uid: uid,
-                        messageId: payload.metadata.messageId,
-                        status: submission.status,
-                        submissionId: submission.submissionId,
-                        docId: submission.docId,
-                        duplicate: submission.duplicate
-                    )
-                    results.append(entry)
-
-                    // Persist last-processed UID so future runs can resume/skip already-processed messages.
-                    do {
-                        let newLast = max(lastProcessedUid, uid)
-                        lastProcessedUid = newLast
-                        try saveLastProcessedUid(account: account, folder: folder, uid: lastProcessedUid)
-                    } catch {
-                        logger.warning("Failed to save IMAP account state", metadata: ["account": account.responseIdentifier, "folder": folder, "error": error.localizedDescription])
+                    if let state = try loadImapState(account: account, folder: folder) {
+                        if let v = state.last { lastProcessedUid = v }
+                        if let e = state.earliest { earliestProcessedUidCache = e }
                     }
                 } catch {
-                    logger.error("Failed to process IMAP message", metadata: [
-                        "account": account.debugIdentifier,
-                        "folder": folder,
-                        "uid": "\(uid)",
-                        "error": error.localizedDescription
-                    ])
-                    errors.append(ImapRunError(uid: uid, reason: error.localizedDescription))
+                    logger.warning("Failed to load IMAP account state", metadata: ["account": account.responseIdentifier, "folder": folder, "error": error.localizedDescription])
                 }
+
+                if runRequest.reset ?? false {
+                    logger.info("IMAP run requested reset; ignoring persisted last_processed_uid", metadata: ["account": account.responseIdentifier, "folder": folder])
+                    lastProcessedUid = 0
+                }
+
+                let orderedUIDs = Self.composeProcessingOrder(
+                    searchResultAsc: uidsSortedAsc,
+                    lastProcessedUid: lastProcessedUid,
+                    order: runRequest.order,
+                    since: runRequest.since,
+                    before: runRequest.before,
+                    oldestCachedUid: earliestProcessedUidCache
+                )
+
+                var processedCount = 0
+                var submittedCount = 0
+                var results: [ImapMessageResult] = []
+                var errors: [ImapRunError] = []
+                var earliestProcessedDate: Date? = nil
+                var latestProcessedDate: Date? = nil
+                var earliestProcessedUid: UInt32? = nil
+
+                let sourcePrefix = "email_imap/\(account.responseIdentifier)"
+                let defaultBatchSize = runRequest.batchSize ?? 200
+                let batchSize = max(1, defaultBatchSize)
+
+                var processedSoFar = 0
+                var stopProcessing = false
+                while processedSoFar < orderedUIDs.count && !stopProcessing {
+                    let remaining = orderedUIDs.count - processedSoFar
+                    let thisBatchSize = min(batchSize, remaining)
+                    let startIndex = processedSoFar
+                    let endIndex = processedSoFar + thisBatchSize
+                    let batchUIDs = Array(orderedUIDs[startIndex..<endIndex])
+
+                    logger.info("Processing IMAP batch", metadata: ["account": account.responseIdentifier, "folder": folder, "batch_start": "\(startIndex)", "batch_count": "\(batchUIDs.count)"])
+
+                    for uid in batchUIDs {
+                        do {
+                            let data = try await imapSession.fetchRFC822(folder: folder, uid: uid)
+                            let message = try await emailService.parseRFC822Data(data)
+                            // NOTE: Do not set earliest/latest here. These should reflect
+                            // only successfully submitted documents — update after submit.
+                            processedCount += 1
+
+                            if let prev = earliestProcessedUid {
+                                if uid < prev { earliestProcessedUid = uid }
+                            } else {
+                                earliestProcessedUid = uid
+                            }
+
+                            if let since = sinceDate, let msgDate = message.date, msgDate < since {
+                                stopProcessing = true
+                                break
+                            }
+                            if let before = beforeDate, let msgDate = message.date, msgDate > before {
+                                stopProcessing = true
+                                break
+                            }
+
+                            let payload = try await emailCollector.buildDocumentPayload(
+                                email: message,
+                                intent: nil,
+                                relevance: nil,
+                                sourceType: "email",
+                                sourceIdPrefix: sourcePrefix
+                            )
+
+                            if dryRun {
+                                let entry = ImapMessageResult(
+                                    uid: uid,
+                                    messageId: payload.metadata.messageId,
+                                    status: "dry_run",
+                                    submissionId: nil,
+                                    docId: nil,
+                                    duplicate: nil
+                                )
+                                results.append(entry)
+                                continue
+                            }
+
+                            // If a globalLimit is specified, and remainingGlobalLimit is 0, stop submitting.
+                            if globalLimit > 0 && remainingGlobalLimit <= 0 {
+                                stopProcessing = true
+                                break
+                            }
+
+                            let submission = try await emailCollector.submitEmailDocument(payload)
+                            submittedCount += 1
+
+                            let entry = ImapMessageResult(
+                                uid: uid,
+                                messageId: payload.metadata.messageId,
+                                status: submission.status,
+                                submissionId: submission.submissionId,
+                                docId: submission.docId,
+                                duplicate: submission.duplicate
+                            )
+                            results.append(entry)
+
+                            // Update earliest/latest only for actually submitted documents
+                            if let msgDate = message.date {
+                                if let prev = earliestProcessedDate {
+                                    if msgDate < prev { earliestProcessedDate = msgDate }
+                                } else {
+                                    earliestProcessedDate = msgDate
+                                }
+                                if let prev = latestProcessedDate {
+                                    if msgDate > prev { latestProcessedDate = msgDate }
+                                } else {
+                                    latestProcessedDate = msgDate
+                                }
+                            }
+
+                            do {
+                                let newLast = max(lastProcessedUid, uid)
+                                lastProcessedUid = newLast
+                                try saveImapState(account: account, folder: folder, last: lastProcessedUid, earliest: earliestProcessedUid)
+                            } catch {
+                                logger.warning("Failed to save IMAP account state", metadata: ["account": account.responseIdentifier, "folder": folder, "error": error.localizedDescription])
+                            }
+
+                            if globalLimit > 0 && submittedCount >= globalLimit {
+                                stopProcessing = true
+                                break
+                            }
+                        } catch {
+                            logger.error("Failed to process IMAP message", metadata: [
+                                "account": account.debugIdentifier,
+                                "folder": folder,
+                                "uid": "\(uid)",
+                                "error": error.localizedDescription
+                            ])
+                            errors.append(ImapRunError(uid: uid, reason: error.localizedDescription))
+                        }
+                    }
+                    processedSoFar += batchUIDs.count
+                    if stopProcessing { break }
+                }
+
+                return (totalFound: searchResult.count, processed: processedCount, submitted: submittedCount, results: results, errors: errors, earliestTouched: earliestProcessedDate, latestTouched: latestProcessedDate)
+            } catch {
+                logger.error("IMAP search failed", metadata: [
+                    "account": account.debugIdentifier,
+                    "folder": folder,
+                    "error": error.localizedDescription
+                ])
+                return (totalFound: 0, processed: 0, submitted: 0, results: [], errors: [ImapRunError(uid: 0, reason: error.localizedDescription)], earliestTouched: nil, latestTouched: nil)
+            }
+        }
+
+        // Iterate folders, aggregating results. The globalLimit is enforced across folders.
+        var totalFoundSum = 0
+        var processedSum = 0
+        var submittedSum = 0
+        var resultsAll: [ImapMessageResult] = []
+        var errorsAll: [ImapRunError] = []
+        var earliestTouchedGlobal: Date? = nil
+        var latestTouchedGlobal: Date? = nil
+
+        for folder in foldersToProcess {
+            let remainingAllowed = (globalLimit > 0) ? max(0, globalLimit - submittedSum) : 0
+            let folderResult = await processFolder(folder, remainingGlobalLimit: remainingAllowed)
+
+            totalFoundSum += folderResult.totalFound
+            processedSum += folderResult.processed
+            submittedSum += folderResult.submitted
+            resultsAll.append(contentsOf: folderResult.results)
+            errorsAll.append(contentsOf: folderResult.errors)
+
+            if let e = folderResult.earliestTouched {
+                if let prev = earliestTouchedGlobal { if e < prev { earliestTouchedGlobal = e } } else { earliestTouchedGlobal = e }
+            }
+            if let l = folderResult.latestTouched {
+                if let prev = latestTouchedGlobal { if l > prev { latestTouchedGlobal = l } } else { latestTouchedGlobal = l }
             }
 
-            processedSoFar += batchUIDs.count
-
-            // Small pause between batches could be added here if desired to reduce load.
+            if globalLimit > 0 && submittedSum >= globalLimit {
+                break
+            }
         }
-        
+
         let response = ImapRunResponse(
             accountId: account.responseIdentifier,
-            folder: folder,
-            totalFound: searchResult.count,
-            processed: processedCount,
-            submitted: submittedCount,
+            folder: foldersToProcess.joined(separator: ","),
+            totalFound: totalFoundSum,
+            processed: processedSum,
+            submitted: submittedSum,
             dryRun: dryRun,
             since: sinceDate,
             before: beforeDate,
-            results: results,
-            errors: errors
+            results: resultsAll,
+            errors: errorsAll
         )
-        return encodeResponse(response)
+        return encodeResponse(response, earliestTouched: earliestTouchedGlobal, latestTouched: latestTouchedGlobal)
     }
     
     // MARK: - Helpers
@@ -264,28 +330,124 @@ public actor EmailImapHandler {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
-        // First, try to decode the collector-specific IMAP request shape.
-        if let specific = try? decoder.decode(ImapRunRequest.self, from: body) {
-            return specific
+        // First, try to decode a lightweight local DTO matching the unified
+        // CollectorRunRequest shape for the fields we care about. We avoid
+        // importing HostAgent here to prevent circular module dependencies.
+        struct UnifiedRunDTO: Codable {
+            struct DateRange: Codable {
+                let since: Date?
+                let until: Date?
+            }
+            let limit: Int?
+            let order: String?
+            let concurrency: Int?
+            let dateRange: DateRange?
+            let mode: String?
+            let timeWindow: Int?
+            enum CodingKeys: String, CodingKey {
+                case limit, order, concurrency, mode
+                case dateRange = "date_range"
+                case timeWindow = "time_window"
+            }
         }
 
-        // Fallback: decode the unified CollectorRunRequest and map fields.
-        // RunRouter already strictly validates the unified DTO shape, so decoding
-        // should succeed for requests that use the unified format.
-        if let unified = try? decoder.decode(CollectorRunRequest.self, from: body) {
+        if let unified = try? decoder.decode(UnifiedRunDTO.self, from: body) {
             var mapped = ImapRunRequest()
             mapped.limit = unified.limit
-            mapped.order = unified.order?.rawValue
+            mapped.order = unified.order
             mapped.concurrency = unified.concurrency
             mapped.since = unified.dateRange?.since
             mapped.before = unified.dateRange?.until
             // mode.simulate -> dry run
             if let m = unified.mode {
-                mapped.dryRun = (m == .simulate)
+                mapped.dryRun = (m == "simulate")
             }
             // time_window has no direct IMAP equivalent; map conservatively to batchSize
             mapped.batchSize = unified.timeWindow
+            // Allow collector-specific options to be passed under `collector_options`.
+            if let json = try? JSONSerialization.jsonObject(with: body, options: []) as? [String: Any],
+               let coll = json["collector_options"] as? [String: Any] {
+                if let r = coll["reset"] as? Bool {
+                    mapped.reset = r
+                }
+                // Support dry_run variants
+                if let dr = coll["dry_run"] as? Bool {
+                    mapped.dryRun = dr
+                } else if let dr = coll["dryRun"] as? Bool {
+                    mapped.dryRun = dr
+                }
+                // Map collector_options.folder -> imap run folder (also accept mailbox)
+                if let f = coll["folder"] as? String {
+                    mapped.folder = f
+                } else if let f = coll["mailbox"] as? String {
+                    mapped.folder = f
+                }
+                // Allow mapping of account identifier
+                if let a = coll["account_id"] as? String {
+                    mapped.accountId = a
+                } else if let a = coll["accountId"] as? String {
+                    mapped.accountId = a
+                }
+                // Map max limit (clamp applied later)
+                if let m = coll["max_limit"] as? Int {
+                    mapped.maxLimit = m
+                } else if let m = coll["maxLimit"] as? Int {
+                    mapped.maxLimit = m
+                }
+                // Map nested credentials object if provided
+                if let creds = coll["credentials"] as? [String: Any] {
+                    var c = ImapRunRequest.Credentials()
+                    if let k = creds["kind"] as? String { c.kind = k }
+                    if let s = creds["secret"] as? String { c.secret = s }
+                    if let sr = creds["secret_ref"] as? String { c.secretRef = sr }
+                    if let sr = creds["secretRef"] as? String { c.secretRef = sr }
+                    mapped.credentials = c
+                }
+            }
             return mapped
+        }
+
+        // Fallback: try to decode the IMAP-specific DTO directly. This branch
+        // maintains backwards compatibility for callers that send the adapter-
+        // specific request shape. When this succeeds we still accept an optional
+        // nested `collector_options` object to provide extra hints like reset.
+        if var specific = try? decoder.decode(ImapRunRequest.self, from: body) {
+            if let json = try? JSONSerialization.jsonObject(with: body, options: []) as? [String: Any],
+               let coll = json["collector_options"] as? [String: Any] {
+                if let r = coll["reset"] as? Bool {
+                    specific.reset = r
+                }
+                if let dr = coll["dry_run"] as? Bool {
+                    specific.dryRun = dr
+                } else if let dr = coll["dryRun"] as? Bool {
+                    specific.dryRun = dr
+                }
+                // Allow callers to specify collector-specific options under collector_options
+                if let f = coll["folder"] as? String {
+                    specific.folder = f
+                } else if let f = coll["mailbox"] as? String {
+                    specific.folder = f
+                }
+                if let a = coll["account_id"] as? String {
+                    specific.accountId = a
+                } else if let a = coll["accountId"] as? String {
+                    specific.accountId = a
+                }
+                if let m = coll["max_limit"] as? Int {
+                    specific.maxLimit = m
+                } else if let m = coll["maxLimit"] as? Int {
+                    specific.maxLimit = m
+                }
+                if let creds = coll["credentials"] as? [String: Any] {
+                    var c = ImapRunRequest.Credentials()
+                    if let k = creds["kind"] as? String { c.kind = k }
+                    if let s = creds["secret"] as? String { c.secret = s }
+                    if let sr = creds["secret_ref"] as? String { c.secretRef = sr }
+                    if let sr = creds["secretRef"] as? String { c.secretRef = sr }
+                    specific.credentials = c
+                }
+            }
+            return specific
         }
 
         // If we reached here, throw the decoding error from a strict decode to provide
@@ -339,7 +501,7 @@ public actor EmailImapHandler {
         return AuthResolution(auth: auth, resolver: resolver)
     }
     
-    private func encodeResponse(_ response: ImapRunResponse) -> HTTPResponse {
+    private func encodeResponse(_ response: ImapRunResponse, earliestTouched: Date? = nil, latestTouched: Date? = nil) -> HTTPResponse {
         // Emit an adapter-standard payload so RunRouter can decode and incorporate it into
         // the canonical RunResponse envelope. Fields required by RunResponse.AdapterResult
         // are: scanned, matched, submitted, skipped, earliest_touched, latest_touched,
@@ -353,12 +515,18 @@ public actor EmailImapHandler {
         // skipped -> messages processed but not submitted
         obj["skipped"] = max(0, response.processed - response.submitted)
 
-        if let since = response.since {
+        // Prefer actual processed message timestamps when available, fallback to request-supplied since/before
+        if let et = earliestTouched {
+            obj["earliest_touched"] = RunResponse.iso8601UTC(et)
+        } else if let since = response.since {
             obj["earliest_touched"] = RunResponse.iso8601UTC(since)
         } else {
             obj["earliest_touched"] = nil
         }
-        if let before = response.before {
+
+        if let lt = latestTouched {
+            obj["latest_touched"] = RunResponse.iso8601UTC(lt)
+        } else if let before = response.before {
             obj["latest_touched"] = RunResponse.iso8601UTC(before)
         } else {
             obj["latest_touched"] = nil
@@ -439,6 +607,68 @@ public actor EmailImapHandler {
     }
 }
 
+extension EmailImapHandler {
+    /// Compose the UID processing order based on the server search results (ascending),
+    /// the cached-most-recent UID, and the requested order. This mirrors the logic used
+    /// by `handleRun` and is exposed for unit testing.
+    static func composeProcessingOrder(
+        searchResultAsc: [UInt32],
+        lastProcessedUid: UInt32,
+        order: String?,
+        since: Date?,
+        before: Date?,
+        oldestCachedUid: UInt32? = nil
+    ) -> [UInt32] {
+        let uidsSortedAsc = searchResultAsc.sorted()
+        let normalizedOrder = order?.lowercased()
+
+        // If the caller provides an explicit oldestCachedUid (test-only), use that to
+        // determine the cached range. Otherwise, fall back to treating all UIDs <=
+        // lastProcessedUid as cached (best-effort given stored state only records
+        // the most-recent UID).
+        let cachedUIDs: [UInt32]
+        if let oldest = oldestCachedUid {
+            cachedUIDs = uidsSortedAsc.filter { $0 >= oldest && $0 <= lastProcessedUid }
+        } else {
+            cachedUIDs = uidsSortedAsc.filter { $0 <= lastProcessedUid }
+        }
+        let newerUIDsAsc = uidsSortedAsc.filter { $0 > lastProcessedUid }
+
+        if normalizedOrder == "desc" {
+            // Process newer messages newest->oldest, then older-than-cache newest->oldest
+            let newDesc = Array(newerUIDsAsc.reversed())
+            if let oldestCached = cachedUIDs.first {
+                let olderThanCacheDesc = Array(uidsSortedAsc.filter { $0 < oldestCached }.reversed())
+                return newDesc + olderThanCacheDesc
+            } else {
+                // No cached uids: just return all in descending order
+                return Array(uidsSortedAsc.reversed())
+            }
+        } else {
+            // Ascending ordering
+            if since != nil {
+                // Start at oldest messages (ascending) until oldest cached. Then append newer-than-cache ascending.
+                if let oldestCached = cachedUIDs.first {
+                    let beforeCache = uidsSortedAsc.filter { $0 < oldestCached }
+                    return beforeCache + newerUIDsAsc
+                } else {
+                    // No cached uids: process all ascending
+                    return uidsSortedAsc
+                }
+            } else {
+                // No since specified: process older-than-cache ascending, then newer-than-cache ascending.
+                if let oldestCached = cachedUIDs.first {
+                    let beforeCacheAsc = uidsSortedAsc.filter { $0 < oldestCached }
+                    return beforeCacheAsc + newerUIDsAsc
+                } else {
+                    // no cached uids: process all ascending
+                    return uidsSortedAsc
+                }
+            }
+        }
+    }
+}
+
 // MARK: - IMAP account state persistence
 
 private extension EmailImapHandler {
@@ -458,29 +688,31 @@ private extension EmailImapHandler {
         return dir.appendingPathComponent(fileName)
     }
 
-    func loadLastProcessedUid(account: MailImapAccountConfig, folder: String) throws -> UInt32? {
+    func loadImapState(account: MailImapAccountConfig, folder: String) throws -> (last: UInt32?, earliest: UInt32?)? {
         let url = cacheFileURL(for: account, folder: folder)
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return nil }
         let data = try Data(contentsOf: url)
         let decoder = JSONDecoder()
         let obj = try decoder.decode([String: Int].self, from: data)
-        if let n = obj["last_processed_uid"] {
-            return UInt32(n)
-        }
-        return nil
+        let last = obj["last_processed_uid"].map { UInt32($0) }
+        let earliest = obj["earliest_processed_uid"].map { UInt32($0) }
+        return (last: last, earliest: earliest)
     }
 
-    func saveLastProcessedUid(account: MailImapAccountConfig, folder: String, uid: UInt32) throws {
+    func saveImapState(account: MailImapAccountConfig, folder: String, last: UInt32, earliest: UInt32?) throws {
         let url = cacheFileURL(for: account, folder: folder)
         let dir = url.deletingLastPathComponent()
         let fm = FileManager.default
         if !fm.fileExists(atPath: dir.path) {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
+        var obj: [String: Int] = ["last_processed_uid": Int(last)]
+        if let e = earliest {
+            obj["earliest_processed_uid"] = Int(e)
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let obj: [String: Int] = ["last_processed_uid": Int(uid)]
         let data = try encoder.encode(obj)
         try data.write(to: url, options: .atomic)
     }

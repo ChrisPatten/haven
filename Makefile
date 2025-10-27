@@ -55,8 +55,12 @@ rebuild:
 purge:
 	@docker compose down -v
 	@if [ -d ~/.haven ]; then \
-		echo "Removing contents of ~/.haven..."; \
-		rm -rf ~/.haven/*; \
+		echo "Removing iMessage backup..."; \
+		rm -rf ~/.haven/chat_backup/; \
+		echo "Removing iMessage cache..."; \
+		rm -f ~/Library/Caches/Haven/imessage_state.json; \
+		echo "Removing IMAP cache..."; \
+		rm -rf ~/Library/Caches/Haven/remote_mail/; \
 	fi
 
 # Run collectors from the virtualenv in env/

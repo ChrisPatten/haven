@@ -71,7 +71,10 @@ public struct CollectorRunRequest: Codable {
         // Detect unknown keys at top-level
         let container = try decoder.container(keyedBy: DynamicKey.self)
         let providedKeys = Set(container.allKeys.map { $0.stringValue })
-        let allowedKeys: Set<String> = ["mode", "limit", "order", "concurrency", "date_range", "time_window"]
+    // Allow a top-level `collector_options` object so collector-specific
+    // options can be provided without failing strict validation. Individual
+    // collectors may parse and apply options from this object.
+    let allowedKeys: Set<String> = ["mode", "limit", "order", "concurrency", "date_range", "time_window", "collector_options"]
         let unknown = providedKeys.subtracting(allowedKeys)
         if !unknown.isEmpty {
             throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Unknown keys: \(unknown)"))

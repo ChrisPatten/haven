@@ -32,6 +32,8 @@ nav:
       - Overview: api/index.md
       - Gateway API: api/gateway.md
       - Gateway Interactive Reference: api/gateway-reference.html
+      - HostAgent API: api/hostagent.md
+      - HostAgent Interactive Reference: api/hostagent-reference.html
   - Reference:
       - Functional Guide: reference/functional_guide.md
       - Technical Reference: reference/technical_reference.md
@@ -61,6 +63,12 @@ extra:
       source: openapi/gateway.yaml
       output: openapi/gateway.yaml
       page: api/gateway.md
+    - id: hostagent
+      name: HostAgent API
+      description: "Local-only HostAgent endpoints (OCR, collectors, health) exposed on the macOS host agent."
+      source: openapi/hostagent.yaml
+      output: openapi/hostagent.yaml
+      page: api/hostagent.md
 
 plugins:
   - search
