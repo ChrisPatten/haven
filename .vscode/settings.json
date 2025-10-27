@@ -1,4 +1,11 @@
 {
   "python.analysis.extraPaths": ["./src"],
-  "python.analysis.packageIndexDepths": [2]
+  "python.analysis.packageIndexDepths": [
+    2
+  ],
+  "lldb.library": "/Applications/Xcode.app/Contents/SharedFrameworks/LLDB.framework/Versions/A/LLDB",
+  "lldb.launch.expressions": "native",
+  "cursorpyright.analysis.extraPaths": [
+    "./src"
+  ]
 }
