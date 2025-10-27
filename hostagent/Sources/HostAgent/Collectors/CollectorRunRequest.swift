@@ -5,6 +5,7 @@ import HavenCore
 
 // DTO for collector run requests. Strict decoding: unknown fields cause a decoding error.
 public struct CollectorRunRequest: Codable {
+    private static let logger = HavenLogger(category: "collector-run-request")
     public enum Mode: String, Codable {
         case simulate
         case real
@@ -98,8 +99,12 @@ public struct CollectorRunRequest: Codable {
         }
 
         if let conc = try keyed.decodeIfPresent(Int.self, forKey: .concurrency) {
+            let original = conc
             // clamp to 1..12
             let clamped = max(1, min(12, conc))
+            if clamped != original {
+                Self.logger.warning("Concurrency value \(original) out of range, clamped to \(clamped)")
+            }
             self.concurrency = clamped
         } else {
             self.concurrency = nil

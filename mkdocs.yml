@@ -22,6 +22,7 @@ nav:
   - HostAgent:
       - Overview: hostagent/index.md
       - Native README: hostagent/hostagent-readme.md
+      - Collector Run API: hostagent/collectors_run_api.md
       - OpenAPI: hostagent/OpenAPIServerTransport.md
       - Collectors:
           - Email Collector:

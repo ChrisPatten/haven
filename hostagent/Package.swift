@@ -167,6 +167,12 @@ let package = Package(
             name: "IMAPTests",
             dependencies: ["IMAP", "HavenCore"],
             path: "Tests/IMAPTests"
+        ),
+        .testTarget(
+            name: "HostAgentTests",
+            dependencies: ["HostAgentEmail", "HavenCore"],
+            path: "Tests/HostAgentTests",
+            resources: [.copy("Fixtures")]
         )
     ]
 )

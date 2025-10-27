@@ -32,6 +32,18 @@ public struct RunResponse: Codable {
     // Non-encoded runtime helper to compute durations.
     private var startDate: Date?
 
+    enum CodingKeys: String, CodingKey {
+        case status
+        case collector
+        case run_id
+        case started_at
+        case finished_at
+        case stats
+        case warnings
+        case errors
+        // startDate is intentionally excluded from encoding
+    }
+
     public struct Stats: Codable {
         public var scanned: Int
         public var matched: Int

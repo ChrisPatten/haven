@@ -1,5 +1,5 @@
 import XCTest
-@testable import HostAgent
+@testable import HostAgentEmail
 
 final class RunResponseGoldenTests: XCTestCase {
     func testRunResponseGoldenSerialization() throws {
