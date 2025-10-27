@@ -203,7 +203,20 @@ struct HavenHostAgent: AsyncParsableCommand {
     let emailHandler = EmailHandler(config: config)
     let emailImapHandler = EmailImapHandler(config: config)
         
+        // Initialize OpenAPI transport and handlers
+        let transport = OpenAPIServerTransport()
+        let apiHandler = APIHandler(config: config)
+        do {
+            try apiHandler.register(on: transport)
+        } catch {
+            let logger = HavenLogger(category: "main")
+            logger.error("Failed to register OpenAPI handlers", metadata: ["error": "\(error)"])
+        }
+        let openAPIHandler = OpenAPIRouteHandler(transport: transport)
+        
         let handlers: [RouteHandler] = [
+            // OpenAPI-generated handlers (should be checked first)
+            openAPIHandler,
             // Core endpoints
             PatternRouteHandler(method: "GET", pattern: "/v1/health") { req, ctx in
                 await healthHandler.handle(request: req, context: ctx)

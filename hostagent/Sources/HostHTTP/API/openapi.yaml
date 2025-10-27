@@ -1,0 +1,211 @@
+openapi: 3.1.0
+info:
+  title: Haven Hostagent — Collectors Run API
+  version: 1.0.0
+  description: Unified run endpoint for all collectors (iMessage, IMAP). Snake_case is canonical. CamelCase aliases MAY be accepted by servers but are deprecated.
+servers:
+  - url: http://localhost:7090
+paths:
+  /v1/collectors/{collector}:run:
+    post:
+      summary: Execute a collector run
+      description: >
+        Runs a collection pass with deterministic ordering and state/coverage handling.
+        If both date_range and time_window are omitted, the server may use a default lookback window.
+      parameters:
+        - name: collector
+          in: path
+          required: true
+          description: Collector identifier
+          schema:
+            type: string
+            enum: [imessage, email_imap]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunRequest'
+            examples:
+              first-desc:
+                summary: First run, newest-first
+                value:
+                  mode: real
+                  limit: 100
+                  order: desc
+                  date_range: { since: "2025-09-01T00:00:00Z" }
+              asc-fill:
+                summary: Switch to ascending to fill gaps
+                value:
+                  mode: real
+                  limit: 100
+                  order: asc
+                  date_range: { since: "2025-09-01T00:00:00Z" }
+              imap-reset:
+                summary: Reset an IMAP folder
+                value:
+                  mode: real
+                  limit: 200
+                  order: asc
+                  collector_options:
+                    reset: true
+                    folder: "Receipts"
+                    account_id: "personal-gmail"
+      responses:
+        '200':
+          description: Run completed (simulate or real)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    # ---------------- Core request ----------------
+    RunRequest:
+      type: object
+      required: [mode, limit, order]
+      additionalProperties: false
+      properties:
+        mode:
+          $ref: '#/components/schemas/RunMode'
+        limit:
+          type: integer
+          minimum: 1
+        order:
+          $ref: '#/components/schemas/RunOrder'
+        concurrency:
+          type: integer
+          minimum: 1
+          maximum: 12
+        date_range:
+          $ref: '#/components/schemas/DateRange'
+        time_window:
+          type: integer
+          minimum: 1
+          description: Lookback window in seconds, used only if date_range is omitted.
+        cursor:
+          type: string
+          nullable: true
+          description: Opaque continuation token returned by a prior run.
+        state_strategy:
+          $ref: '#/components/schemas/StateStrategy'
+        dedupe_policy:
+          $ref: '#/components/schemas/DedupePolicy'
+        collector_options:
+          oneOf:
+            - $ref: '#/components/schemas/IMessageCollectorOptions'
+            - $ref: '#/components/schemas/ImapCollectorOptions'
+          default: {}
+          description: >
+            Collector-specific options. The server SHOULD validate the object appropriate
+            for the {collector} path parameter. Unknown fields SHOULD be ignored.
+
+    DateRange:
+      type: object
+      additionalProperties: false
+      properties:
+        since: { type: string, format: date-time, nullable: true }
+        until: { type: string, format: date-time, nullable: true }
+
+    RunMode:
+      type: string
+      enum: [simulate, real]
+    RunOrder:
+      type: string
+      enum: [asc, desc]
+    StateStrategy:
+      type: string
+      enum: [auto, cursor, watermark]
+      default: auto
+    DedupePolicy:
+      type: string
+      enum: [external_id, content_hash, both]
+      default: both
+
+    # ---------------- Collector options ----------------
+    IMessageCollectorOptions:
+      type: object
+      additionalProperties: true
+      properties:
+        batch_size: { type: integer, minimum: 1 }
+        limit:      { type: integer, minimum: 1, description: "Overrides top-level limit for message count." }
+        order:      { $ref: '#/components/schemas/RunOrder' }
+        thread_lookback_days:  { type: integer, minimum: 0 }
+        message_lookback_days: { type: integer, minimum: 0 }
+        chat_db_path: { type: string }
+    ImapCollectorOptions:
+      type: object
+      additionalProperties: true
+      properties:
+        reset: { type: boolean, default: false }
+        dry_run: { type: boolean, description: "Overrides top-level mode for dry-run behavior (simulate)." }
+        folder: { type: string, default: "INBOX" }
+        mailbox: { type: string, description: "Alias of folder" }
+        account_id: { type: string }
+        max_limit: { type: integer, minimum: 1 }
+        credentials:
+          type: object
+          additionalProperties: false
+          required: [kind]
+          properties:
+            kind: { type: string, enum: [oauth_token, app_password, secret_ref] }
+            secret: { type: string, nullable: true }
+            secret_ref: { type: string, nullable: true }
+
+    # ---------------- Response ----------------
+    RunResponse:
+      type: object
+      required: [run_id, collector, mode, requested, effective, state, stats]
+      additionalProperties: false
+      properties:
+        run_id: { type: string }
+        collector: { type: string }
+        mode: { $ref: '#/components/schemas/RunMode' }
+        requested:
+          type: object
+          description: Echo of request, possibly including camelCase aliases if provided.
+        effective:
+          type: object
+          description: Effective parameters after precedence (date_range over time_window, clamps applied).
+        state:
+          type: object
+          description: >
+            State/coverage info. Implementations should include watermarks and per-scope
+            coverage segments (e.g., threads or IMAP folders with covered ranges).
+        cursor_next:
+          type: string
+          nullable: true
+        stats:
+          type: object
+          additionalProperties: false
+          properties:
+            scanned: { type: integer, minimum: 0 }
+            submitted: { type: integer, minimum: 0 }
+            skipped_duplicate: { type: integer, minimum: 0 }
+            failed: { type: integer, minimum: 0 }
+            retryable_errors: { type: integer, minimum: 0 }
+            elapsed_ms: { type: integer, minimum: 0 }
+        deprecated_aliases_used:
+          type: array
+          items: { type: string }
+
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string }
+        message: { type: string }
+        details: { type: object, additionalProperties: true }

@@ -26,7 +26,9 @@ let package = Package(
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.6"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.3"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
-        .package(url: "https://github.com/MailCore/mailcore2.git", branch: "master")
+        .package(url: "https://github.com/MailCore/mailcore2.git", branch: "master"),
+        .package(url: "https://github.com/apple/swift-openapi-generator", from: "1.3.0"),
+        .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.0.0")
     ],
     targets: [
         .target(
@@ -87,10 +89,15 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
-                .product(name: "NIOFoundationCompat", package: "swift-nio")
+                .product(name: "NIOFoundationCompat", package: "swift-nio"),
+                .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime")
             ],
             path: "Sources/HostHTTP",
-            exclude: ["Handlers/EmailLocalHandler.swift"]
+            exclude: ["Handlers/EmailLocalHandler.swift"],
+            resources: [
+                .process("API/openapi.yaml")
+            ],
+            plugins: [.plugin(name: "OpenAPIGenerator", package: "swift-openapi-generator")]
         ),
         .plugin(
             name: "GenerateBuildInfo",

@@ -1,5 +1,6 @@
 import Foundation
 import HavenCore
+@_spi(Generated) import OpenAPIRuntime
 import OCR
 import Entity
 import SQLite3
@@ -138,80 +139,43 @@ public actor IMessageHandler {
             )
         }
         
-        // Parse request parameters.
-        // Prefer the strict unified CollectorRunRequest shape; collector-specific
-        // options must be nested under `collector_options`. Fall back to the
-        // legacy top-level shape for backward compatibility.
+        // Parse request parameters using OpenAPI-generated types
         var params = CollectorParams()
         params.configChatDbPath = config.modules.imessage.chatDbPath
+        var runRequest: Components.Schemas.RunRequest?
         if let body = request.body, !body.isEmpty {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-
-            // Decode a lightweight local DTO matching the unified CollectorRunRequest
-            // shape for the fields we care about (avoid importing HostAgent to
-            // prevent circular module dependencies).
-                struct UnifiedRunDTO: Codable {
-                struct DateRange: Codable {
-                    let since: Date?
-                    let until: Date?
+            
+            do {
+                runRequest = try decoder.decode(Components.Schemas.RunRequest.self, from: body)
+                
+                // Map the unified RunRequest to CollectorParams
+                params.mode = runRequest!.mode.rawValue
+                params.limit = runRequest!.limit
+                params.order = runRequest!.order.rawValue
+                if let dateRange = runRequest!.dateRange {
+                    params.since = dateRange.since
+                    params.until = dateRange.until
                 }
-                let mode: String?
-                let timeWindow: Int?
-                let dateRange: DateRange?
-                let limit: Int?
-                let order: String?
-                enum CodingKeys: String, CodingKey {
-                    case mode
-                    case timeWindow = "time_window"
-                    case dateRange = "date_range"
-                    case limit
-                    case order
+                if let timeWindow = runRequest!.timeWindow {
+                    params.batchSize = timeWindow
                 }
-            }
-
-                if let unified = try? decoder.decode(UnifiedRunDTO.self, from: body) {
-                    // Map unified fields we care about
-                    if let m = unified.mode { params.mode = m }
-                    if let tw = unified.timeWindow { params.batchSize = tw }
-                    if let l = unified.limit { params.limit = l }
-                    if let o = unified.order { params.order = o }
-                    if let since = unified.dateRange?.since { params.since = since }
-                    if let until = unified.dateRange?.until { params.until = until }
-
-                    // Collector-specific options must be provided under collector_options
-                    if let json = try? JSONSerialization.jsonObject(with: body, options: []) as? [String: Any],
-                       let coll = json["collector_options"] as? [String: Any] {
-                        // Support multiple aliases for batch size: batch_size, batchSize, and limit
-                        params.batchSize = coll["batch_size"] as? Int ?? coll["batchSize"] as? Int ?? params.batchSize
-                        // Allow collector limit and order overrides
-                        params.limit = coll["limit"] as? Int ?? params.limit
-                        params.order = coll["order"] as? String ?? params.order
-                        params.threadLookbackDays = coll["thread_lookback_days"] as? Int ?? coll["threadLookbackDays"] as? Int ?? params.threadLookbackDays
-                        params.messageLookbackDays = coll["message_lookback_days"] as? Int ?? coll["messageLookbackDays"] as? Int ?? params.messageLookbackDays
-                        params.chatDbPath = coll["chat_db_path"] as? String ?? coll["chatDbPath"] as? String ?? params.chatDbPath
+                
+                // Handle collector-specific options
+                if case let .IMessageCollectorOptions(options) = runRequest!.collectorOptions {
+                    params.batchSize = options.batchSize ?? params.batchSize
+                    params.limit = options.limit ?? params.limit
+                    if let order = options.order {
+                        params.order = order.rawValue
                     }
-                } else {
-                // Legacy support: accept collector-specific keys at top-level
-                    if let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
-                        params.mode = json["mode"] as? String ?? params.mode
-                        // Support legacy aliases for batch size (batch_size, limit)
-                        params.batchSize = json["batch_size"] as? Int ?? json["limit"] as? Int ?? params.batchSize
-                        params.limit = json["limit"] as? Int ?? params.limit
-                        params.order = json["order"] as? String ?? params.order
-                        params.threadLookbackDays = json["thread_lookback_days"] as? Int ?? params.threadLookbackDays
-                        params.messageLookbackDays = json["message_lookback_days"] as? Int ?? params.messageLookbackDays
-                        params.chatDbPath = json["chat_db_path"] as? String ?? params.chatDbPath
-
-                        // Optional date_range (legacy) or top-level since/until
-                        let iso = ISO8601DateFormatter()
-                        if let dr = json["date_range"] as? [String: Any] {
-                            if let s = dr["since"] as? String, let d = iso.date(from: s) { params.since = d }
-                            if let u = dr["until"] as? String, let d = iso.date(from: u) { params.until = d }
-                        }
-                        if let s = json["since"] as? String, let d = iso.date(from: s) { params.since = d }
-                        if let u = json["until"] as? String, let d = iso.date(from: u) { params.until = d }
-                    }
+                    params.threadLookbackDays = options.threadLookbackDays ?? params.threadLookbackDays
+                    params.messageLookbackDays = options.messageLookbackDays ?? params.messageLookbackDays
+                    params.chatDbPath = options.chatDbPath ?? params.chatDbPath
+                }
+            } catch {
+                logger.error("Failed to decode RunRequest", metadata: ["error": error.localizedDescription])
+                return HTTPResponse.badRequest(message: "Invalid request format: \(error.localizedDescription)")
             }
         }
         
@@ -296,41 +260,74 @@ public actor IMessageHandler {
                 "duration_ms": String(stats.durationMs ?? 0)
             ])
             
-            // Build response
-            // Add earliest/latest touched timestamps at top level for easy consumption
-            var response: [String: Any] = [
-                "status": failureCount == 0 ? "success" : "partial",
-                "posted": successCount,
-                "failed": failureCount,
-                "stats": stats.toDict
-            ]
-            if let earliest = stats.earliestMessageTimestamp {
-                response["earliest_touched_message_timestamp"] = appleEpochToISO8601(earliest)
-                // Standardized adapter field
-                response["earliest_touched"] = appleEpochToISO8601(earliest)
+            // Build RunResponse
+            let runId = UUID().uuidString
+            
+            // Create requested from original request body
+            let requested: OpenAPIObjectContainer
+            if let body = request.body, !body.isEmpty {
+                let jsonObject = try JSONSerialization.jsonObject(with: body)
+                if let dict = jsonObject as? [String: Sendable] {
+                    requested = try OpenAPIObjectContainer(unvalidatedValue: dict)
+                } else {
+                    requested = OpenAPIObjectContainer()
+                }
             } else {
-                // Ensure adapter payload always contains the key (null when unknown)
-                response["earliest_touched_message_timestamp"] = NSNull()
-                response["earliest_touched"] = NSNull()
+                requested = OpenAPIObjectContainer()
+            }
+            
+            // Create effective parameters
+            var effectiveDict: [String: Sendable] = [
+                "mode": params.mode,
+                "limit": params.limit as Any as Sendable,
+                "order": params.order as Any as Sendable
+            ]
+            if let since = params.since {
+                effectiveDict["since"] = since
+            }
+            if let until = params.until {
+                effectiveDict["until"] = until
+            }
+            if params.batchSize != 0 {
+                effectiveDict["batch_size"] = params.batchSize
+            }
+            let effective = try OpenAPIObjectContainer(unvalidatedValue: effectiveDict)
+            
+            // Create state with coverage info
+            var stateDict: [String: Sendable] = [:]
+            if let earliest = stats.earliestMessageTimestamp {
+                stateDict["earliest_touched"] = appleEpochToISO8601(earliest)
             }
             if let latest = stats.latestMessageTimestamp {
-                response["latest_touched_message_timestamp"] = appleEpochToISO8601(latest)
-                // Standardized adapter field
-                response["latest_touched"] = appleEpochToISO8601(latest)
-            } else {
-                response["latest_touched_message_timestamp"] = NSNull()
-                response["latest_touched"] = NSNull()
+                stateDict["latest_touched"] = appleEpochToISO8601(latest)
             }
-
-            // Adapter-standard fields for RunRouter normalization
-            response["scanned"] = stats.messagesProcessed
-            response["matched"] = stats.documentsCreated
-            response["submitted"] = successCount
-            response["skipped"] = failureCount
-            response["warnings"] = [String]()
-            response["errors"] = failureCount > 0 ? ["Some documents failed to post"] : [String]()
-
-            let responseData = try JSONSerialization.data(withJSONObject: response, options: [.prettyPrinted, .sortedKeys])
+            let state = try OpenAPIObjectContainer(unvalidatedValue: stateDict)
+            
+            // Create stats
+            let statsPayload = Components.Schemas.RunResponse.StatsPayload(
+                scanned: stats.messagesProcessed,
+                submitted: successCount,
+                skippedDuplicate: nil, // Not tracked
+                failed: failureCount,
+                retryableErrors: nil, // Not tracked
+                elapsedMs: stats.durationMs
+            )
+            
+            let runResponse = Components.Schemas.RunResponse(
+                runId: runId,
+                collector: "imessage",
+                mode: runRequest?.mode ?? .real, // Default to real if no request
+                requested: requested,
+                effective: effective,
+                state: state,
+                cursorNext: nil, // Not implemented
+                stats: statsPayload,
+                deprecatedAliasesUsed: nil // Not tracked
+            )
+            
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let responseData = try encoder.encode(runResponse)
 
             return HTTPResponse(
                 statusCode: 200,

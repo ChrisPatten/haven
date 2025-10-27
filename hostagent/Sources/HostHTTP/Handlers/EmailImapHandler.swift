@@ -1,5 +1,6 @@
 import Foundation
 import HavenCore
+@_spi(Generated) import OpenAPIRuntime
 import Email
 import HostAgentEmail
 import IMAP
@@ -37,22 +38,75 @@ public actor EmailImapHandler {
             return HTTPResponse.badRequest(message: "mail_imap module is disabled")
         }
         
-        let runRequest: ImapRunRequest
-        do {
-            runRequest = try decodeRunRequest(request)
-        } catch {
-            logger.warning("Failed to decode IMAP run request", metadata: ["error": error.localizedDescription])
-            return HTTPResponse.badRequest(message: "Invalid request payload")
+        // Parse OpenAPI-generated RunRequest
+        var runRequest: Components.Schemas.RunRequest?
+        if let body = request.body, !body.isEmpty {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            do {
+                runRequest = try decoder.decode(Components.Schemas.RunRequest.self, from: body)
+            } catch {
+                logger.warning("Failed to decode RunRequest", metadata: ["error": error.localizedDescription])
+                return HTTPResponse.badRequest(message: "Invalid request format: \(error.localizedDescription)")
+            }
         }
         
-        guard let account = selectAccount(identifier: runRequest.accountId) else {
+        // Extract parameters from RunRequest
+        var accountId: String?
+        var folder: String?
+        var limit: Int?
+        var maxLimit: Int?
+        var order: String?
+        var reset: Bool?
+        var sinceDate: Date?
+        var beforeDate: Date?
+        var dryRun: Bool = false
+        var concurrency: Int = 4
+        var credentials: ImapCredentials?
+        let batchSize: Int? = nil // IMAP doesn't expose batchSize in collector options
+        
+        if let req = runRequest {
+            // Top-level fields
+            limit = req.limit
+            order = req.order.rawValue
+            concurrency = req.concurrency ?? 4
+            
+            // Date range
+            if let dateRange = req.dateRange {
+                sinceDate = dateRange.since
+                beforeDate = dateRange.until
+            }
+            
+            // Mode -> dryRun
+            dryRun = (req.mode == .simulate)
+            
+            // Handle collector-specific options
+            if case let .ImapCollectorOptions(options) = req.collectorOptions {
+                reset = options.reset
+                dryRun = options.dryRun ?? dryRun
+                folder = options.folder ?? options.mailbox
+                accountId = options.accountId
+                maxLimit = options.maxLimit
+                
+                // Handle credentials
+                if let creds = options.credentials {
+                    credentials = ImapCredentials(
+                        kind: creds.kind.rawValue,
+                        secret: creds.secret,
+                        secretRef: creds.secretRef
+                    )
+                }
+            }
+        }
+        
+        guard let account = selectAccount(identifier: accountId) else {
             return HTTPResponse.badRequest(message: "IMAP account not found")
         }
         
         // Determine folders to process: explicit folder in the request wins, otherwise
         // process all configured folders (or INBOX if none configured).
         let foldersToProcess: [String]
-        if let reqFolder = runRequest.folder, !reqFolder.isEmpty {
+        if let reqFolder = folder, !reqFolder.isEmpty {
             foldersToProcess = [reqFolder]
         } else if !account.folders.isEmpty {
             foldersToProcess = account.folders
@@ -61,23 +115,19 @@ public actor EmailImapHandler {
         }
 
         // limit: if omitted or 0 -> unlimited. If provided >0, honor it but clamp to maxLimit when maxLimit > 0.
-        let providedLimit = runRequest.limit ?? 0
-        let maxLimit = runRequest.maxLimit ?? 0
+        let providedLimit = limit ?? 0
+        let maxLimitValue = maxLimit ?? 0
         let globalLimit: Int
         if providedLimit == 0 {
             globalLimit = 0 // 0 means unlimited
-        } else if maxLimit > 0 {
-            globalLimit = min(max(providedLimit, 1), maxLimit)
+        } else if maxLimitValue > 0 {
+            globalLimit = min(max(providedLimit, 1), maxLimitValue)
         } else {
             globalLimit = max(providedLimit, 1)
         }
-        let fetchConcurrency = max(1, min(runRequest.concurrency ?? 4, 12))
-        let dryRun = runRequest.dryRun ?? false
+        let fetchConcurrency = max(1, min(concurrency, 12))
 
-        let sinceDate = runRequest.since
-        let beforeDate = runRequest.before
-
-        guard let authResolution = resolveAuth(for: account, request: runRequest) else {
+        guard let authResolution = resolveAuth(for: account, credentials: credentials) else {
             return HTTPResponse.badRequest(message: "Unable to resolve IMAP credentials")
         }
 
@@ -123,7 +173,7 @@ public actor EmailImapHandler {
                     logger.warning("Failed to load IMAP account state", metadata: ["account": account.responseIdentifier, "folder": folder, "error": error.localizedDescription])
                 }
 
-                if runRequest.reset ?? false {
+                if reset == true {
                     logger.info("IMAP run requested reset; ignoring persisted last_processed_uid", metadata: ["account": account.responseIdentifier, "folder": folder])
                     lastProcessedUid = 0
                 }
@@ -131,9 +181,9 @@ public actor EmailImapHandler {
                 let orderedUIDs = Self.composeProcessingOrder(
                     searchResultAsc: uidsSortedAsc,
                     lastProcessedUid: lastProcessedUid,
-                    order: runRequest.order,
-                    since: runRequest.since,
-                    before: runRequest.before,
+                    order: order,
+                    since: sinceDate,
+                    before: beforeDate,
                     oldestCachedUid: earliestProcessedUidCache
                 )
 
@@ -146,14 +196,14 @@ public actor EmailImapHandler {
                 var earliestProcessedUid: UInt32? = nil
 
                 let sourcePrefix = "email_imap/\(account.responseIdentifier)"
-                let defaultBatchSize = runRequest.batchSize ?? 200
-                let batchSize = max(1, defaultBatchSize)
+                let defaultBatchSize = batchSize ?? 200
+                let fetchBatchSize = max(1, defaultBatchSize)
 
                 var processedSoFar = 0
                 var stopProcessing = false
                 while processedSoFar < orderedUIDs.count && !stopProcessing {
                     let remaining = orderedUIDs.count - processedSoFar
-                    let thisBatchSize = min(batchSize, remaining)
+                    let thisBatchSize = min(fetchBatchSize, remaining)
                     let startIndex = processedSoFar
                     let endIndex = processedSoFar + thisBatchSize
                     let batchUIDs = Array(orderedUIDs[startIndex..<endIndex])
@@ -317,143 +367,101 @@ public actor EmailImapHandler {
             results: resultsAll,
             errors: errorsAll
         )
-        return encodeResponse(response, earliestTouched: earliestTouchedGlobal, latestTouched: latestTouchedGlobal)
+        
+        // Build RunResponse
+        let runId = UUID().uuidString
+        
+        // Create requested from original request body
+        let requested: OpenAPIObjectContainer
+        do {
+            if let body = request.body, !body.isEmpty {
+                let jsonObject = try JSONSerialization.jsonObject(with: body)
+                if let dict = jsonObject as? [String: Sendable] {
+                    requested = try OpenAPIObjectContainer(unvalidatedValue: dict)
+                } else {
+                    requested = OpenAPIObjectContainer()
+                }
+            } else {
+                requested = OpenAPIObjectContainer()
+            }
+        } catch {
+            logger.error("Failed to parse request body for RunResponse", metadata: ["error": error.localizedDescription])
+            requested = OpenAPIObjectContainer()
+        }
+        
+        // Create effective parameters
+        var effectiveDict: [String: Sendable] = [
+            "account_id": accountId as Any as Sendable,
+            "folder": folder as Any as Sendable,
+            "limit": limit as Any as Sendable,
+            "order": order as Any as Sendable
+        ]
+        if let since = sinceDate {
+            effectiveDict["since"] = since
+        }
+        if let before = beforeDate {
+            effectiveDict["before"] = before
+        }
+        if let bs = batchSize {
+            effectiveDict["batch_size"] = bs
+        }
+        
+        let effective: OpenAPIObjectContainer
+        let state: OpenAPIObjectContainer
+        do {
+            effective = try OpenAPIObjectContainer(unvalidatedValue: effectiveDict)
+            
+            // Create state with coverage info
+            var stateDict: [String: Sendable] = [:]
+            if let earliest = earliestTouchedGlobal {
+                stateDict["earliest_touched"] = RunResponse.iso8601UTC(earliest)
+            }
+            if let latest = latestTouchedGlobal {
+                stateDict["latest_touched"] = RunResponse.iso8601UTC(latest)
+            }
+            state = try OpenAPIObjectContainer(unvalidatedValue: stateDict)
+        } catch {
+            logger.error("Failed to create OpenAPIObjectContainer", metadata: ["error": error.localizedDescription])
+            return HTTPResponse.internalError(message: "Failed to build response containers")
+        }
+        
+        // Create stats
+        let statsPayload = Components.Schemas.RunResponse.StatsPayload(
+            scanned: response.processed,
+            submitted: response.submitted,
+            failed: response.errors.count,
+            elapsedMs: nil // Not tracked
+        )
+        
+        let runResponse = Components.Schemas.RunResponse(
+            runId: runId,
+            collector: "email_imap",
+            mode: runRequest?.mode ?? .real,
+            requested: requested,
+            effective: effective,
+            state: state,
+            cursorNext: nil,
+            stats: statsPayload,
+            deprecatedAliasesUsed: nil
+        )
+        
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let responseData = try encoder.encode(runResponse)
+
+            return HTTPResponse(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: responseData
+            )
+        } catch {
+            logger.error("Failed to encode RunResponse", metadata: ["error": error.localizedDescription])
+            return HTTPResponse.internalError(message: "Failed to encode response")
+        }
     }
     
     // MARK: - Helpers
-    
-    private func decodeRunRequest(_ request: HTTPRequest) throws -> ImapRunRequest {
-        guard let body = request.body, !body.isEmpty else {
-            return ImapRunRequest()
-        }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-
-        // First, try to decode a lightweight local DTO matching the unified
-        // CollectorRunRequest shape for the fields we care about. We avoid
-        // importing HostAgent here to prevent circular module dependencies.
-        struct UnifiedRunDTO: Codable {
-            struct DateRange: Codable {
-                let since: Date?
-                let until: Date?
-            }
-            let limit: Int?
-            let order: String?
-            let concurrency: Int?
-            let dateRange: DateRange?
-            let mode: String?
-            let timeWindow: Int?
-            enum CodingKeys: String, CodingKey {
-                case limit, order, concurrency, mode
-                case dateRange = "date_range"
-                case timeWindow = "time_window"
-            }
-        }
-
-        if let unified = try? decoder.decode(UnifiedRunDTO.self, from: body) {
-            var mapped = ImapRunRequest()
-            mapped.limit = unified.limit
-            mapped.order = unified.order
-            mapped.concurrency = unified.concurrency
-            mapped.since = unified.dateRange?.since
-            mapped.before = unified.dateRange?.until
-            // mode.simulate -> dry run
-            if let m = unified.mode {
-                mapped.dryRun = (m == "simulate")
-            }
-            // time_window has no direct IMAP equivalent; map conservatively to batchSize
-            mapped.batchSize = unified.timeWindow
-            // Allow collector-specific options to be passed under `collector_options`.
-            if let json = try? JSONSerialization.jsonObject(with: body, options: []) as? [String: Any],
-               let coll = json["collector_options"] as? [String: Any] {
-                if let r = coll["reset"] as? Bool {
-                    mapped.reset = r
-                }
-                // Support dry_run variants
-                if let dr = coll["dry_run"] as? Bool {
-                    mapped.dryRun = dr
-                } else if let dr = coll["dryRun"] as? Bool {
-                    mapped.dryRun = dr
-                }
-                // Map collector_options.folder -> imap run folder (also accept mailbox)
-                if let f = coll["folder"] as? String {
-                    mapped.folder = f
-                } else if let f = coll["mailbox"] as? String {
-                    mapped.folder = f
-                }
-                // Allow mapping of account identifier
-                if let a = coll["account_id"] as? String {
-                    mapped.accountId = a
-                } else if let a = coll["accountId"] as? String {
-                    mapped.accountId = a
-                }
-                // Map max limit (clamp applied later)
-                if let m = coll["max_limit"] as? Int {
-                    mapped.maxLimit = m
-                } else if let m = coll["maxLimit"] as? Int {
-                    mapped.maxLimit = m
-                }
-                // Map nested credentials object if provided
-                if let creds = coll["credentials"] as? [String: Any] {
-                    var c = ImapRunRequest.Credentials()
-                    if let k = creds["kind"] as? String { c.kind = k }
-                    if let s = creds["secret"] as? String { c.secret = s }
-                    if let sr = creds["secret_ref"] as? String { c.secretRef = sr }
-                    if let sr = creds["secretRef"] as? String { c.secretRef = sr }
-                    mapped.credentials = c
-                }
-            }
-            return mapped
-        }
-
-        // Fallback: try to decode the IMAP-specific DTO directly. This branch
-        // maintains backwards compatibility for callers that send the adapter-
-        // specific request shape. When this succeeds we still accept an optional
-        // nested `collector_options` object to provide extra hints like reset.
-        if var specific = try? decoder.decode(ImapRunRequest.self, from: body) {
-            if let json = try? JSONSerialization.jsonObject(with: body, options: []) as? [String: Any],
-               let coll = json["collector_options"] as? [String: Any] {
-                if let r = coll["reset"] as? Bool {
-                    specific.reset = r
-                }
-                if let dr = coll["dry_run"] as? Bool {
-                    specific.dryRun = dr
-                } else if let dr = coll["dryRun"] as? Bool {
-                    specific.dryRun = dr
-                }
-                // Allow callers to specify collector-specific options under collector_options
-                if let f = coll["folder"] as? String {
-                    specific.folder = f
-                } else if let f = coll["mailbox"] as? String {
-                    specific.folder = f
-                }
-                if let a = coll["account_id"] as? String {
-                    specific.accountId = a
-                } else if let a = coll["accountId"] as? String {
-                    specific.accountId = a
-                }
-                if let m = coll["max_limit"] as? Int {
-                    specific.maxLimit = m
-                } else if let m = coll["maxLimit"] as? Int {
-                    specific.maxLimit = m
-                }
-                if let creds = coll["credentials"] as? [String: Any] {
-                    var c = ImapRunRequest.Credentials()
-                    if let k = creds["kind"] as? String { c.kind = k }
-                    if let s = creds["secret"] as? String { c.secret = s }
-                    if let sr = creds["secret_ref"] as? String { c.secretRef = sr }
-                    if let sr = creds["secretRef"] as? String { c.secretRef = sr }
-                    specific.credentials = c
-                }
-            }
-            return specific
-        }
-
-        // If we reached here, throw the decoding error from a strict decode to provide
-        // a helpful diagnostic to the caller.
-        return try decoder.decode(ImapRunRequest.self, from: body)
-    }
     
     private func selectAccount(identifier: String?) -> MailImapAccountConfig? {
         let accounts = config.modules.mailImap.accounts
@@ -464,11 +472,17 @@ public actor EmailImapHandler {
         return accounts.first { $0.id == identifier }
     }
     
-    private func resolveAuth(for account: MailImapAccountConfig, request: ImapRunRequest) -> AuthResolution? {
+    private struct ImapCredentials {
+        var kind: String?
+        var secret: String?
+        var secretRef: String?
+    }
+    
+    private func resolveAuth(for account: MailImapAccountConfig, credentials: ImapCredentials?) -> AuthResolution? {
         var resolvers: [any SecretResolving] = []
-        var secretRef = request.credentials?.secretRef ?? account.auth.secretRef
+        var secretRef = credentials?.secretRef ?? account.auth.secretRef
         
-        if let inlineSecret = request.credentials?.secret, !inlineSecret.isEmpty {
+        if let inlineSecret = credentials?.secret, !inlineSecret.isEmpty {
             let inlineRef = "inline://\(UUID().uuidString)"
             resolvers.append(InlineSecretResolver(storage: [inlineRef: Data(inlineSecret.utf8)]))
             secretRef = inlineRef
@@ -479,7 +493,7 @@ public actor EmailImapHandler {
             return nil
         }
         
-        let kind = (request.credentials?.kind ?? account.auth.kind).lowercased()
+        let kind = (credentials?.kind ?? account.auth.kind).lowercased()
         let auth: ImapSessionConfiguration.Auth
         switch kind {
         case "app_password", "app-password", "password", "basic":
@@ -556,27 +570,6 @@ public actor EmailImapHandler {
     private struct AuthResolution {
         let auth: ImapSessionConfiguration.Auth
         let resolver: SecretResolving
-    }
-    
-    private struct ImapRunRequest: Decodable {
-        struct Credentials: Decodable {
-            var kind: String?
-            var secret: String?
-            var secretRef: String?
-        }
-        
-        var accountId: String?
-        var folder: String?
-        var limit: Int?
-        var maxLimit: Int?
-        var order: String?
-        var reset: Bool?
-        var batchSize: Int?
-        var since: Date?
-        var before: Date?
-        var dryRun: Bool?
-        var concurrency: Int?
-        var credentials: Credentials?
     }
     
     private struct ImapRunResponse: Encodable {
