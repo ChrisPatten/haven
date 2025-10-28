@@ -1,6 +1,9 @@
 # Default configuration for Haven Host Agent
 port: 7090
 
+# Default limit for collector runs when not specified in POST requests
+default_limit: 1000
+
 auth:
   header: x-auth
   secret: changeme  # CHANGE THIS IN PRODUCTION!
@@ -33,7 +36,6 @@ logging:
 modules:
   imessage:
     enabled: true
-    batch_size: 500
     ocr_enabled: true
     # chat_db_path: Path to chat.db (defaults to ~/Library/Messages/chat.db)
     # For development without Full Disk Access, copy chat.db to ~/.haven/chat.db

@@ -68,7 +68,7 @@ public actor EmailImapHandler {
         
         if let req = runRequest {
             // Top-level fields
-            limit = req.limit
+            limit = req.limit ?? config.defaultLimit
             order = req.order.rawValue
             concurrency = req.concurrency ?? 4
             
@@ -79,7 +79,7 @@ public actor EmailImapHandler {
             }
             
             // Mode -> dryRun
-            dryRun = (req.mode == .simulate)
+            dryRun = ((req.mode ?? .real) == .simulate)
             
             // Handle collector-specific options
             if case let .ImapCollectorOptions(options) = req.collectorOptions {
@@ -160,7 +160,18 @@ public actor EmailImapHandler {
         // early if globalLimit is reached.
         func processFolder(_ folder: String, remainingGlobalLimit: Int) async -> (totalFound: Int, processed: Int, submitted: Int, results: [ImapMessageResult], errors: [ImapRunError], earliestTouched: Date?, latestTouched: Date?) {
             do {
+                logger.info("Starting IMAP search", metadata: [
+                    "account": account.responseIdentifier,
+                    "folder": folder,
+                    "since": sinceDate?.description ?? "nil",
+                    "before": beforeDate?.description ?? "nil"
+                ])
                 let searchResult = try await imapSession.searchMessages(folder: folder, since: sinceDate, before: beforeDate)
+                logger.info("IMAP search completed", metadata: [
+                    "account": account.responseIdentifier,
+                    "folder": folder,
+                    "found_count": "\(searchResult.count)"
+                ])
                 let uidsSortedAsc = searchResult.sorted()
 
                 var lastProcessedUid: UInt32 = 0
@@ -187,6 +198,13 @@ public actor EmailImapHandler {
                     before: beforeDate,
                     oldestCachedUid: earliestProcessedUidCache
                 )
+
+                logger.info("Processing order determined", metadata: [
+                    "account": account.responseIdentifier,
+                    "folder": folder,
+                    "ordered_count": "\(orderedUIDs.count)",
+                    "last_processed_uid": "\(lastProcessedUid)"
+                ])
 
                 var processedCount = 0
                 var submittedCount = 0
@@ -338,6 +356,13 @@ public actor EmailImapHandler {
             let remainingAllowed = (globalLimit > 0) ? max(0, globalLimit - submittedSum) : 0
             let folderResult = await processFolder(folder, remainingGlobalLimit: remainingAllowed)
 
+            logger.info("Folder processing completed", metadata: [
+                "folder": folder,
+                "totalFound": "\(folderResult.totalFound)",
+                "processed": "\(folderResult.processed)",
+                "submitted": "\(folderResult.submitted)"
+            ])
+
             totalFoundSum += folderResult.totalFound
             processedSum += folderResult.processed
             submittedSum += folderResult.submitted
@@ -369,97 +394,8 @@ public actor EmailImapHandler {
             errors: errorsAll
         )
         
-        // Build RunResponse
-        let runId = UUID().uuidString
-        
-        // Create requested from original request body
-        let requested: OpenAPIObjectContainer
-        do {
-            if let body = request.body, !body.isEmpty {
-                let jsonObject = try JSONSerialization.jsonObject(with: body)
-                if let dict = jsonObject as? [String: Sendable] {
-                    requested = try OpenAPIObjectContainer(unvalidatedValue: dict)
-                } else {
-                    requested = OpenAPIObjectContainer()
-                }
-            } else {
-                requested = OpenAPIObjectContainer()
-            }
-        } catch {
-            logger.error("Failed to parse request body for RunResponse", metadata: ["error": error.localizedDescription])
-            requested = OpenAPIObjectContainer()
-        }
-        
-        // Create effective parameters
-        var effectiveDict: [String: Sendable] = [
-            "account_id": accountId as Any as Sendable,
-            "folder": folder as Any as Sendable,
-            "limit": limit as Any as Sendable,
-            "order": order as Any as Sendable
-        ]
-        if let since = sinceDate {
-            effectiveDict["since"] = since
-        }
-        if let before = beforeDate {
-            effectiveDict["before"] = before
-        }
-        if let bs = batchSize {
-            effectiveDict["batch_size"] = bs
-        }
-        
-        let effective: OpenAPIObjectContainer
-        let state: OpenAPIObjectContainer
-        do {
-            effective = try OpenAPIObjectContainer(unvalidatedValue: effectiveDict)
-            
-            // Create state with coverage info
-            var stateDict: [String: Sendable] = [:]
-            if let earliest = earliestTouchedGlobal {
-                stateDict["earliest_touched"] = RunResponse.iso8601UTC(earliest)
-            }
-            if let latest = latestTouchedGlobal {
-                stateDict["latest_touched"] = RunResponse.iso8601UTC(latest)
-            }
-            state = try OpenAPIObjectContainer(unvalidatedValue: stateDict)
-        } catch {
-            logger.error("Failed to create OpenAPIObjectContainer", metadata: ["error": error.localizedDescription])
-            return HTTPResponse.internalError(message: "Failed to build response containers")
-        }
-        
-        // Create stats
-        let statsPayload = Components.Schemas.RunResponse.StatsPayload(
-            scanned: response.processed,
-            submitted: response.submitted,
-            failed: response.errors.count,
-            elapsedMs: nil // Not tracked
-        )
-        
-        let runResponse = Components.Schemas.RunResponse(
-            runId: runId,
-            collector: "email_imap",
-            mode: runRequest?.mode ?? .real,
-            requested: requested,
-            effective: effective,
-            state: state,
-            cursorNext: nil,
-            stats: statsPayload,
-            deprecatedAliasesUsed: nil
-        )
-        
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let responseData = try encoder.encode(runResponse)
-
-            return HTTPResponse(
-                statusCode: 200,
-                headers: ["Content-Type": "application/json"],
-                body: responseData
-            )
-        } catch {
-            logger.error("Failed to encode RunResponse", metadata: ["error": error.localizedDescription])
-            return HTTPResponse.internalError(message: "Failed to encode response")
-        }
+        // Return adapter-format response that RunRouter can wrap in RunResponse envelope
+        return encodeResponse(response, earliestTouched: earliestTouchedGlobal, latestTouched: latestTouchedGlobal)
     }
     
     // MARK: - Helpers

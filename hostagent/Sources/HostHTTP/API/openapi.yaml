@@ -76,14 +76,17 @@ components:
     # ---------------- Core request ----------------
     RunRequest:
       type: object
-      required: [mode, limit, order]
+      required: [order]
       additionalProperties: false
       properties:
         mode:
           $ref: '#/components/schemas/RunMode'
+          default: real
         limit:
           type: integer
           minimum: 1
+          nullable: true
+          description: Maximum number of records to process. If omitted or null, process all available records.
         order:
           $ref: '#/components/schemas/RunOrder'
         concurrency:
@@ -140,7 +143,6 @@ components:
       type: object
       additionalProperties: true
       properties:
-        batch_size: { type: integer, minimum: 1 }
         limit:      { type: integer, minimum: 1, description: "Overrides top-level limit for message count." }
         order:      { $ref: '#/components/schemas/RunOrder' }
         thread_lookback_days:  { type: integer, minimum: 0 }

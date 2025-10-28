@@ -10,9 +10,8 @@ public struct IMessageRunRequest: Codable {
     public let concurrency: Int
     public let dryRun: Bool
     public let limit: Int?
-    public let batchSize: Int
 
-    public init(since: Date?, until: Date?, order: CollectorRunRequest.Order, threadLookbackDays: Int, concurrency: Int, dryRun: Bool, limit: Int?, batchSize: Int) {
+    public init(since: Date?, until: Date?, order: CollectorRunRequest.Order, threadLookbackDays: Int, concurrency: Int, dryRun: Bool, limit: Int?) {
         self.since = since
         self.until = until
         self.order = order
@@ -20,7 +19,6 @@ public struct IMessageRunRequest: Codable {
         self.concurrency = concurrency
         self.dryRun = dryRun
         self.limit = limit
-        self.batchSize = batchSize
     }
 }
 
@@ -28,7 +26,6 @@ public struct IMessageRunRequest: Codable {
 public struct IMessageRunAdapter {
     // Defaults chosen to match existing iMessage collector behaviour
     private static let defaultThreadLookbackDays = 90
-    private static let defaultBatchSize = 500
     private static let minConcurrency = 1
     private static let maxConcurrency = 12
 
@@ -43,7 +40,7 @@ public struct IMessageRunAdapter {
         // Date precedence: date_range overrides time_window
         var since: Date? = nil
         var until: Date? = nil
-        var threadLookbackDays = defaultThreadLookbackDays
+        let threadLookbackDays = defaultThreadLookbackDays
 
         if let dr = dto.dateRange {
             // Use explicit date_range values (may be nil individually)
@@ -64,7 +61,6 @@ public struct IMessageRunAdapter {
         let dryRun = dto.mode == .simulate
 
         let limit = dto.limit
-        let batchSize = defaultBatchSize
 
         return IMessageRunRequest(
             since: since,
@@ -73,8 +69,7 @@ public struct IMessageRunAdapter {
             threadLookbackDays: threadLookbackDays,
             concurrency: concurrency,
             dryRun: dryRun,
-            limit: limit,
-            batchSize: batchSize
+            limit: limit
         )
     }
 }

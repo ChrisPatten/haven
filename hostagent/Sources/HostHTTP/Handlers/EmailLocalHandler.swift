@@ -935,7 +935,7 @@
     
     private func parseParameters(from request: HTTPRequest) throws -> RunParameters {
         var mode = "real"
-        var limit = 100
+        var limit = config.defaultLimit
         var simulatePath: String?
         var order: String?
         var since: Date?
@@ -950,6 +950,9 @@
                 }
                 if let providedLimit = runRequest.limit {
                     limit = providedLimit
+                } else {
+                    // If no limit provided, keep the config default
+                    // This ensures that any limit set in POST request overrides the config default
                 }
                 // If both paths provided, that's an error. Otherwise prefer source_path (real) over simulate_path (dry-run).
                 let providedSource = runRequest.sourcePath?.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -93,7 +93,7 @@ let package = Package(
                 .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime")
             ],
             path: "Sources/HostHTTP",
-            exclude: ["Handlers/EmailLocalHandler.swift"],
+            exclude: ["Handlers/EmailLocalHandler.swift", "Handlers/EmailLocalHandler.swift.removed"],
             resources: [
                 .process("API/openapi.yaml")
             ],
@@ -125,9 +125,6 @@ let package = Package(
             sources: [
                 "Collectors",
                 "Submission"
-            ],
-            resources: [
-                .process("Resources/Collectors/schemas/collector_run_request.schema.json")
             ]
         ),
         .testTarget(

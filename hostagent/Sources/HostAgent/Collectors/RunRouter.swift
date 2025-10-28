@@ -101,9 +101,6 @@ public struct RunRouter {
                 }
 
                 obj["inner_status_code"] = inner.statusCode
-                if let body = inner.body, let s = String(data: body, encoding: .utf8) {
-                    obj["inner_body"] = s
-                }
                 let finalData = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .prettyPrinted])
                 return HTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: finalData)
             }

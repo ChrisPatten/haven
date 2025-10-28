@@ -21,11 +21,11 @@ build:
 
 # Build release version
 release:
-	swift build -c release
+	arch -x86_64 swift build -c release
 
 # Run tests
 test:
-	swift test
+	arch -x86_64 swift test
 
 # Clean build artifacts
 clean:

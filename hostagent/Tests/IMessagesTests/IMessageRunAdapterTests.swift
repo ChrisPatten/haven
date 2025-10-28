@@ -19,7 +19,6 @@ final class IMessageRunAdapterTests: XCTestCase {
         let mapped = IMessageRunAdapter.toIMessageRequest(req)
 
         XCTAssertEqual(mapped.order, CollectorRunRequest.Order.desc)
-        XCTAssertEqual(mapped.batchSize, 500)
         XCTAssertEqual(mapped.threadLookbackDays, 90)
 
         let expectedSince = iso8601("2025-01-01T00:00:00Z")

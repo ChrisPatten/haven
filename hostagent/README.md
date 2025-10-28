@@ -179,22 +179,29 @@ Response:
 ### iMessage Collector
 
 ```bash
-# Backfill historical messages
+# Process all available messages (unlimited)
+POST /v1/collectors/imessage:run
+Content-Type: application/json
+
+{}
+
+# Process with specific limit (works in 500-record batches)
 POST /v1/collectors/imessage:run
 Content-Type: application/json
 
 {
-  "mode": "backfill",
-  "batch_size": 500,
-  "max_rows": 10000
+  "limit": 10000
 }
 
-# Tail new messages
+# Process with date constraints
 POST /v1/collectors/imessage:run
+Content-Type: application/json
 
 {
-  "mode": "tail",
-  "batch_size": 200
+  "date_range": {
+    "since": "2024-01-01T00:00:00Z",
+    "until": "2024-12-31T23:59:59Z"
+  }
 }
 
 # Check state
@@ -241,6 +248,21 @@ Environment variables override file settings:
 - `HAVEN_GATEWAY_URL` - Gateway base URL
 - `HAVEN_LOG_LEVEL` - Log level (debug, info, warning, error)
 
+### Processing Limits
+
+The iMessage collector processes records in batches of 500, posting each batch to the gateway before continuing. This ensures efficient memory usage and provides progress feedback.
+
+**Behavior:**
+- **Unlimited processing**: Omit the `limit` field or set it to `null` - processes all available records
+- **Limited processing**: Set `limit` to a specific number (e.g., `"limit": 10000`) - stops when limit is reached
+- **Date constraints**: Use `date_range` to limit processing to specific time periods
+- **Natural stopping**: Processing stops when date bounds are reached or no more messages are available
+
+**Examples:**
+- `{"limit": 10000}` - Processes up to 10,000 records in 20 batches of 500 each
+- `{"limit": 1500}` - Processes 1,500 records in 3 batches (500 + 500 + 500)
+- `{}` - Processes all available records in batches of 500
+
 ### Module Configuration
 
 Each module can be enabled/disabled and configured independently:
@@ -249,7 +271,6 @@ Each module can be enabled/disabled and configured independently:
 modules:
   imessage:
     enabled: true          # Enable iMessage collection
-    batch_size: 500        # Messages per batch
     ocr_enabled: true      # Enable image OCR enrichment
   
   ocr:
@@ -372,11 +393,11 @@ curl -H "x-auth: changeme" \
 
 ### Benchmarks
 
-- **iMessage backfill**: >= 10k messages/hour with OCR enabled
+- **iMessage processing**: >= 10k messages/hour with OCR enabled
 - **Tail latency**: <= 5s p50 for new message detection  
 - **OCR latency**: <= 1.5s p50 for 5MB images
 - **Memory footprint**: <= 500MB resident
-- **CPU usage**: <= 20% average during backfill
+- **CPU usage**: <= 20% average during processing
 
 ### Optimizations
 
@@ -425,14 +446,13 @@ curl -H "x-auth: changeme" \
 1. Increase `timeout_ms` in config
 2. Check image size (large images take longer)
 3. Monitor CPU usage (throttling affects performance)
-4. Consider disabling OCR for backfill: `ocr_enabled: false`
+4. Consider disabling OCR for large processing runs: `ocr_enabled: false`
 
 ### High memory usage
 
-1. Reduce `batch_size` for iMessage collector
-2. Disable unused modules
-3. Check for FSEvents leaks (file watch accumulation)
-4. Restart agent periodically via LaunchAgent
+1. Disable unused modules
+2. Check for FSEvents leaks (file watch accumulation)
+3. Restart agent periodically via LaunchAgent
 
 ## Contributing
 

@@ -3,17 +3,29 @@ import Foundation
 /// Global application configuration
 public struct HavenConfig: Codable {
     public var port: Int
+    public var defaultLimit: Int
     public var auth: AuthConfig
     public var gateway: GatewayConfig
     public var modules: ModulesConfig
     public var logging: LoggingConfig
     
+    enum CodingKeys: String, CodingKey {
+        case port
+        case defaultLimit = "default_limit"
+        case auth
+        case gateway
+        case modules
+        case logging
+    }
+    
     public init(port: Int = 7090,
+                defaultLimit: Int = 100,
                 auth: AuthConfig = AuthConfig(),
                 gateway: GatewayConfig = GatewayConfig(),
                 modules: ModulesConfig = ModulesConfig(),
                 logging: LoggingConfig = LoggingConfig()) {
         self.port = port
+        self.defaultLimit = defaultLimit
         self.auth = auth
         self.gateway = gateway
         self.modules = modules
@@ -143,20 +155,17 @@ public struct ModulesConfig: Codable {
 
 public struct IMessageModuleConfig: Codable {
     public var enabled: Bool
-    public var batchSize: Int
     public var ocrEnabled: Bool
     public var chatDbPath: String
     
     enum CodingKeys: String, CodingKey {
         case enabled
-        case batchSize = "batch_size"
         case ocrEnabled = "ocr_enabled"
         case chatDbPath = "chat_db_path"
     }
     
-    public init(enabled: Bool = true, batchSize: Int = 500, ocrEnabled: Bool = true, chatDbPath: String = "") {
+    public init(enabled: Bool = true, ocrEnabled: Bool = true, chatDbPath: String = "") {
         self.enabled = enabled
-        self.batchSize = batchSize
         self.ocrEnabled = ocrEnabled
         self.chatDbPath = chatDbPath
     }
@@ -164,7 +173,6 @@ public struct IMessageModuleConfig: Codable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decode(Bool.self, forKey: .enabled)
-        batchSize = try container.decode(Int.self, forKey: .batchSize)
         ocrEnabled = try container.decode(Bool.self, forKey: .ocrEnabled)
         chatDbPath = try container.decodeIfPresent(String.self, forKey: .chatDbPath) ?? ""
     }

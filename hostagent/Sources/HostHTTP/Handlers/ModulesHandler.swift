@@ -17,7 +17,6 @@ public struct ModulesHandler {
             imessage: IMessageModuleInfo(
                 enabled: config.modules.imessage.enabled,
                 config: IMessageModuleConfig(
-                    batchSize: config.modules.imessage.batchSize,
                     ocrEnabled: config.modules.imessage.ocrEnabled
                 )
             ),
@@ -123,11 +122,9 @@ struct IMessageModuleInfo: Codable {
 }
 
 struct IMessageModuleConfig: Codable {
-    let batchSize: Int
     let ocrEnabled: Bool
     
     enum CodingKeys: String, CodingKey {
-        case batchSize = "batch_size"
         case ocrEnabled = "ocr_enabled"
     }
 }

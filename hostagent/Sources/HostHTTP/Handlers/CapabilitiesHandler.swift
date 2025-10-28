@@ -27,7 +27,6 @@ public struct CapabilitiesHandler {
                     enabled: config.modules.imessage.enabled,
                     permissions: ["fda": checkFullDiskAccess()],
                     config: IMessageConfigInfo(
-                        batchSize: config.modules.imessage.batchSize,
                         ocrEnabled: config.modules.imessage.ocrEnabled
                     )
                 ),
@@ -150,11 +149,9 @@ struct FaceModuleCapability: Codable {
 }
 
 struct IMessageConfigInfo: Codable {
-    let batchSize: Int
     let ocrEnabled: Bool
     
     enum CodingKeys: String, CodingKey {
-        case batchSize = "batch_size"
         case ocrEnabled = "ocr_enabled"
     }
 }
