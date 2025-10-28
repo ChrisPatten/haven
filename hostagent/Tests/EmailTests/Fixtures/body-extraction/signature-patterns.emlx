@@ -1,0 +1,24 @@
+745
+From: sender@example.com
+To: recipient@example.com
+Subject: Email with Signature
+Date: Thu, 21 Oct 2025 10:30:00 -0400
+Message-ID: <signature@example.com>
+Content-Type: text/plain; charset=utf-8
+
+Hi there,
+
+This is the main content of the email.
+
+Let me know if you have any questions.
+
+Best regards,
+John Smith
+Senior Developer
+Acme Corporation
+
+--
+Sent from my iPhone
+Please consider the environment before printing this email.
+
+Confidentiality Notice: This email and any attachments are confidential and may be legally privileged.

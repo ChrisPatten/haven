@@ -28,7 +28,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         .package(url: "https://github.com/MailCore/mailcore2.git", branch: "master"),
         .package(url: "https://github.com/apple/swift-openapi-generator", from: "1.3.0"),
-        .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.0.0")
+        .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.0.0"),
+        .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.6.0")
     ],
     targets: [
         .target(
@@ -59,7 +60,7 @@ let package = Package(
         ),
         .target(
             name: "Email",
-            dependencies: ["HavenCore"],
+            dependencies: ["HavenCore", .product(name: "SwiftSoup", package: "SwiftSoup")],
             path: "Sources/Email"
         ),
         .target(

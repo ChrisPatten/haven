@@ -1,0 +1,10 @@
+Hi there,
+
+This is the main content of the email.
+
+Let me know if you have any questions.
+
+Best regards,
+John Smith
+Senior Developer
+Acme Corporation

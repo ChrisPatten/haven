@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import HavenCore
 import Email
+import OCR
 
 public protocol EmailCollecting: Sendable {
     func buildDocumentPayload(
@@ -126,6 +127,8 @@ public struct EmailDocumentMetadata: Codable, Equatable {
     public var inReplyTo: String?
     public var intent: EmailIntentPayload?
     public var relevanceScore: Double?
+    public var imageCaptions: [String]?
+    public var bodyProcessed: Bool?
     
     enum CodingKeys: String, CodingKey {
         case messageId = "message_id"
@@ -140,6 +143,8 @@ public struct EmailDocumentMetadata: Codable, Equatable {
         case inReplyTo = "in_reply_to"
         case intent
         case relevanceScore = "relevance_score"
+        case imageCaptions = "image_captions"
+        case bodyProcessed = "body_processed"
     }
 }
 
@@ -303,6 +308,8 @@ public actor EmailCollector {
     private let logger: HavenLogger
     private let defaultSourceType: String
     private let defaultSourceIdPrefix: String
+    private let moduleRedaction: RedactionConfig?
+    private let sourceRedaction: RedactionConfig?
     
     public init(
         gatewayConfig: GatewayConfig,
@@ -311,7 +318,9 @@ public actor EmailCollector {
         emailService: EmailService? = nil,
         logger: HavenLogger = HavenLogger(category: "email-collector"),
         sourceType: String = "email_local",
-        sourceIdPrefix: String? = nil
+        sourceIdPrefix: String? = nil,
+        moduleRedaction: RedactionConfig? = nil,
+        sourceRedaction: RedactionConfig? = nil
     ) {
         self.gatewayClient = GatewaySubmissionClient(config: gatewayConfig, authToken: authToken, session: session)
         if let providedService = emailService {
@@ -328,6 +337,8 @@ public actor EmailCollector {
         } else {
             self.defaultSourceIdPrefix = sourceType
         }
+        self.moduleRedaction = moduleRedaction
+        self.sourceRedaction = sourceRedaction
     }
     
     public func buildDocumentPayload(
@@ -342,14 +353,25 @@ public actor EmailCollector {
         let resolvedSourceIdPrefix = sourceIdPrefix ?? defaultSourceIdPrefix
         let sourceId = buildSourceId(messageId: messageId, email: email, prefix: resolvedSourceIdPrefix)
         
-        let rawBody = selectBody(from: email)
-        let normalizedBody = normalizeIngestText(rawBody)
+        // Use EmailBodyExtractor to get clean body text
+        let bodyExtractor = EmailBodyExtractor()
+        let cleanBody = bodyExtractor.extractCleanBody(from: email)
+        let normalizedBody = normalizeIngestText(cleanBody)
         guard !normalizedBody.isEmpty else {
             throw EmailCollectorError.emptyContent
         }
         
         let textHash = sha256Hex(of: normalizedBody)
-        let redacted = await emailService.redactPII(in: normalizedBody)
+        let redactionOpts = resolveRedactionOptions()
+        let redacted = await emailService.redactPII(in: normalizedBody, options: redactionOpts)
+        
+        // Extract image captions
+        let imageExtractor = EmailImageExtractor()
+        let imageCaptions = await imageExtractor.extractImageCaptions(
+            from: email,
+            attachments: email.attachments,
+            ocrService: nil // TODO: Pass OCR service when available
+        )
         
         let content = EmailDocumentContent(mimeType: "text/plain", data: redacted, encoding: nil)
         let snippet = buildSnippet(from: redacted)
@@ -376,7 +398,9 @@ public actor EmailCollector {
             references: references,
             inReplyTo: normalizeMessageId(email.inReplyTo),
             intent: intentPayload,
-            relevanceScore: relevance
+            relevanceScore: relevance,
+            imageCaptions: imageCaptions.isEmpty ? nil : imageCaptions,
+            bodyProcessed: true
         )
         
         let people = buildPeople(from: email)
@@ -491,6 +515,23 @@ public actor EmailCollector {
     
     // MARK: - Helpers
     
+    private func resolveRedactionOptions() -> RedactionOptions {
+        // Resolution order: source override → module default → true (all enabled)
+        let config = sourceRedaction ?? moduleRedaction ?? .boolean(true)
+        
+        switch config {
+        case .boolean(let enabled):
+            return RedactionOptions(
+                emails: enabled,
+                phones: enabled,
+                accountNumbers: enabled,
+                ssn: enabled
+            )
+        case .detailed(let options):
+            return options
+        }
+    }
+    
     private func buildSourceId(messageId: String?, email: EmailMessage, prefix: String) -> String {
         if let messageId, !messageId.isEmpty {
             return "\(prefix):\(messageId)"
@@ -509,31 +550,11 @@ public actor EmailCollector {
         return "\(prefix):\(sha256Hex(of: seed))"
     }
     
-    private func selectBody(from email: EmailMessage) -> String {
-        if let body = email.bodyPlainText, !body.isEmpty {
-            return body
-        }
-        if let html = email.bodyHTML {
-            return stripHTML(html)
-        }
-        return email.rawContent ?? ""
-    }
-    
     private func normalizeIngestText(_ value: String) -> String {
         return value
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    
-    private func stripHTML(_ html: String) -> String {
-        let pattern = "<[^>]+>"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return html
-        }
-        let range = NSRange(location: 0, length: html.utf16.count)
-        let stripped = regex.stringByReplacingMatches(in: html, options: [], range: range, withTemplate: " ")
-        return stripped.replacingOccurrences(of: "&nbsp;", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
     private func buildSnippet(from text: String, maxLength: Int = 280) -> String {

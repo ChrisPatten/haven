@@ -303,12 +303,28 @@ public actor EmailService {
             message.date = parseEmailDate(dateStr)
         }
         
-        // Parse body (simplified - would need full MIME parser for complex messages)
-        let contentType = headers["content-type"] ?? ""
-        if contentType.contains("text/html") {
-            message.bodyHTML = bodySection
-        } else {
-            message.bodyPlainText = bodySection
+        // Parse body using MIME parser for proper decoding
+        let mimeMessage = MIMEParser.parseMIMEMessage(normalizedContent)
+        
+        // Extract the best content from MIME parts
+        if let plainText = mimeMessage.plainTextContent {
+            message.bodyPlainText = plainText
+        }
+        if let html = mimeMessage.htmlContent {
+            message.bodyHTML = html
+        }
+        
+        // Fallback to original body if MIME parsing didn't extract content
+        if message.bodyPlainText == nil && message.bodyHTML == nil {
+            let contentType = headers["content-type"] ?? ""
+            let encoding = headers["content-transfer-encoding"]
+            let decodedBody = MIMEDecoder.decodeContent(bodySection, encoding: encoding)
+            
+            if contentType.contains("text/html") {
+                message.bodyHTML = decodedBody
+            } else {
+                message.bodyPlainText = decodedBody
+            }
         }
         
         return message
@@ -520,46 +536,59 @@ public actor EmailService {
         throw EmailServiceError.invalidEmlxFormat("Unable to decode .emlx payload as UTF-8 or ISO-8859-1")
     }
     
-    /// Redact PII from text (email addresses, phone numbers, account numbers)
-    public func redactPII(in text: String) -> String {
+    /// Redact PII from text based on specific options
+    public func redactPII(in text: String, options: RedactionOptions) -> String {
         var redacted = text
         
-        // Redact email addresses
-        redacted = redacted.replacingOccurrences(
-            of: #"[\w\.-]+@[\w\.-]+"#,
-            with: "[EMAIL_REDACTED]",
-            options: .regularExpression
-        )
-        
-        // Redact phone numbers (various formats)
-        let phonePatterns = [
-            #"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b"#,  // 555-123-4567 or 5551234567
-            #"\(\d{3}\)\s*\d{3}[-.]?\d{4}"#,     // (555) 123-4567
-            #"\+\d{1,3}\s*\d{3}[-.]?\d{3}[-.]?\d{4}"#  // +1 555-123-4567
-        ]
-        
-        for pattern in phonePatterns {
+        if options.emails {
             redacted = redacted.replacingOccurrences(
-                of: pattern,
-                with: "[PHONE_REDACTED]",
+                of: #"[\w\.-]+@[\w\.-]+"#,
+                with: "[EMAIL_REDACTED]",
                 options: .regularExpression
             )
         }
         
-        // Redact account numbers (8+ digits)
-        redacted = redacted.replacingOccurrences(
-            of: #"\b\d{8,}\b"#,
-            with: "[ACCOUNT_REDACTED]",
-            options: .regularExpression
-        )
+        if options.phones {
+            // Redact phone numbers (various formats)
+            let phonePatterns = [
+                #"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b"#,  // 555-123-4567 or 5551234567
+                #"\(\d{3}\)\s*\d{3}[-.]?\d{4}"#,     // (555) 123-4567
+                #"\+\d{1,3}\s*\d{3}[-.]?\d{3}[-.]?\d{4}"#  // +1 555-123-4567
+            ]
+            
+            for pattern in phonePatterns {
+                redacted = redacted.replacingOccurrences(
+                    of: pattern,
+                    with: "[PHONE_REDACTED]",
+                    options: .regularExpression
+                )
+            }
+        }
         
-        // Redact SSN patterns
-        redacted = redacted.replacingOccurrences(
-            of: #"\b\d{3}-\d{2}-\d{4}\b"#,
-            with: "[SSN_REDACTED]",
-            options: .regularExpression
-        )
+        if options.accountNumbers {
+            // Redact account numbers (8+ digits)
+            redacted = redacted.replacingOccurrences(
+                of: #"\b\d{8,}\b"#,
+                with: "[ACCOUNT_REDACTED]",
+                options: .regularExpression
+            )
+        }
+        
+        if options.ssn {
+            // Redact SSN patterns
+            redacted = redacted.replacingOccurrences(
+                of: #"\b\d{3}-\d{2}-\d{4}\b"#,
+                with: "[SSN_REDACTED]",
+                options: .regularExpression
+            )
+        }
         
         return redacted
+    }
+    
+    /// Redact PII from text (legacy method - redacts all types)
+    public func redactPII(in text: String) -> String {
+        let options = RedactionOptions(emails: true, phones: true, accountNumbers: true, ssn: true)
+        return redactPII(in: text, options: options)
     }
 }

@@ -65,11 +65,6 @@ public struct CapabilitiesHandler {
                     permissions: [:],
                     status: "stub"
                 ),
-                mailImap: StubModuleCapability(
-                    enabled: config.modules.mailImap.enabled,
-                    permissions: [:],
-                    status: "stub"
-                ),
                 notes: StubModuleCapability(
                     enabled: config.modules.notes.enabled,
                     permissions: [:],
@@ -104,7 +99,6 @@ struct ModulesCapabilities: Codable {
     let calendar: StubModuleCapability
     let reminders: StubModuleCapability
     let mail: StubModuleCapability
-    let mailImap: StubModuleCapability
     let notes: StubModuleCapability
     let face: FaceModuleCapability
     
@@ -116,7 +110,6 @@ struct ModulesCapabilities: Codable {
         case calendar
         case reminders
         case mail
-        case mailImap = "mail_imap"
         case notes
         case face
     }

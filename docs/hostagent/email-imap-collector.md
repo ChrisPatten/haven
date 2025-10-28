@@ -20,10 +20,15 @@ Enable the module and describe remote accounts in `~/.haven/hostagent.yaml`:
 
 ```yaml
 modules:
-  mail_imap:
+  mail:
     enabled: true
-    accounts:
+    # Module-level redaction default (applies to all sources unless overridden)
+    redact_pii: true  # or false, or detailed object
+    
+    sources:
       - id: personal-icloud
+        type: imap
+        enabled: true
         host: imap.mail.me.com
         port: 993
         tls: true
@@ -34,9 +39,50 @@ modules:
         folders:
           - INBOX
           - "Receipts"
+        redact_pii:  # Fine-grained override
+          emails: false
+          phones: true
+          account_numbers: true
+          ssn: true
 ```
 
 Secrets are resolved through the Keychain resolver using the `keychain://service/account` format. Create entries with the Keychain Access app or the `security` CLI (generic password items).
+
+## PII Redaction Configuration
+
+The IMAP collector supports configurable PII redaction at both module and source levels:
+
+**Module-level redaction** (applies to all sources unless overridden):
+```yaml
+modules:
+  mail:
+    redact_pii: true  # Enable all redaction types
+    # or
+    redact_pii: false  # Disable all redaction
+    # or
+    redact_pii:
+      emails: true
+      phones: false
+      account_numbers: true
+      ssn: true
+```
+
+**Source-level redaction** (overrides module defaults):
+```yaml
+sources:
+  - id: work-email
+    type: imap
+    redact_pii: false  # Disable redaction for this source
+  - id: personal-email
+    type: imap
+    redact_pii:  # Fine-grained control
+      emails: false
+      phones: true
+      account_numbers: true
+      ssn: true
+```
+
+**Resolution order**: source override → module default → true (all enabled)
 
 ## Running the Collector
 Call the API endpoint to start a run:

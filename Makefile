@@ -11,12 +11,7 @@ help:
 	@echo "  restart                   Restart docker compose services"
 	@echo "  rebuild [SERVICE]         Rebuild docker compose services (no-cache) and follow logs"
 	@echo "                            Optional: specify SERVICE to rebuild only that service"
-	@echo "  purge                     Stop compose and remove volumes"
-	@echo "  collector <name>          Run a collector using the env virtualenv"
-	@echo "                            Available: imessage, localfs, contacts"
-	@echo "                            Example: make collector contacts"
-	@echo "                            Example: make collector imessage ARGS=\"--simulate 'Hi'\""
-	@echo "                            Example: make collector imessage ARGS=\"--lookback=1h\""
+	@echo "  purge                     Stop compose and remove volumes; remove local caches"
 	@echo "  export-openapi            Export Gateway OpenAPI schema to openapi/gateway.yaml for Redoc"
 	@echo "  docs                      Serve MkDocs documentation at http://127.0.0.1:8000"
 	@echo "                            Optional: DOC_HOST, DOC_PORT, DOC_SITE_PATH, OPEN_BROWSER=false"
@@ -27,7 +22,8 @@ help:
 	@echo "  restore <name>            Restore from a backup (prompts for confirmation)"
 	@echo "                            Example: make restore NAME=before-migration"
 	@echo "  list-backups              List all available backups with details"
-
+	@echo "  peek                  	   Show the last document ingested by Haven"
+	
 # Rebuild docker compose services from scratch, start detached, and follow logs
 # Usage: make rebuild [SERVICE]
 # Example: make rebuild gateway (rebuilds only gateway service)
@@ -53,6 +49,7 @@ rebuild:
 
 # Remove containers, networks, volumes created by compose and clear ~/.haven
 purge:
+	@echo "Removing all data from the database..."
 	@docker compose down -v
 	@if [ -d ~/.haven ]; then \
 		echo "Removing iMessage backup..."; \
@@ -62,32 +59,6 @@ purge:
 		echo "Removing IMAP cache..."; \
 		rm -rf ~/Library/Caches/Haven/remote_mail/; \
 	fi
-
-# Run collectors from the virtualenv in env/
-# Usage: make collector <name> [-- args...]
-# Available collectors: imessage, localfs, contacts
-# Example: make collector contacts
-# Example: make collector imessage ARGS="--simulate 'Hi'"
-# Example: make collector imessage ARGS="--lookback=1h"
-collector:
-	@COLLECTOR_NAME="$(word 1,$(filter-out collector,$(MAKECMDGOALS)))"; \
-	if [ -z "$$COLLECTOR_NAME" ]; then \
-		echo "Error: Please specify a collector name"; \
-		echo "Usage: make collector <name> ARGS=\"...\""; \
-		echo "Available: imessage, localfs, contacts"; \
-		exit 1; \
-	fi; \
-	case "$$COLLECTOR_NAME" in \
-		imessage|localfs|contacts) \
-			echo "Running $$COLLECTOR_NAME collector..."; \
-			./env/bin/python ./scripts/collectors/collector_$$COLLECTOR_NAME.py $(ARGS); \
-			;; \
-		*) \
-			echo "Error: Unknown collector '$$COLLECTOR_NAME'"; \
-			echo "Available: imessage, localfs, contacts"; \
-			exit 1; \
-			;; \
-	esac
 
 # Create or activate local Python virtualenv in ./env and install local_requirements.txt
 # Usage: make local_setup
@@ -171,3 +142,5 @@ docs:
 
 install-hooks: .githooks/install-hooks
 
+peek:
+	@docker compose exec postgres psql -U postgres -d haven -t -c "SELECT text FROM documents ORDER BY ingested_at DESC LIMIT 1;"

@@ -88,7 +88,37 @@ modules:
   
   mail:
     enabled: false
-    source_path: ""
+    # Module-level redaction default (applies to all sources unless overridden)
+    redact_pii: true  # or false, or detailed object
+    
+    sources:
+      # Local Mail.app source example
+      - id: local-mailapp
+        type: local
+        enabled: false
+        source_path: ~/Library/Mail/V10/
+        redact_pii: false  # Override: don't redact for local
+      
+      # Remote IMAP source example
+      - id: personal-icloud
+        type: imap
+        enabled: false
+        host: imap.mail.me.com
+        port: 993
+        tls: true
+        username: user@example.com
+        auth:
+          kind: app_password
+          secret_ref: keychain://haven/icloud-mail
+        folders:
+          - INBOX
+        redact_pii:  # Fine-grained override
+          emails: false
+          phones: true
+          account_numbers: true
+          ssn: true
+    
+    # Existing fields for local collector backward compat
     filters:
       # combination_mode: any | all (any = message accepted if any filter matches)
       combination_mode: any
@@ -108,13 +138,12 @@ modules:
         exclude_folders: []
         vip_only: false
         require_list_unsubscribe: false
-
-  mail_imap:
-    enabled: false
-    cache:
-      dir: ~/Library/Caches/Haven/remote_mail
-      max_mb: 100
-    accounts: []
+    state:
+      clear_on_new_run: true
+      run_state_path: ~/.haven/email_collector_state_run.json
+      rejected_log_path: ~/.haven/rejected_emails.log
+      lock_file_path: ~/.haven/email_collector.lock
+      rejected_retention_days: 30
   
   notes:
     enabled: false

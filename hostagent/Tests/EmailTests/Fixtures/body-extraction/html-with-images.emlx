@@ -1,0 +1,33 @@
+745
+From: sender@example.com
+To: recipient@example.com
+Subject: HTML Email with Images
+Date: Thu, 21 Oct 2025 10:30:00 -0400
+Message-ID: <html-images@example.com>
+Content-Type: text/html; charset=utf-8
+
+<html>
+<body>
+<h2>Product Announcement</h2>
+<p>We're excited to announce our new product line!</p>
+
+<figure>
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" alt="New Product Launch" title="Product Launch Image">
+<figcaption>Our revolutionary new product that will change everything</figcaption>
+</figure>
+
+<p>Key features include:</p>
+<ul>
+<li>Advanced technology</li>
+<li>User-friendly interface</li>
+<li>24/7 support</li>
+</ul>
+
+<p>Visit our <a href="https://example.com">website</a> for more information.</p>
+
+<img src="https://example.com/logo.png" alt="Company Logo" title="Our Company Logo">
+
+<p>Best regards,<br>
+The Product Team</p>
+</body>
+</html>

@@ -163,12 +163,18 @@ Check if email metadata indicates noise/promotional content.
 
 ### POST /v1/email/redact-pii
 
-Redact personally identifiable information from text.
+Redact personally identifiable information from text with configurable options.
 
 **Request:**
 ```json
 {
-  "text": "Contact me at john@example.com or call 555-123-4567"
+  "text": "Contact me at john@example.com or call 555-123-4567",
+  "options": {
+    "emails": true,
+    "phones": true,
+    "account_numbers": false,
+    "ssn": true
+  }
 }
 ```
 
@@ -176,6 +182,20 @@ Redact personally identifiable information from text.
 ```json
 {
   "redacted_text": "Contact me at [EMAIL_REDACTED] or call [PHONE_REDACTED]"
+}
+```
+
+**Redaction Options:**
+- `emails`: Redact email addresses (default: true)
+- `phones`: Redact phone numbers in various formats (default: true)
+- `account_numbers`: Redact 8+ digit sequences (default: true)
+- `ssn`: Redact SSN patterns (default: true)
+
+You can also pass a simple boolean to enable/disable all redaction types:
+```json
+{
+  "text": "Contact me at john@example.com",
+  "options": false
 }
 ```
 
@@ -193,6 +213,36 @@ Enable the mail module in your HostAgent configuration:
 modules:
   mail:
     enabled: true
+    # Module-level redaction default (applies to all sources unless overridden)
+    redact_pii: true  # or false, or detailed object
+    
+    sources:
+      # Local Mail.app source
+      - id: local-mailapp
+        type: local
+        enabled: true
+        source_path: ~/Library/Mail/V10/
+        redact_pii: false  # Override: don't redact for local
+      
+      # Remote IMAP source
+      - id: personal-icloud
+        type: imap
+        enabled: true
+        host: imap.mail.me.com
+        port: 993
+        tls: true
+        username: user@example.com
+        auth:
+          kind: app_password
+          secret_ref: keychain://haven/icloud-mail
+        folders:
+          - INBOX
+        redact_pii:  # Fine-grained override
+          emails: false
+          phones: true
+          account_numbers: true
+          ssn: true
+    
     filters:
       combination_mode: any
       default_action: include

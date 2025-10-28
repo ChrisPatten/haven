@@ -85,7 +85,6 @@ public struct ModulesConfig: Codable {
     public var calendar: StubModuleConfig
     public var reminders: StubModuleConfig
     public var mail: MailModuleConfig
-    public var mailImap: MailImapModuleConfig
     public var notes: StubModuleConfig
     
     enum CodingKeys: String, CodingKey {
@@ -98,7 +97,6 @@ public struct ModulesConfig: Codable {
         case calendar
         case reminders
         case mail
-        case mailImap = "mail_imap"
         case notes
     }
     
@@ -111,7 +109,6 @@ public struct ModulesConfig: Codable {
                 calendar: StubModuleConfig = StubModuleConfig(),
                 reminders: StubModuleConfig = StubModuleConfig(),
                 mail: MailModuleConfig = MailModuleConfig(),
-                mailImap: MailImapModuleConfig = MailImapModuleConfig(),
                 notes: StubModuleConfig = StubModuleConfig()) {
         self.imessage = imessage
         self.ocr = ocr
@@ -122,7 +119,6 @@ public struct ModulesConfig: Codable {
         self.calendar = calendar
         self.reminders = reminders
         self.mail = mail
-        self.mailImap = mailImap
         self.notes = notes
     }
     
@@ -148,7 +144,6 @@ public struct ModulesConfig: Codable {
         } else {
             mail = MailModuleConfig()
         }
-        mailImap = try container.decodeIfPresent(MailImapModuleConfig.self, forKey: .mailImap) ?? MailImapModuleConfig()
         notes = try container.decode(StubModuleConfig.self, forKey: .notes)
     }
 }
@@ -345,66 +340,84 @@ public struct LoggingConfig: Codable {
 
 // MARK: - Mail Module Configuration
 
-public struct MailImapModuleConfig: Codable {
-    public var enabled: Bool
-    public var cache: MailImapCacheConfig
-    public var accounts: [MailImapAccountConfig]
-    
-    enum CodingKeys: String, CodingKey {
-        case enabled
-        case cache
-        case accounts
-    }
-    
-    public init(enabled: Bool = false,
-                cache: MailImapCacheConfig = MailImapCacheConfig(),
-                accounts: [MailImapAccountConfig] = []) {
-        self.enabled = enabled
-        self.cache = cache
-        self.accounts = accounts
-    }
+// MARK: - PII Redaction Configuration
+
+public enum RedactionConfig: Codable {
+    case boolean(Bool)
+    case detailed(RedactionOptions)
     
     public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
-        cache = try container.decodeIfPresent(MailImapCacheConfig.self, forKey: .cache) ?? MailImapCacheConfig()
-        accounts = try container.decodeIfPresent([MailImapAccountConfig].self, forKey: .accounts) ?? []
+        let container = try decoder.singleValueContainer()
+        
+        // Try to decode as boolean first
+        if let boolValue = try? container.decode(Bool.self) {
+            self = .boolean(boolValue)
+            return
+        }
+        
+        // Try to decode as detailed options
+        if let options = try? container.decode(RedactionOptions.self) {
+            self = .detailed(options)
+            return
+        }
+        
+        throw DecodingError.typeMismatch(RedactionConfig.self, DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Expected Bool or RedactionOptions"))
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        
+        switch self {
+        case .boolean(let value):
+            try container.encode(value)
+        case .detailed(let options):
+            try container.encode(options)
+        }
     }
 }
 
-public struct MailImapCacheConfig: Codable {
-    public var dir: String
-    public var maxMb: Int
+public struct RedactionOptions: Codable {
+    public var emails: Bool
+    public var phones: Bool
+    public var accountNumbers: Bool
+    public var ssn: Bool
     
     enum CodingKeys: String, CodingKey {
-        case dir
-        case maxMb = "max_mb"
+        case emails
+        case phones
+        case accountNumbers = "account_numbers"
+        case ssn
     }
     
-    public init(dir: String = "~/Library/Caches/Haven/remote_mail",
-                maxMb: Int = 100) {
-        self.dir = dir
-        self.maxMb = maxMb
-    }
-    
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        dir = try container.decodeIfPresent(String.self, forKey: .dir) ?? "~/Library/Caches/Haven/remote_mail"
-        maxMb = try container.decodeIfPresent(Int.self, forKey: .maxMb) ?? 100
+    public init(emails: Bool = true, phones: Bool = true, accountNumbers: Bool = true, ssn: Bool = true) {
+        self.emails = emails
+        self.phones = phones
+        self.accountNumbers = accountNumbers
+        self.ssn = ssn
     }
 }
 
-public struct MailImapAccountConfig: Codable {
+public struct MailSourceConfig: Codable {
     public var id: String
-    public var host: String
-    public var port: Int
-    public var tls: Bool
-    public var username: String
-    public var auth: MailImapAuthConfig
-    public var folders: [String]
+    public var type: String  // "local", "imap"
+    public var enabled: Bool
+    public var redactPii: RedactionConfig?
+    // Local-specific
+    public var sourcePath: String?
+    // IMAP-specific
+    public var host: String?
+    public var port: Int?
+    public var tls: Bool?
+    public var username: String?
+    public var auth: MailSourceAuthConfig?
+    public var folders: [String]?
     
     enum CodingKeys: String, CodingKey {
         case id
+        case type
+        case enabled
+        case redactPii = "redact_pii"
+        case sourcePath = "source_path"
         case host
         case port
         case tls
@@ -414,13 +427,21 @@ public struct MailImapAccountConfig: Codable {
     }
     
     public init(id: String = "",
-                host: String = "",
-                port: Int = 993,
-                tls: Bool = true,
-                username: String = "",
-                auth: MailImapAuthConfig = MailImapAuthConfig(),
-                folders: [String] = []) {
+                type: String = "imap",
+                enabled: Bool = true,
+                redactPii: RedactionConfig? = nil,
+                sourcePath: String? = nil,
+                host: String? = nil,
+                port: Int? = nil,
+                tls: Bool? = nil,
+                username: String? = nil,
+                auth: MailSourceAuthConfig? = nil,
+                folders: [String]? = nil) {
         self.id = id
+        self.type = type
+        self.enabled = enabled
+        self.redactPii = redactPii
+        self.sourcePath = sourcePath
         self.host = host
         self.port = port
         self.tls = tls
@@ -428,20 +449,9 @@ public struct MailImapAccountConfig: Codable {
         self.auth = auth
         self.folders = folders
     }
-    
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decodeIfPresent(String.self, forKey: .id) ?? ""
-        host = try container.decodeIfPresent(String.self, forKey: .host) ?? ""
-        port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 993
-        tls = try container.decodeIfPresent(Bool.self, forKey: .tls) ?? true
-        username = try container.decodeIfPresent(String.self, forKey: .username) ?? ""
-        auth = try container.decodeIfPresent(MailImapAuthConfig.self, forKey: .auth) ?? MailImapAuthConfig()
-        folders = try container.decodeIfPresent([String].self, forKey: .folders) ?? []
-    }
 }
 
-public struct MailImapAuthConfig: Codable {
+public struct MailSourceAuthConfig: Codable {
     public var kind: String
     public var secretRef: String
     
@@ -462,9 +472,23 @@ public struct MailImapAuthConfig: Codable {
     }
 }
 
+extension MailSourceConfig {
+    public var responseIdentifier: String {
+        if !id.isEmpty {
+            return id
+        }
+        return username?.isEmpty == false ? username! : (host ?? "unknown")
+    }
+    
+    public var debugIdentifier: String {
+        "\(responseIdentifier)@\(host ?? "unknown")"
+    }
+}
+
 public struct MailModuleConfig: Codable {
     public var enabled: Bool
-    public var sourcePath: String?
+    public var redactPii: RedactionConfig?
+    public var sources: [MailSourceConfig]
     public var filters: MailFiltersConfig
     public var state: MailStateConfig
     public var defaultOrder: String?
@@ -472,9 +496,22 @@ public struct MailModuleConfig: Codable {
     public var defaultUntil: String?
     public var allowOverride: Bool
     
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case redactPii = "redact_pii"
+        case sources
+        case filters
+        case state
+        case defaultOrder = "default_order"
+        case defaultSince = "default_since"
+        case defaultUntil = "default_until"
+        case allowOverride = "allow_override"
+    }
+    
     public init(
         enabled: Bool = false,
-        sourcePath: String? = nil,
+        redactPii: RedactionConfig? = nil,
+        sources: [MailSourceConfig] = [],
         filters: MailFiltersConfig = MailFiltersConfig(),
         state: MailStateConfig = MailStateConfig(),
         defaultOrder: String? = nil,
@@ -483,7 +520,8 @@ public struct MailModuleConfig: Codable {
         allowOverride: Bool = true
     ) {
         self.enabled = enabled
-        self.sourcePath = sourcePath
+        self.redactPii = redactPii
+        self.sources = sources
         self.filters = filters
         self.state = state
         self.defaultOrder = defaultOrder
@@ -495,24 +533,14 @@ public struct MailModuleConfig: Codable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
-        sourcePath = try container.decodeIfPresent(String.self, forKey: .sourcePath)
+        redactPii = try container.decodeIfPresent(RedactionConfig.self, forKey: .redactPii)
+        sources = try container.decodeIfPresent([MailSourceConfig].self, forKey: .sources) ?? []
         filters = try container.decodeIfPresent(MailFiltersConfig.self, forKey: .filters) ?? MailFiltersConfig()
         state = try container.decodeIfPresent(MailStateConfig.self, forKey: .state) ?? MailStateConfig()
         defaultOrder = try container.decodeIfPresent(String.self, forKey: .defaultOrder)
         defaultSince = try container.decodeIfPresent(String.self, forKey: .defaultSince)
         defaultUntil = try container.decodeIfPresent(String.self, forKey: .defaultUntil)
         allowOverride = try container.decodeIfPresent(Bool.self, forKey: .allowOverride) ?? true
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case enabled
-        case sourcePath = "source_path"
-        case filters
-        case state
-        case defaultOrder = "default_order"
-        case defaultSince = "default_since"
-        case defaultUntil = "default_until"
-        case allowOverride = "allow_override"
     }
 }
 
@@ -793,9 +821,6 @@ public class ConfigLoader {
         if let mailEnabled = ProcessInfo.processInfo.environment["HAVEN_MAIL_ENABLED"] {
             config.modules.mail.enabled = (mailEnabled as NSString).boolValue
         }
-        if let mailSource = ProcessInfo.processInfo.environment["HAVEN_MAIL_SOURCE_PATH"] {
-            config.modules.mail.sourcePath = mailSource
-        }
     }
     
     private func validate(_ config: HavenConfig) throws {
@@ -811,9 +836,7 @@ public class ConfigLoader {
             throw ConfigError.validationError("Gateway base URL cannot be empty")
         }
         
-        if config.modules.mail.enabled && config.modules.mailImap.enabled {
-            throw ConfigError.validationError("modules.mail and modules.mail_imap cannot both be enabled at the same time")
-        }
+        // No longer need to check for mail/mailImap conflicts since mailImap is removed
     }
     
     internal func validateConfiguration(_ config: HavenConfig) throws {

@@ -1,0 +1,37 @@
+745
+From: sender@example.com
+To: recipient@example.com
+Subject: Email with Quoted Reply
+Date: Thu, 21 Oct 2025 10:30:00 -0400
+Message-ID: <quoted-reply@example.com>
+Content-Type: text/plain; charset=utf-8
+
+Thanks for your message!
+
+I'll get back to you soon.
+
+Best regards,
+John
+
+> On Oct 20, 2025, at 2:30 PM, Jane Doe <jane@example.com> wrote:
+> 
+> Hi John,
+> 
+> I wanted to follow up on our conversation about the project.
+> 
+> Can you please provide an update?
+> 
+> Thanks,
+> Jane
+> 
+> > From: John Smith <john@example.com>
+> > Sent: Monday, October 20, 2025 2:00 PM
+> > To: Jane Doe <jane@example.com>
+> > Subject: Project Update
+> > 
+> > Hi Jane,
+> > 
+> > I'm working on the project and will have an update soon.
+> > 
+> > Best,
+> > John

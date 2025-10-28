@@ -73,7 +73,6 @@ public struct HealthHandler {
             ("calendar", config.modules.calendar.enabled),
             ("reminders", config.modules.reminders.enabled),
             ("mail", config.modules.mail.enabled),
-            ("mail_imap", config.modules.mailImap.enabled),
             ("notes", config.modules.notes.enabled)
         ] {
             summaries.append(ModuleSummary(

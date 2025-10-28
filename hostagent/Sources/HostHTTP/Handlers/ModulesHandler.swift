@@ -45,7 +45,6 @@ public struct ModulesHandler {
             calendar: SimpleModuleInfo(enabled: config.modules.calendar.enabled),
             reminders: SimpleModuleInfo(enabled: config.modules.reminders.enabled),
             mail: SimpleModuleInfo(enabled: config.modules.mail.enabled),
-            mailImap: SimpleModuleInfo(enabled: config.modules.mailImap.enabled),
             notes: SimpleModuleInfo(enabled: config.modules.notes.enabled),
             face: SimpleModuleInfo(enabled: config.modules.face.enabled)
         )
@@ -98,7 +97,6 @@ struct ModulesListResponse: Codable {
     let calendar: SimpleModuleInfo
     let reminders: SimpleModuleInfo
     let mail: SimpleModuleInfo
-    let mailImap: SimpleModuleInfo
     let notes: SimpleModuleInfo
     let face: SimpleModuleInfo
     
@@ -110,7 +108,6 @@ struct ModulesListResponse: Codable {
         case calendar
         case reminders
         case mail
-        case mailImap = "mail_imap"
         case notes
         case face
     }

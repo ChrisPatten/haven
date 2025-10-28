@@ -26,7 +26,9 @@ public actor EmailImapHandler {
                 gatewayConfig: config.gateway,
                 authToken: config.auth.secret,
                 sourceType: "email",
-                sourceIdPrefix: "email_imap"
+                sourceIdPrefix: "email_imap",
+                moduleRedaction: config.modules.mail.redactPii,
+                sourceRedaction: nil // Will be set per-source in handleRun
             )
         }
         self.emailService = emailService ?? EmailService()
@@ -34,8 +36,8 @@ public actor EmailImapHandler {
     }
     
     public func handleRun(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        guard config.modules.mailImap.enabled else {
-            return HTTPResponse.badRequest(message: "mail_imap module is disabled")
+        guard config.modules.mail.enabled else {
+            return HTTPResponse.badRequest(message: "mail module is disabled")
         }
         
         // Parse request using OpenAPI-generated types
@@ -109,8 +111,8 @@ public actor EmailImapHandler {
         let foldersToProcess: [String]
         if let reqFolder = folder, !reqFolder.isEmpty {
             foldersToProcess = [reqFolder]
-        } else if !account.folders.isEmpty {
-            foldersToProcess = account.folders
+        } else if let accountFolders = account.folders, !accountFolders.isEmpty {
+            foldersToProcess = accountFolders
         } else {
             foldersToProcess = ["INBOX"]
         }
@@ -132,16 +134,16 @@ public actor EmailImapHandler {
             return HTTPResponse.badRequest(message: "Unable to resolve IMAP credentials")
         }
 
-        let security: ImapSessionConfiguration.Security = account.tls ? .tls : .plaintext
+        let security: ImapSessionConfiguration.Security = (account.tls ?? true) ? .tls : .plaintext
         let imapConfig = ImapSessionConfiguration(
-            hostname: account.host,
-            port: UInt32(account.port),
-            username: account.username,
+            hostname: account.host ?? "",
+            port: UInt32(account.port ?? 993),
+            username: account.username ?? "",
             security: security,
             auth: authResolution.auth,
             timeout: 60,
             fetchConcurrency: fetchConcurrency,
-            allowsInsecurePlainAuth: !account.tls
+            allowsInsecurePlainAuth: !(account.tls ?? true)
         )
 
         let imapSession: ImapSession
@@ -400,13 +402,13 @@ public actor EmailImapHandler {
     
     // MARK: - Helpers
     
-    private func selectAccount(identifier: String?) -> MailImapAccountConfig? {
-        let accounts = config.modules.mailImap.accounts
-        guard !accounts.isEmpty else { return nil }
+    private func selectAccount(identifier: String?) -> MailSourceConfig? {
+        let imapSources = config.modules.mail.sources.filter { $0.type == "imap" }
+        guard !imapSources.isEmpty else { return nil }
         guard let identifier, !identifier.isEmpty else {
-            return accounts.first
+            return imapSources.first
         }
-        return accounts.first { $0.id == identifier }
+        return imapSources.first { $0.id == identifier }
     }
     
     private struct ImapCredentials {
@@ -415,9 +417,9 @@ public actor EmailImapHandler {
         var secretRef: String?
     }
     
-    private func resolveAuth(for account: MailImapAccountConfig, credentials: ImapCredentials?) -> AuthResolution? {
+    private func resolveAuth(for account: MailSourceConfig, credentials: ImapCredentials?) -> AuthResolution? {
         var resolvers: [any SecretResolving] = []
-        var secretRef = credentials?.secretRef ?? account.auth.secretRef
+        var secretRef = credentials?.secretRef ?? account.auth?.secretRef ?? ""
         
         if let inlineSecret = credentials?.secret, !inlineSecret.isEmpty {
             let inlineRef = "inline://\(UUID().uuidString)"
@@ -430,7 +432,7 @@ public actor EmailImapHandler {
             return nil
         }
         
-        let kind = (credentials?.kind ?? account.auth.kind).lowercased()
+        let kind = (credentials?.kind ?? account.auth?.kind ?? "app_password").lowercased()
         let auth: ImapSessionConfiguration.Auth
         switch kind {
         case "app_password", "app-password", "password", "basic":
@@ -603,12 +605,12 @@ extension EmailImapHandler {
 
 private extension EmailImapHandler {
     func cacheDirURL() -> URL {
-        let raw = config.modules.mailImap.cache.dir
-        let expanded = NSString(string: raw).expandingTildeInPath
-        return URL(fileURLWithPath: expanded, isDirectory: true)
+        // Use a default cache directory since we removed the cache config
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent("Library/Caches/Haven/remote_mail")
     }
 
-    func cacheFileURL(for account: MailImapAccountConfig, folder: String) -> URL {
+    func cacheFileURL(for account: MailSourceConfig, folder: String) -> URL {
         let dir = cacheDirURL()
         var folderName = folder
         // sanitize folder for filesystem
@@ -618,7 +620,7 @@ private extension EmailImapHandler {
         return dir.appendingPathComponent(fileName)
     }
 
-    func loadImapState(account: MailImapAccountConfig, folder: String) throws -> (last: UInt32?, earliest: UInt32?)? {
+    func loadImapState(account: MailSourceConfig, folder: String) throws -> (last: UInt32?, earliest: UInt32?)? {
         let url = cacheFileURL(for: account, folder: folder)
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return nil }
@@ -630,7 +632,7 @@ private extension EmailImapHandler {
         return (last: last, earliest: earliest)
     }
 
-    func saveImapState(account: MailImapAccountConfig, folder: String, last: UInt32, earliest: UInt32?) throws {
+    func saveImapState(account: MailSourceConfig, folder: String, last: UInt32, earliest: UInt32?) throws {
         let url = cacheFileURL(for: account, folder: folder)
         let dir = url.deletingLastPathComponent()
         let fm = FileManager.default
@@ -645,18 +647,5 @@ private extension EmailImapHandler {
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(obj)
         try data.write(to: url, options: .atomic)
-    }
-}
-
-private extension MailImapAccountConfig {
-    var responseIdentifier: String {
-        if !id.isEmpty {
-            return id
-        }
-        return username.isEmpty ? host : username
-    }
-    
-    var debugIdentifier: String {
-        "\(responseIdentifier)@\(host)"
     }
 }

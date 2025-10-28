@@ -6,7 +6,7 @@ import IMAP
 final class EmailImapHandlerTests: XCTestCase {
     func testRunReturnsBadRequestWhenModuleDisabled() async throws {
         var config = HavenConfig()
-        config.modules.mailImap.enabled = false
+        config.modules.mail.enabled = false
         let handler = EmailImapHandler(config: config)
         let response = await handler.handleRun(request: HTTPRequest(method: "POST", path: "/v1/collectors/email_imap:run"), context: .empty)
         XCTAssertEqual(response.statusCode, 400)
@@ -16,15 +16,17 @@ final class EmailImapHandlerTests: XCTestCase {
         // Test that limit from POST request overrides config default
         var config = HavenConfig()
         config.defaultLimit = 50
-        config.modules.mailImap.enabled = true
-        config.modules.mailImap.accounts = [
-            MailImapAccountConfig(
+        config.modules.mail.enabled = true
+        config.modules.mail.sources = [
+            MailSourceConfig(
                 id: "test",
+                type: "imap",
+                enabled: true,
                 host: "imap.example.com",
                 port: 993,
                 tls: true,
                 username: "test@example.com",
-                auth: MailImapAuthConfig(kind: "app_password", secretRef: "test-secret"),
+                auth: MailSourceAuthConfig(kind: "app_password", secretRef: "test-secret"),
                 folders: ["INBOX"]
             )
         ]
@@ -59,15 +61,17 @@ final class EmailImapHandlerTests: XCTestCase {
         // Test that config default is used when limit not provided in request
         var config = HavenConfig()
         config.defaultLimit = 75
-        config.modules.mailImap.enabled = true
-        config.modules.mailImap.accounts = [
-            MailImapAccountConfig(
+        config.modules.mail.enabled = true
+        config.modules.mail.sources = [
+            MailSourceConfig(
                 id: "test",
+                type: "imap",
+                enabled: true,
                 host: "imap.example.com",
                 port: 993,
                 tls: true,
                 username: "test@example.com",
-                auth: MailImapAuthConfig(kind: "app_password", secretRef: "test-secret"),
+                auth: MailSourceAuthConfig(kind: "app_password", secretRef: "test-secret"),
                 folders: ["INBOX"]
             )
         ]
