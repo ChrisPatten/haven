@@ -12,8 +12,9 @@ help:
 	@echo "  run        - Run debug version (auto-detects dev mode)"
 	@echo "  dev        - Run with auto-reload (requires entr, auto-detects dev mode)"
 	@echo "  dev-setup  - Set up development mode (copy chat.db to ~/.haven)"
-	@echo "  launchd    - Install and start LaunchAgent"
-	@echo "  unlaunchd  - Stop and uninstall LaunchAgent"
+  @echo "  launchd    - Install and start LaunchAgent"
+  @echo "  launchd-restart - Restart LaunchAgent (use after granting Full Disk Access)"
+  @echo "  unlaunchd  - Stop and uninstall LaunchAgent"
 
 # Build debug version
 build:
@@ -148,15 +149,33 @@ dev-setup:
 	fi
 
 # Install and start LaunchAgent
-launchd: install
+launchd:
 	@echo "Setting up LaunchAgent..."
 	@mkdir -p ~/Library/Logs/Haven
 	@sed "s/YOUR_USER/$(USER)/g" Resources/LaunchAgents/com.haven.hostagent.plist > ~/Library/LaunchAgents/com.haven.hostagent.plist
 	@launchctl unload ~/Library/LaunchAgents/com.haven.hostagent.plist 2>/dev/null || true
 	@launchctl load ~/Library/LaunchAgents/com.haven.hostagent.plist
 	@echo "LaunchAgent installed and started"
+	@echo ""
+	@echo "⚠️  IMPORTANT: Grant Full Disk Access to the binary:"
+	@echo "   1. Open System Settings → Privacy & Security → Full Disk Access"
+	@echo "   2. Click + and navigate to: /usr/local/bin/hostagent"
+	@echo "   3. Enable the toggle for hostagent"
+	@echo "   4. Run: make launchd-restart"
+	@echo ""
 	@echo "View logs: tail -f ~/Library/Logs/Haven/hostagent.log"
 	@echo "Control: launchctl {start|stop|restart} com.haven.hostagent"
+
+# Restart LaunchAgent (useful after granting Full Disk Access)
+launchd-restart:
+	@echo "Restarting LaunchAgent..."
+	@launchctl stop com.haven.hostagent 2>/dev/null || true
+	@sleep 1
+	@launchctl start com.haven.hostagent
+	@sleep 2
+	@launchctl list | grep haven || echo "Service starting..."
+	@echo ""
+	@echo "✅ Service restarted. Test with: make capabilities"
 
 # Stop and uninstall LaunchAgent
 unlaunchd:

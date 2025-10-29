@@ -220,5 +220,6 @@ tests/fixtures/email/*
 
 .tmp/
 
-.beads/daemon.lock
+.beads/daemon.log
 .beads/daemon.pid
+.beads/bd.sock
