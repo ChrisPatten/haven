@@ -430,7 +430,7 @@ public actor IMessageHandler {
             logger.warning("Failed to load iMessage collector state", metadata: ["error": error.localizedDescription])
         }
 
-        // Retrieve candidate message ROWIDs within the lookback window (ascending)
+        // Retrieve candidate message ROWIDs chronologically ordered (respects params.order)
         let rowIds = try fetchMessageRowIds(db: db!, params: params)
         // Track total candidates
         stats.messagesProcessed = rowIds.count
@@ -440,21 +440,14 @@ public actor IMessageHandler {
         // updated during the posting loop in `handleRun` after a document is
         // successfully submitted to the Gateway.
 
-        // Compose processing order (still ID-based for ordering, but we'll filter by timestamp during iteration)
-        // Convert optional since/until dates to Apple epoch Int64 for comparisons
+        // Convert optional since/until dates to Apple epoch Int64 for comparisons (used during iteration)
         let sinceEpoch: Int64? = params.since != nil ? dateToAppleEpoch(params.since!) : nil
         let untilEpoch: Int64? = params.until != nil ? dateToAppleEpoch(params.until!) : nil
 
-        // Order the row IDs based on the requested order (asc/desc)
-        // We filter by timestamp and fences during iteration, so composeProcessingOrder just handles ordering
-        let orderedRowIds = composeProcessingOrder(
-            searchResultAsc: rowIds,
-            lastProcessedId: nil,  // No longer used - we filter by timestamp during iteration
-            order: params.order,
-            since: params.since,
-            before: params.until,
-            oldestCachedId: nil  // No longer used - we filter by timestamp during iteration
-        )
+        // Results are already chronologically ordered by fetchMessageRowIds
+        // Fences handle deduplication, so we can use the rowIds directly
+        // composeProcessingOrder is no longer needed with chronological ordering
+        let orderedRowIds = rowIds
 
         // Process records in caller-configured batches, posting each batch to gateway
         let batchSize = max(1, params.batchSize ?? 500)
@@ -562,6 +555,17 @@ public actor IMessageHandler {
                         break
                     }
                 }
+            }
+
+            // Check if message is empty (no text, no attributed body, no attachments)
+            if isMessageEmpty(message: message) {
+                logger.debug("Skipping empty message (unsent/retracted or no content)", metadata: [
+                    "message_guid": message.guid,
+                    "has_attributed_body": message.attributedBody != nil ? "true" : "false",
+                    "attributed_body_size": String(message.attributedBody?.count ?? 0),
+                    "attachment_count": String(message.attachments.count)
+                ])
+                continue
             }
 
             // Fetch thread for message
@@ -1012,6 +1016,10 @@ public actor IMessageHandler {
         // Determine upper-bound (until constraint)
         let upperBoundEpoch: Int64? = params.until != nil ? dateToAppleEpoch(params.until!) : nil
 
+        // Determine chronological order (ascending = oldest first, descending = newest first)
+        let isDescOrder = (params.order?.lowercased() == "desc")
+        let orderDirection = isDescOrder ? "DESC" : "ASC"
+
         var query = """
             SELECT m.ROWID
             FROM message m
@@ -1028,7 +1036,8 @@ public actor IMessageHandler {
         if !whereClauses.isEmpty {
             query += "WHERE " + whereClauses.joined(separator: " AND ") + "\n"
         }
-        query += "ORDER BY m.ROWID ASC\n"
+        // Order chronologically by timestamp, with ROWID as tiebreaker for stability
+        query += "ORDER BY m.date \(orderDirection), m.ROWID \(orderDirection)\n"
 
         // Log the query to help diagnose SQL syntax issues when dynamically composing the WHERE clause
         logger.debug("Preparing message rowid query", metadata: ["query": query])
@@ -1425,19 +1434,39 @@ public actor IMessageHandler {
     
     // MARK: - Document Building
     
+    private func isMessageEmpty(message: MessageData) -> Bool {
+        // Check if message has text
+        let hasText = !(message.text?.isEmpty ?? true)
+        
+        // Check if message has attributed body (we'll decode it in buildDocument if text is empty)
+        let hasAttributedBody = message.attributedBody != nil && message.attributedBody!.count > 0
+        
+        // Check if message has attachments
+        let hasAttachments = !message.attachments.isEmpty
+        
+        // Message is empty if it has no text, no attributed body, and no attachments
+        // Note: We check for attributedBody existence but don't decode it here to avoid duplicate work.
+        // If a message has an attributedBody, buildDocument will try to decode it.
+        // Empty messages (unsent/retracted) typically have NULL attributedBody or empty attributedBody
+        return !hasText && !hasAttributedBody && !hasAttachments
+    }
+    
     private func buildDocument(message: MessageData, thread: ThreadData, attachments: [[String: Any]]) throws -> [String: Any] {
         // Extract message text
         var messageText = message.text ?? ""
         if messageText.isEmpty, let attrBody = message.attributedBody {
             messageText = decodeAttributedBody(attrBody) ?? ""
         }
-        if messageText.isEmpty {
-            logger.debug("Message has no text content, using empty message placeholder", metadata: [
-                "message_guid": message.guid,
-                "has_attributed_body": message.attributedBody != nil,
-                "attributed_body_size": message.attributedBody?.count ?? 0
+        
+        // Safety check: if message is still empty after extraction, log warning
+        // (This shouldn't happen since we filter empty messages earlier)
+        // Note: Messages with attachments but no text are valid (image-only messages, etc.)
+        if messageText.isEmpty && attachments.isEmpty {
+            logger.warning("Empty message reached buildDocument (should have been filtered earlier)", metadata: [
+                "message_guid": message.guid
             ])
-            messageText = "[empty message]"
+            // Use a minimal placeholder - this case should be rare
+            messageText = "[empty message - filtering check missed]"
         }
         
         // Format timestamps
@@ -1789,7 +1818,9 @@ public actor IMessageHandler {
             let streamtypedMarker = Data([0x04, 0x0b, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x74, 0x79, 0x70, 0x65, 0x64])
             if data.prefix(13) == streamtypedMarker {
                 // This is streamtyped format - handle it directly
-                return extractTextFromStreamtypedData(data)
+                if let result = extractTextFromStreamtypedData(data) {
+                    return result
+                }
             }
         }
         
@@ -1801,23 +1832,31 @@ public actor IMessageHandler {
             // Try to decode as NSAttributedString first (most common case)
             if let attributedString = unarchiver.decodeObject(of: NSAttributedString.self, forKey: NSKeyedArchiveRootObjectKey) {
                 let plainText = attributedString.string
-                return plainText.isEmpty ? nil : plainText
+                if !plainText.isEmpty {
+                    return plainText
+                }
             }
             
             // Try to decode as NSString
             if let string = unarchiver.decodeObject(of: NSString.self, forKey: NSKeyedArchiveRootObjectKey) {
                 let plainText = string as String
-                return plainText.isEmpty ? nil : plainText
+                if !plainText.isEmpty {
+                    return plainText
+                }
             }
             
             // Try to decode as any object and extract text
             if let anyObject = unarchiver.decodeObject(forKey: NSKeyedArchiveRootObjectKey) {
                 if let attributedString = anyObject as? NSAttributedString {
                     let plainText = attributedString.string
-                    return plainText.isEmpty ? nil : plainText
+                    if !plainText.isEmpty {
+                        return plainText
+                    }
                 } else if let string = anyObject as? NSString {
                     let plainText = string as String
-                    return plainText.isEmpty ? nil : plainText
+                    if !plainText.isEmpty {
+                        return plainText
+                    }
                 }
             }
             
@@ -1834,15 +1873,19 @@ public actor IMessageHandler {
                 }
             }
         } catch {
-            // Try to handle NSKeyedArchiver streamtyped format manually
-            if let result = extractTextFromStreamtypedData(data) {
-                return result
-            }
-            
-            // Final fallback: try to extract UTF-8 text directly from binary data
-            if let result = extractTextFromBinaryData(data) {
-                return result
-            }
+            // PropertyListSerialization failed, will try binary extraction below
+        }
+        
+        // Try to handle NSKeyedArchiver streamtyped format manually (as fallback)
+        // Even if the exact marker wasn't found, the data might still be streamtyped
+        if let result = extractTextFromStreamtypedData(data) {
+            return result
+        }
+        
+        // Final fallback: try to extract UTF-8 text directly from binary data
+        // This should always be tried as a last resort, even if other methods didn't throw errors
+        if let result = extractTextFromBinaryData(data) {
+            return result
         }
         
         return nil
@@ -1923,14 +1966,14 @@ public actor IMessageHandler {
             return nil
         }
         
-        // Look for the pattern: + (0x2b) followed by length byte, then text
+        // Method 1: Look for the pattern: + (0x2b) followed by length byte, then text
         for i in 0..<(data.count - 2) {
             if data[i] == 0x2b { // '+'
                 let lengthByte = data[i + 1]
                 let textStart = i + 2
                 let textEnd = textStart + Int(lengthByte)
                 
-                if textEnd <= data.count && textEnd > textStart {
+                if textEnd <= data.count && textEnd > textStart && lengthByte > 0 && lengthByte < 200 {
                     let textData = data.subdata(in: textStart..<textEnd)
                     if let text = String(data: textData, encoding: .utf8) {
                         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1944,106 +1987,221 @@ public actor IMessageHandler {
             }
         }
         
-        // Fallback: Convert to string to look for patterns
-        guard let text = String(data: data, encoding: .utf8) else {
+        // Method 2: Convert to string and look for '+' patterns (more lenient)
+        // Try UTF-8 decoding - use lossy decoding if needed
+        let text: String
+        if let utf8Text = String(data: data, encoding: .utf8) {
+            text = utf8Text
+        } else {
+            // Try to decode with error replacement
+            text = String(decoding: data, as: UTF8.self)
+        }
+        
+        guard !text.isEmpty else {
             return nil
         }
         
-        // Look for streamtyped pattern with text content
-        if text.contains("streamtyped") {
-            // Find the actual message text after the streamtyped marker
-            // The pattern is usually: streamtyped@NSAttributedStringNSObjectNSString+<actual_text>
-            if let plusIndex = text.firstIndex(of: "+") {
+        // Look for '+' characters which often precede text in streamtyped format
+        // Pattern: streamtyped...NSAttributedString...NSString+<actual_text>\x02...
+        var candidates: [String] = []
+        
+        // Find all '+' positions and extract text after them
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex {
+            if let plusIndex = text[searchStart...].firstIndex(of: "+") {
                 let afterPlus = text.index(after: plusIndex)
-                let searchText = String(text[afterPlus...])
-                
-                // Extract text until we hit metadata markers
-                var extractedText = ""
-                for char in searchText {
-                    // Stop at common metadata markers
-                    if char == "\0" || char == "\u{02}" || char == "i" || char == "I" {
-                        // Check if this looks like the start of metadata
-                        if char == "i" || char == "I" {
-                            // Look ahead to see if this is metadata
-                            let remaining = String(searchText[searchText.index(searchText.startIndex, offsetBy: extractedText.count)...])
-                            if remaining.hasPrefix("iNSDictionary") || remaining.hasPrefix("INSDictionary") ||
-                               remaining.hasPrefix("i__kIM") || remaining.hasPrefix("I__kIM") {
-                                break
-                            }
-                        } else {
+                if afterPlus < text.endIndex {
+                    let searchText = String(text[afterPlus...])
+                    
+                    // Extract text until we hit metadata markers or control characters
+                    var extractedText = ""
+                    for char in searchText {
+                        // Stop at common metadata markers and control chars
+                        if char == "\0" || char == "\u{02}" || char == "\u{03}" {
                             break
                         }
+                        // Check if this looks like the start of metadata
+                        if char == "i" || char == "I" {
+                            let remainingStart = searchText.index(searchText.startIndex, offsetBy: extractedText.count)
+                            if remainingStart < searchText.endIndex {
+                                let remaining = String(searchText[remainingStart...])
+                                if remaining.hasPrefix("iNSDictionary") || remaining.hasPrefix("INSDictionary") ||
+                                   remaining.hasPrefix("i__kIM") || remaining.hasPrefix("I__kIM") {
+                                    break
+                                }
+                            }
+                        }
+                        extractedText.append(char)
                     }
-                    extractedText.append(char)
+                    
+                    // Clean up and validate
+                    let cleaned = extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if cleaned.count > 3 && 
+                       !cleaned.hasPrefix("NS") && 
+                       !cleaned.hasPrefix("__k") &&
+                       !cleaned.contains("streamtyped") &&
+                       !cleaned.contains("NSObject") &&
+                       !cleaned.contains("NSString") &&
+                       !cleaned.contains("NSDictionary") {
+                        candidates.append(cleaned)
+                    }
                 }
-                
-                // Clean up the extracted text
-                let cleaned = extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                // Filter out very short or metadata-like strings
-                if cleaned.count > 3 && !cleaned.hasPrefix("NS") && !cleaned.hasPrefix("__k") {
-                    return cleaned
-                }
+                searchStart = text.index(after: plusIndex)
+            } else {
+                break
             }
         }
         
-        // If UTF-8 decoding didn't work, try to extract text directly from binary data
-        // Look for ASCII text patterns in the binary data
+        // Return the longest valid candidate
+        if let best = candidates.max(by: { $0.count < $1.count }), best.count > 3 {
+            return best
+        }
+        
+        // Method 3: Look for ASCII text patterns directly in binary (similar to binary extraction)
+        // This handles cases where UTF-8 decoding produces mixed text/control sequences
         var extractedText = ""
+        var bestText = ""
         var i = 0
         while i < data.count {
             let byte = data[i]
             // Look for printable ASCII characters
             if byte >= 32 && byte <= 126 {
                 extractedText.append(Character(UnicodeScalar(byte)))
-            } else if byte == 0 {
-                // Null terminator - check if we have a reasonable text length
-                if extractedText.count > 5 && extractedText.count < 1000 {
+            } else if byte == 0 || byte == 0x02 || byte == 0x03 {
+                // Null terminator or control char - check if we have a reasonable text length
+                if extractedText.count > 3 && extractedText.count < 2000 {
                     // Check if it looks like actual text (not metadata)
-                    if !extractedText.hasPrefix("NS") && !extractedText.hasPrefix("__k") && 
-                       !extractedText.contains("streamtyped") && !extractedText.contains("NSObject") {
-                        return extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmed = extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.count > bestText.count &&
+                       !trimmed.hasPrefix("NS") && 
+                       !trimmed.hasPrefix("__k") &&
+                       !trimmed.contains("streamtyped") &&
+                       !trimmed.contains("NSObject") &&
+                       !trimmed.contains("NSString") &&
+                       !trimmed.contains("NSDictionary") {
+                        bestText = trimmed
                     }
                 }
                 extractedText = ""
             } else {
                 // Non-printable character - reset if we don't have much text
-                if extractedText.count < 5 {
+                if extractedText.count < 3 {
                     extractedText = ""
                 }
             }
             i += 1
         }
         
-        // Return the longest text segment we found
-        if extractedText.count > 5 && !extractedText.hasPrefix("NS") && !extractedText.hasPrefix("__k") {
-            return extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Check final extracted text
+        if extractedText.count > 3 && extractedText.count < 2000 {
+            let trimmed = extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.count > bestText.count &&
+               !trimmed.hasPrefix("NS") && 
+               !trimmed.hasPrefix("__k") &&
+               !trimmed.contains("streamtyped") &&
+               !trimmed.contains("NSObject") {
+                bestText = trimmed
+            }
         }
         
-        return nil
+        return bestText.isEmpty ? nil : bestText
     }
     
     nonisolated private func extractTextFromBinaryData(_ data: Data) -> String? {
         // Fallback: try to extract UTF-8 text directly from binary data
-        guard let text = String(data: data, encoding: .utf8) else {
+        // Use UTF-8 decoding with error replacement to handle invalid sequences
+        let text = String(data: data, encoding: .utf8) ?? 
+                   String(decoding: data, as: UTF8.self)
+        
+        guard !text.isEmpty else {
             return nil
         }
         
-        // Remove null bytes and control characters, keep printable and newlines
-        let cleaned = text.filter { char in
-            char.isPrintable || char.isNewline
+        // Remove null bytes and control characters (except newlines and tabs), keep printable and whitespace
+        let cleaned = text.compactMap { char -> Character? in
+            if char.isPrintable || char.isNewline || char.isWhitespace {
+                return char
+            }
+            // Replace null bytes and other control characters with spaces for better text extraction
+            if char.unicodeScalars.first?.value ?? 0 < 32 && char != "\n" && char != "\r" && char != "\t" {
+                return " "
+            }
+            return nil
         }
         
-        // Extract the longest contiguous text segment (likely the actual message)
-        let segments = cleaned.components(separatedBy: "\0")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { $0.count > 10 }
+        let cleanedString = String(cleaned)
         
-        if let longest = segments.max(by: { $0.count < $1.count }) {
-            return longest.trimmingCharacters(in: .controlCharacters)
+        // Split by null bytes and control sequences, extract text segments
+        // Create CharacterSet with control characters (0x00-0x05)
+        var controlCharSet = CharacterSet()
+        for i in 0...5 {
+            controlCharSet.insert(UnicodeScalar(i)!)
         }
         
-        return nil
+        // Split on control characters
+        let segments = cleanedString
+            .components(separatedBy: controlCharSet)
+            .map { $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) }
+            .filter { segment in
+                // Filter out metadata-like strings and require minimum length
+                segment.count > 3 && 
+                !segment.hasPrefix("NS") && 
+                !segment.hasPrefix("__k") &&
+                !segment.contains("streamtyped") &&
+                !segment.contains("NSObject") &&
+                !segment.contains("NSString") &&
+                !segment.contains("NSDictionary")
+            }
+        
+        // Find the longest segment that looks like actual text
+        if let longest = segments.max(by: { $0.count < $1.count }), longest.count > 3 {
+            let final = longest.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            return final.isEmpty ? nil : final
+        }
+        
+        // If no segments found, try to find contiguous printable text in the cleaned string
+        // Look for sequences of printable characters separated by at most a few spaces
+        var candidate = ""
+        var bestCandidate = ""
+        var consecutiveSpaces = 0
+        
+        for char in cleanedString {
+            if char.isPrintable || char.isNewline {
+                candidate.append(char)
+                consecutiveSpaces = 0
+            } else if char.isWhitespace {
+                candidate.append(char)
+                consecutiveSpaces += 1
+                if consecutiveSpaces > 3 {
+                    // Too many spaces, likely not text - evaluate current candidate
+                    let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.count > bestCandidate.count && trimmed.count > 3 &&
+                       !trimmed.hasPrefix("NS") && !trimmed.hasPrefix("__k") {
+                        bestCandidate = trimmed
+                    }
+                    candidate = ""
+                    consecutiveSpaces = 0
+                }
+            } else {
+                // Non-printable, non-whitespace - evaluate current candidate
+                let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.count > bestCandidate.count && trimmed.count > 3 &&
+                   !trimmed.hasPrefix("NS") && !trimmed.hasPrefix("__k") {
+                    bestCandidate = trimmed
+                }
+                candidate = ""
+                consecutiveSpaces = 0
+            }
+        }
+        
+        // Check final candidate
+        let finalTrimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if finalTrimmed.count > bestCandidate.count && finalTrimmed.count > 3 &&
+           !finalTrimmed.hasPrefix("NS") && !finalTrimmed.hasPrefix("__k") {
+            bestCandidate = finalTrimmed
+        }
+        
+        return bestCandidate.isEmpty ? nil : bestCandidate
     }
     
     /// Public method for testing attributed body decoding
