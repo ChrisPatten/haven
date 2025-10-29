@@ -199,6 +199,9 @@ struct HavenHostAgent: AsyncParsableCommand {
         let gatewayClient = GatewayClient(config: config.gateway, authToken: config.auth.secret)
         let iMessageHandler = IMessageHandler(config: config, gatewayClient: gatewayClient)
         
+    // Initialize contacts handler
+    let contactsHandler = ContactsHandler(config: config, gatewayClient: gatewayClient)
+        
     // Initialize email handlers
     let emailHandler = EmailHandler(config: config)
     let emailImapHandler = EmailImapHandler(config: config)
@@ -267,15 +270,19 @@ struct HavenHostAgent: AsyncParsableCommand {
             PatternRouteHandler(method: "POST", pattern: "/v1/collectors/*") { req, ctx in
                 let dispatch: [String: (HTTPRequest, RequestContext) async -> HTTPResponse] = [
                     "imessage": { r, c in await iMessageHandler.handleRun(request: r, context: c) },
-                    "email_imap": { r, c in await emailImapHandler.handleRun(request: r, context: c) }
+                    "email_imap": { r, c in await emailImapHandler.handleRun(request: r, context: c) },
+                    "contacts": { r, c in await contactsHandler.handleRun(request: r, context: c) }
                 ]
 
                 return await RunRouter.handle(request: req, context: ctx, dispatchMap: dispatch)
             },
             
-            // Collector state endpoint
+            // Collector state endpoints
             PatternRouteHandler(method: "GET", pattern: "/v1/collectors/imessage/state") { req, ctx in
                 await iMessageHandler.handleState(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "GET", pattern: "/v1/collectors/contacts/state") { req, ctx in
+                await contactsHandler.handleState(request: req, context: ctx)
             },
             
             // Email utility endpoints

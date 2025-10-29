@@ -24,7 +24,8 @@ help:
 	@echo "  restore <name>            Restore from a backup (prompts for confirmation)"
 	@echo "                            Example: make restore NAME=before-migration"
 	@echo "  list-backups              List all available backups with details"
-	@echo "  peek [LIMIT=<n>]          Show the last N documents ingested by Haven (default: 1)"
+	@echo "  peek [TYPE=<type>] [LIMIT=<n>]  Show the last N records (default: 1)"
+	@echo "                           TYPE can be: email, imessage, contact (default: all documents)"
 	@echo "  logs					   Tail the docker compose logs"
 	@echo "  hostagent-fresh           Runs make purge, make start,and make -C hostagent run"
 	
@@ -149,7 +150,18 @@ docs:
 install-hooks: .githooks/install-hooks
 
 peek:
-	@docker compose exec postgres psql -U postgres -d haven -t -c "SELECT text FROM documents ORDER BY ingested_at DESC LIMIT $(LIMIT);"
+	@if [ -z "$(TYPE)" ]; then \
+		docker compose exec postgres psql -U postgres -d haven -t -c "SELECT text FROM documents ORDER BY ingested_at DESC LIMIT $(LIMIT);"; \
+	elif [ "$(TYPE)" = "email" ]; then \
+		docker compose exec postgres psql -U postgres -d haven -t -c "SELECT title || E'\n' || text FROM documents WHERE source_type IN ('email', 'email_local') ORDER BY ingested_at DESC LIMIT $(LIMIT);"; \
+	elif [ "$(TYPE)" = "imessage" ]; then \
+		docker compose exec postgres psql -U postgres -d haven -t -c "SELECT text FROM documents WHERE source_type = 'imessage' ORDER BY ingested_at DESC LIMIT $(LIMIT);"; \
+	elif [ "$(TYPE)" = "contact" ]; then \
+		docker compose exec postgres psql -U postgres -d haven -c "SELECT external_id, title, text, COALESCE(metadata->'contact'->>'display_name', metadata->>'display_name') as display_name, ingested_at FROM documents WHERE source_type = 'contact' ORDER BY ingested_at DESC LIMIT $(LIMIT);"; \
+	else \
+		echo "Error: Invalid TYPE. Valid types: email, imessage, contact"; \
+		exit 1; \
+	fi
 
 hostagent-fresh:
 	@make purge
