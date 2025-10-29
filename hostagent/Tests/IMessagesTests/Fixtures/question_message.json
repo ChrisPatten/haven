@@ -1,0 +1,7 @@
+{
+  "name": "question_message",
+  "description": "Message with question marks and special characters",
+  "expected_text": "What's your flight?? I'm here til 730. I'll try to get a shoutout and tell the Pilot's you need lots of booze",
+  "binary_file": "question_message.bin",
+  "size_bytes": 293
+}

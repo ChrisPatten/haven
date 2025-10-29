@@ -1224,6 +1224,11 @@ public actor IMessageHandler {
             messageText = decodeAttributedBody(attrBody) ?? ""
         }
         if messageText.isEmpty {
+            logger.debug("Message has no text content, using empty message placeholder", metadata: [
+                "message_guid": message.guid,
+                "has_attributed_body": message.attributedBody != nil,
+                "attributed_body_size": message.attributedBody?.count ?? 0
+            ])
             messageText = "[empty message]"
         }
         
@@ -1545,36 +1550,283 @@ public actor IMessageHandler {
         return ISO8601DateFormatter().string(from: date)
     }
     
-    private func decodeAttributedBody(_ data: Data) -> String? {
-        // Try to extract plain text from NSAttributedString archive
-        // This is a simplified version - the Python collector has more sophisticated handling
+    nonisolated private func decodeAttributedBody(_ data: Data) -> String? {
+        // Enhanced attributed body decoding for iMessage attributedBody data
+        // The data can be in multiple formats: NSKeyedArchiver, streamtyped, or binary plist
         
+        // First, check if this is streamtyped format (starts with streamtyped marker)
+        if data.count > 11 {
+            let streamtypedMarker = Data([0x04, 0x0b, 0x73, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x74, 0x79, 0x70, 0x65, 0x64])
+            if data.prefix(13) == streamtypedMarker {
+                // This is streamtyped format - handle it directly
+                return extractTextFromStreamtypedData(data)
+            }
+        }
+        
+        // Try NSKeyedUnarchiver for proper NSKeyedArchiver format
+        do {
+            let unarchiver = try NSKeyedUnarchiver(forReadingFrom: data)
+            unarchiver.requiresSecureCoding = false
+            
+            // Try to decode as NSAttributedString first (most common case)
+            if let attributedString = unarchiver.decodeObject(of: NSAttributedString.self, forKey: NSKeyedArchiveRootObjectKey) {
+                let plainText = attributedString.string
+                return plainText.isEmpty ? nil : plainText
+            }
+            
+            // Try to decode as NSString
+            if let string = unarchiver.decodeObject(of: NSString.self, forKey: NSKeyedArchiveRootObjectKey) {
+                let plainText = string as String
+                return plainText.isEmpty ? nil : plainText
+            }
+            
+            // Try to decode as any object and extract text
+            if let anyObject = unarchiver.decodeObject(forKey: NSKeyedArchiveRootObjectKey) {
+                if let attributedString = anyObject as? NSAttributedString {
+                    let plainText = attributedString.string
+                    return plainText.isEmpty ? nil : plainText
+                } else if let string = anyObject as? NSString {
+                    let plainText = string as String
+                    return plainText.isEmpty ? nil : plainText
+                }
+            }
+            
+            unarchiver.finishDecoding()
+        } catch {
+            // NSKeyedUnarchiver failed, continue to fallback methods
+        }
+        
+        // Fallback: Try standard PropertyListSerialization (XML/binary plist formats)
         do {
             if let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
-                // Try to find the string content
-                if let objects = plist["$objects"] as? [Any] {
-                    for obj in objects {
-                        if let str = obj as? String, !str.isEmpty, str.count > 3 {
-                            // Filter out metadata strings
-                            if !str.hasPrefix("NS") && !str.hasPrefix("$") {
-                                return str
-                            }
-                        }
-                    }
+                if let result = extractTextFromPlist(plist) {
+                    return result
                 }
             }
         } catch {
-            // Fallback: try to extract UTF-8 text directly from binary data
-            if let text = String(data: data, encoding: .utf8) {
-                let cleaned = text.filter { $0.isPrintable || $0.isNewline }
-                let segments = cleaned.components(separatedBy: "\0").filter { $0.count > 10 }
-                if let longest = segments.max(by: { $0.count < $1.count }) {
-                    return longest.trimmingCharacters(in: .controlCharacters)
+            // Try to handle NSKeyedArchiver streamtyped format manually
+            if let result = extractTextFromStreamtypedData(data) {
+                return result
+            }
+            
+            // Final fallback: try to extract UTF-8 text directly from binary data
+            if let result = extractTextFromBinaryData(data) {
+                return result
+            }
+        }
+        
+        return nil
+    }
+    
+    nonisolated private func extractTextFromPlist(_ plist: [String: Any]) -> String? {
+        guard let objects = plist["$objects"] as? [Any] else {
+            return nil
+        }
+        
+        // Try to find the root object first
+        if let top = plist["$top"] as? [String: Any],
+           let root = top["root"] as? [String: Any],
+           let rootUID = root["UID"] as? Int {
+            if rootUID < objects.count,
+               let rootObj = objects[rootUID] as? [String: Any] {
+                if let result = extractTextFromObject(rootObj, objects: objects) {
+                    return result
+                }
+            }
+        }
+        
+        // Fallback: search through all objects
+        for obj in objects {
+            if let result = extractTextFromObject(obj, objects: objects) {
+                return result
+            }
+        }
+        
+        return nil
+    }
+    
+    nonisolated private func extractTextFromObject(_ obj: Any, objects: [Any]) -> String? {
+        guard let dict = obj as? [String: Any] else {
+            return nil
+        }
+        
+        // Check for NSString directly
+        if let nsString = dict["NSString"] as? String {
+            return nsString.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+        }
+        
+        // Check for NS.string reference
+        if let nsStringRef = dict["NS.string"] as? [String: Any],
+           let uid = nsStringRef["UID"] as? Int,
+           uid < objects.count,
+           let stringObj = objects[uid] as? String {
+            return stringObj.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+        }
+        
+        // Check for NS.objects array
+        if let nsObjects = dict["NS.objects"] as? [Any] {
+            for item in nsObjects {
+                if let result = extractTextFromObject(item, objects: objects) {
+                    return result
+                }
+            }
+        }
+        
+        // Check for NS.values array
+        if let nsValues = dict["NS.values"] as? [Any] {
+            for item in nsValues {
+                if let result = extractTextFromObject(item, objects: objects) {
+                    return result
                 }
             }
         }
         
         return nil
+    }
+    
+    nonisolated private func extractTextFromStreamtypedData(_ data: Data) -> String? {
+        // Handle NSKeyedArchiver streamtyped format
+        // This is a binary format where text is embedded directly
+        
+        // Handle empty or very small data
+        guard data.count > 2 else {
+            return nil
+        }
+        
+        // Look for the pattern: + (0x2b) followed by length byte, then text
+        for i in 0..<(data.count - 2) {
+            if data[i] == 0x2b { // '+'
+                let lengthByte = data[i + 1]
+                let textStart = i + 2
+                let textEnd = textStart + Int(lengthByte)
+                
+                if textEnd <= data.count && textEnd > textStart {
+                    let textData = data.subdata(in: textStart..<textEnd)
+                    if let text = String(data: textData, encoding: .utf8) {
+                        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        // Filter out metadata-like strings
+                        if cleaned.count > 3 && !cleaned.hasPrefix("NS") && !cleaned.hasPrefix("__k") &&
+                           !cleaned.contains("streamtyped") && !cleaned.contains("NSObject") {
+                            return cleaned
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fallback: Convert to string to look for patterns
+        guard let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        
+        // Look for streamtyped pattern with text content
+        if text.contains("streamtyped") {
+            // Find the actual message text after the streamtyped marker
+            // The pattern is usually: streamtyped@NSAttributedStringNSObjectNSString+<actual_text>
+            if let plusIndex = text.firstIndex(of: "+") {
+                let afterPlus = text.index(after: plusIndex)
+                let searchText = String(text[afterPlus...])
+                
+                // Extract text until we hit metadata markers
+                var extractedText = ""
+                for char in searchText {
+                    // Stop at common metadata markers
+                    if char == "\0" || char == "\u{02}" || char == "i" || char == "I" {
+                        // Check if this looks like the start of metadata
+                        if char == "i" || char == "I" {
+                            // Look ahead to see if this is metadata
+                            let remaining = String(searchText[searchText.index(searchText.startIndex, offsetBy: extractedText.count)...])
+                            if remaining.hasPrefix("iNSDictionary") || remaining.hasPrefix("INSDictionary") ||
+                               remaining.hasPrefix("i__kIM") || remaining.hasPrefix("I__kIM") {
+                                break
+                            }
+                        } else {
+                            break
+                        }
+                    }
+                    extractedText.append(char)
+                }
+                
+                // Clean up the extracted text
+                let cleaned = extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                // Filter out very short or metadata-like strings
+                if cleaned.count > 3 && !cleaned.hasPrefix("NS") && !cleaned.hasPrefix("__k") {
+                    return cleaned
+                }
+            }
+        }
+        
+        // If UTF-8 decoding didn't work, try to extract text directly from binary data
+        // Look for ASCII text patterns in the binary data
+        var extractedText = ""
+        var i = 0
+        while i < data.count {
+            let byte = data[i]
+            // Look for printable ASCII characters
+            if byte >= 32 && byte <= 126 {
+                extractedText.append(Character(UnicodeScalar(byte)))
+            } else if byte == 0 {
+                // Null terminator - check if we have a reasonable text length
+                if extractedText.count > 5 && extractedText.count < 1000 {
+                    // Check if it looks like actual text (not metadata)
+                    if !extractedText.hasPrefix("NS") && !extractedText.hasPrefix("__k") && 
+                       !extractedText.contains("streamtyped") && !extractedText.contains("NSObject") {
+                        return extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+                extractedText = ""
+            } else {
+                // Non-printable character - reset if we don't have much text
+                if extractedText.count < 5 {
+                    extractedText = ""
+                }
+            }
+            i += 1
+        }
+        
+        // Return the longest text segment we found
+        if extractedText.count > 5 && !extractedText.hasPrefix("NS") && !extractedText.hasPrefix("__k") {
+            return extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        return nil
+    }
+    
+    nonisolated private func extractTextFromBinaryData(_ data: Data) -> String? {
+        // Fallback: try to extract UTF-8 text directly from binary data
+        guard let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        
+        // Remove null bytes and control characters, keep printable and newlines
+        let cleaned = text.filter { char in
+            char.isPrintable || char.isNewline
+        }
+        
+        // Extract the longest contiguous text segment (likely the actual message)
+        let segments = cleaned.components(separatedBy: "\0")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count > 10 }
+        
+        if let longest = segments.max(by: { $0.count < $1.count }) {
+            return longest.trimmingCharacters(in: .controlCharacters)
+        }
+        
+        return nil
+    }
+    
+    /// Public method for testing attributed body decoding
+    func testDecodeAttributedBody(_ data: Data) -> String? {
+        return decodeAttributedBody(data)
+    }
+    
+    /// Static method for testing attributed body decoding without initialization
+    static func testDecodeAttributedBodyStatic(_ data: Data) -> String? {
+        let config = HavenConfig()
+        let gatewayClient = GatewayClient(config: config.gateway, authToken: config.auth.secret)
+        let handler = IMessageHandler(config: config, gatewayClient: gatewayClient)
+        return handler.decodeAttributedBody(data)
     }
     
     /// Post a batch of documents to the gateway /v1/ingest endpoint

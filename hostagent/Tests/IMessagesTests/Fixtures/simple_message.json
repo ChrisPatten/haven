@@ -1,0 +1,7 @@
+{
+  "name": "simple_message",
+  "description": "Simple text message with basic attributed body",
+  "expected_text": "Always a patriot",
+  "binary_file": "simple_message.bin",
+  "size_bytes": 192
+}

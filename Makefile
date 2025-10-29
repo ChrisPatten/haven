@@ -2,11 +2,13 @@
 
 .PHONY: help rebuild purge local_setup start restart stop collector backup restore list-backups export-openapi docs
 
+LIMIT ?= 1
+
 help:
 	@echo "Available targets:"
 	@echo "  help                      Show this help"
 	@echo "  local_setup               Create/activate virtualenv and install local_requirements.txt"
-	@echo "  start                     Start docker compose services and follow logs"
+	@echo "  start                     Start docker compose services"
 	@echo "  stop                      Stop docker compose services"
 	@echo "  restart                   Restart docker compose services"
 	@echo "  rebuild [SERVICE]         Rebuild docker compose services (no-cache) and follow logs"
@@ -22,7 +24,8 @@ help:
 	@echo "  restore <name>            Restore from a backup (prompts for confirmation)"
 	@echo "                            Example: make restore NAME=before-migration"
 	@echo "  list-backups              List all available backups with details"
-	@echo "  peek                  	   Show the last document ingested by Haven"
+	@echo "  peek [LIMIT=<n>]          Show the last N documents ingested by Haven (default: 1)"
+	@echo "  logs					   Tail the docker compose logs"
 	
 # Rebuild docker compose services from scratch, start detached, and follow logs
 # Usage: make rebuild [SERVICE]
@@ -74,6 +77,8 @@ local_setup:
 # Start docker compose in detached mode and follow logs
 start:
 	@docker compose up -d
+
+logs:
 	@docker compose logs -f
 
 # Stop docker compose services
@@ -143,4 +148,4 @@ docs:
 install-hooks: .githooks/install-hooks
 
 peek:
-	@docker compose exec postgres psql -U postgres -d haven -t -c "SELECT text FROM documents ORDER BY ingested_at DESC LIMIT 1;"
+	@docker compose exec postgres psql -U postgres -d haven -t -c "SELECT text FROM documents ORDER BY ingested_at DESC LIMIT $(LIMIT);"

@@ -1,0 +1,7 @@
+{
+  "name": "group_message",
+  "description": "Message from a group chat",
+  "expected_text": "Lord Beckett is definitely the account in the group lol",
+  "binary_file": "group_message.bin",
+  "size_bytes": 230
+}
