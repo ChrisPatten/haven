@@ -5,7 +5,8 @@ This page documents how the HostAgent email collector constructs ingestion paylo
 ## Overview
 
 - **Endpoint targets**
-  - `POST /v1/ingest` for redacted email document payloads.
+  - `POST /v1/ingest` for single redacted email document payloads.
+  - `POST /v1/ingest:batch` for multiple documents in one request (used when `batch: true` in collector config).
   - `POST /v1/ingest/file` for binary attachments plus enrichment metadata.
 - **Idempotency keys**
   - Documents: `SHA256("{source_type}:{source_id}:{text_hash}")`, where `text_hash` is the SHA-256 of the normalized body (CRLF → LF, trimmed) before redaction.

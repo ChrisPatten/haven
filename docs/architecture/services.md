@@ -11,7 +11,7 @@ Each Haven service plays a specific role in the ingestion → enrichment → sea
 | HostAgent | 7090 (localhost) | Swift | macOS-native collectors, OCR, FS watch, link resolver |
 
 ## Gateway API
-- **Responsibilities**: Validate payloads (`/v1/ingest`, `/v1/ingest/file`), compute idempotency keys, forward documents to Catalog, broker access to search, and expose `ask` summarisation.
+- **Responsibilities**: Validate payloads (`/v1/ingest`, `/v1/ingest:batch`, `/v1/ingest/file`), compute idempotency keys, forward documents to Catalog, broker access to search, and expose `ask` summarisation.
 - **Authentication**: Bearer tokens via `Authorization: Bearer <token>`.
 - **Integrations**: Reads MinIO credentials for file uploads, proxies requests to Catalog and Search, communicates with HostAgent (`host.docker.internal:7090`).
 - **Observability**: `/v1/healthz`, structured logs keyed by `submission_id`, metrics covering request timings.

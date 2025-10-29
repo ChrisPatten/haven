@@ -49,6 +49,7 @@ Versioning: `PATCH /v1/catalog/documents/{doc_id}/version` clones document state
 | Endpoint | Description |
 | --- | --- |
 | `POST /v1/ingest` | Accepts text documents; forwards v2 payload with timestamps, people, thread info, facet overrides |
+| `POST /v1/ingest:batch` | Batch ingest endpoint; accepts multiple documents in one request, returns per-item results with batch tracking |
 | `POST /v1/ingest/file` | Handles multipart uploads; stores in MinIO, extracts text, populates file descriptors (`content_sha256`, `object_key`, enrichment) |
 | `GET /v1/ingest/{submission_id}` | Returns catalog submission status: chunk counts, document status, errors |
 | `GET /v1/search` | Hybrid search; supports filters `has_attachments`, `source_type`, `person`, `thread_id`, `start_date`, `end_date`, `context_window` |
@@ -70,6 +71,7 @@ Versioning: `PATCH /v1/catalog/documents/{doc_id}/version` clones document state
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /v1/catalog/documents` | Idempotent document insertion; handles threads, files, chunks, facet flags |
+| `POST /v1/catalog/documents/batch` | Batch document insertion; processes multiple documents atomically, tracks batch status in `ingest_batches` table |
 | `PATCH /v1/catalog/documents/{doc_id}/version` | Creates a new version, copies/updates file links, rebuilds chunks |
 | `GET /v1/catalog/submissions/{submission_id}` | Submission state (catalog + embedding progress) |
 | `GET /v1/catalog/documents/{doc_id}/status` | Per-document chunk counts and status |
