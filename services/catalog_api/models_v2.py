@@ -93,6 +93,39 @@ class DocumentIngestResponse(BaseModel):
     duplicate: bool = False
 
 
+class DocumentBatchIngestRequest(BaseModel):
+    documents: List[DocumentIngestRequest] = Field(default_factory=list)
+    batch_idempotency_key: Optional[str] = None
+
+    @validator("documents")
+    def ensure_documents(cls, documents: List[DocumentIngestRequest]) -> List[DocumentIngestRequest]:
+        if not documents:
+            raise ValueError("Batch must include at least one document")
+        return documents
+
+
+class DocumentBatchIngestError(BaseModel):
+    code: str
+    message: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DocumentBatchIngestItem(BaseModel):
+    index: int
+    status_code: int
+    document: Optional[DocumentIngestResponse] = None
+    error: Optional[DocumentBatchIngestError] = None
+
+
+class DocumentBatchIngestResponse(BaseModel):
+    batch_id: UUID
+    batch_status: str
+    total_count: int
+    success_count: int
+    failure_count: int
+    results: List[DocumentBatchIngestItem] = Field(default_factory=list)
+
+
 class DocumentVersionRequest(BaseModel):
     text: Optional[str] = None
     title: Optional[str] = None

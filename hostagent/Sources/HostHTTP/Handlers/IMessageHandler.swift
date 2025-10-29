@@ -154,6 +154,10 @@ public actor IMessageHandler {
                 // Extract parameters from RunRequest
                 params.limit = runRequest!.limit  // Use provided limit or nil for unlimited
                 params.order = runRequest!.order.rawValue
+                params.batchMode = runRequest!.batch ?? false
+                if let providedBatchSize = runRequest!.batchSize {
+                    params.batchSize = providedBatchSize
+                }
                 if let dateRange = runRequest!.dateRange {
                     params.since = dateRange.since
                     params.until = dateRange.until
@@ -179,7 +183,9 @@ public actor IMessageHandler {
         logger.info("Starting iMessage collector", metadata: [
             "limit": params.limit?.description ?? "unlimited",
             "thread_lookback_days": String(params.threadLookbackDays),
-            "message_lookback_days": String(params.messageLookbackDays)
+            "message_lookback_days": String(params.messageLookbackDays),
+            "batch_mode": params.batchMode ? "true" : "false",
+            "batch_size": params.batchSize.map(String.init) ?? "default"
         ])
         
         // Run collection
@@ -204,7 +210,7 @@ public actor IMessageHandler {
             
             // Documents are posted to gateway in batches during collection
             // Count successful posts from the collection process
-            let successCount = result.count
+            let successCount = result.submittedCount
             let failureCount = 0  // Individual failures are logged but don't stop processing
             
             let endTime = Date()
@@ -216,7 +222,7 @@ public actor IMessageHandler {
             lastRunStats = stats
             
             logger.info("iMessage collection completed", metadata: [
-                "documents": String(result.count),
+                "documents": String(result.documents.count),
                 "posted": String(successCount),
                 "failed": String(failureCount),
                 "duration_ms": String(stats.durationMs ?? 0)
@@ -289,11 +295,13 @@ public actor IMessageHandler {
         var since: Date? = nil
         var until: Date? = nil
         var threadLookbackDays: Int = 90
-    // If zero, no implicit lookback is applied. Use explicit `since` or
-    // `message_lookback_days` to constrain the query.
-    var messageLookbackDays: Int = 0
+        // If zero, no implicit lookback is applied. Use explicit `since` or
+        // `message_lookback_days` to constrain the query.
+        var messageLookbackDays: Int = 0
         var chatDbPath: String = ""
         var configChatDbPath: String = ""
+        var batchMode: Bool = false
+        var batchSize: Int? = nil
         
         var resolvedChatDbPath: String {
             if !configChatDbPath.isEmpty {
@@ -306,7 +314,7 @@ public actor IMessageHandler {
         }
     }
     
-    private func collectMessages(params: CollectorParams, stats: inout CollectorStats) async throws -> [[String: Any]] {
+    private func collectMessages(params: CollectorParams, stats: inout CollectorStats) async throws -> (documents: [[String: Any]], submittedCount: Int) {
         let chatDbPath = params.resolvedChatDbPath
         
         // Check if chat.db exists
@@ -413,14 +421,11 @@ public actor IMessageHandler {
             sqlite3_finalize(pragmaStmt)
         }
         
-        // Load persisted state (last and earliest processed row IDs)
-        var lastProcessedRowId: Int64? = nil
-        var earliestProcessedRowIdCache: Int64? = nil
+        // Load persisted fences (timestamp-based)
+        var fences: [FenceRange] = []
         do {
-            if let state = try loadIMessageState() {
-                lastProcessedRowId = state.last
-                earliestProcessedRowIdCache = state.earliest
-            }
+            fences = try loadIMessageState()
+            logger.info("Loaded iMessage fences", metadata: ["fence_count": String(fences.count)])
         } catch {
             logger.warning("Failed to load iMessage collector state", metadata: ["error": error.localizedDescription])
         }
@@ -435,54 +440,127 @@ public actor IMessageHandler {
         // updated during the posting loop in `handleRun` after a document is
         // successfully submitted to the Gateway.
 
-        // Compose processing order based on cached state
+        // Compose processing order (still ID-based for ordering, but we'll filter by timestamp during iteration)
         // Convert optional since/until dates to Apple epoch Int64 for comparisons
         let sinceEpoch: Int64? = params.since != nil ? dateToAppleEpoch(params.since!) : nil
         let untilEpoch: Int64? = params.until != nil ? dateToAppleEpoch(params.until!) : nil
 
+        // Order the row IDs based on the requested order (asc/desc)
+        // We filter by timestamp and fences during iteration, so composeProcessingOrder just handles ordering
         let orderedRowIds = composeProcessingOrder(
             searchResultAsc: rowIds,
-            lastProcessedId: lastProcessedRowId,
+            lastProcessedId: nil,  // No longer used - we filter by timestamp during iteration
             order: params.order,
             since: params.since,
             before: params.until,
-            oldestCachedId: earliestProcessedRowIdCache
+            oldestCachedId: nil  // No longer used - we filter by timestamp during iteration
         )
 
-        // Process records in batches of 500, posting each batch to gateway
-        let batchSize = 500
+        // Process records in caller-configured batches, posting each batch to gateway
+        let batchSize = max(1, params.batchSize ?? 500)
         var allDocuments: [[String: Any]] = []
-        var processedCount = 0
-        var earliestProcessedRowId: Int64? = nil
+        var submittedCount = 0  // Only count successfully submitted messages toward limit
         var currentBatch: [[String: Any]] = []
+        var currentBatchTimestamps: [Date] = []  // Track timestamps for fence updates
         
         logger.info("Processing messages in batches of \(batchSize)", metadata: [
             "total_rows": String(orderedRowIds.count),
-            "limit": params.limit?.description ?? "unlimited"
+            "limit": params.limit?.description ?? "unlimited",
+            "submission_mode": params.batchMode ? "batch" : "single",
+            "existing_fences": String(fences.count)
         ])
 
         // Iterate ordered rows and prepare documents in batches
         for rowId in orderedRowIds {
             // Check if we've hit the overall limit BEFORE processing
-            if let lim = params.limit, lim > 0, processedCount >= lim {
+            if let lim = params.limit, lim > 0, submittedCount >= lim {
                 logger.info("Reached limit of \(lim) messages, stopping processing")
                 break
             }
             
             // Fetch the message row
             guard let message = try fetchMessageByRowId(db: db!, rowId: rowId) else { continue }
+            
+            // Use canonical timestamp: message.date (the message's primary timestamp)
+            // This is used for all comparisons, fences, and ordering - never use date_read or date_delivered
+            // Convert from Apple epoch to Date for fence checking and date range comparisons
+            let messageDate = appleEpochToDate(message.date)
 
-            // If date bounds are specified, check them and stop processing when reached
-            if let s = sinceEpoch {
-                if message.date < s {
-                    logger.info("Reached since date constraint, stopping processing")
-                    break
+            // Check if message timestamp is within any fence - if so, skip
+            if FenceManager.isTimestampInFences(messageDate, fences: fences) {
+                logger.debug("Skipping message within fence", metadata: [
+                    "row_id": String(rowId),
+                    "timestamp": ISO8601DateFormatter().string(from: messageDate),
+                    "fence_count": String(fences.count)
+                ])
+                continue
+            }
+            
+            // Log when we're processing a message near fence boundaries for debugging
+            if !fences.isEmpty {
+                let closestFence = fences.min(by: { abs($0.earliest.timeIntervalSince(messageDate)) < abs($1.earliest.timeIntervalSince(messageDate)) })
+                if let fence = closestFence {
+                    let timeSinceEarliest = messageDate.timeIntervalSince(fence.earliest)
+                    let timeSinceLatest = messageDate.timeIntervalSince(fence.latest)
+                    if abs(timeSinceEarliest) < 60 || abs(timeSinceLatest) < 60 {
+                        logger.debug("Processing message near fence boundary", metadata: [
+                            "row_id": String(rowId),
+                            "timestamp": ISO8601DateFormatter().string(from: messageDate),
+                            "fence_earliest": ISO8601DateFormatter().string(from: fence.earliest),
+                            "fence_latest": ISO8601DateFormatter().string(from: fence.latest),
+                            "seconds_since_earliest": String(format: "%.3f", timeSinceEarliest),
+                            "seconds_since_latest": String(format: "%.3f", timeSinceLatest)
+                        ])
+                    }
                 }
             }
-            if let u = untilEpoch {
-                if message.date > u {
-                    logger.info("Reached until date constraint, stopping processing")
-                    break
+
+            // If date bounds are specified, check them and skip/stop based on processing order
+            // All comparisons use the canonical timestamp: message.date (Apple epoch)
+            // In descending order (newest first): skip messages > until, stop when < since
+            // In ascending order (oldest first): skip messages < since, stop when > until
+            let isDescOrder = (params.order?.lowercased() == "desc")
+            if isDescOrder {
+                // Descending order: process from newest to oldest
+                // Compare canonical timestamp directly in Apple epoch format
+                if let u = untilEpoch {
+                    if message.date > u {
+                        // Message is too new (after until), skip and continue to older messages
+                        logger.debug("Skipping message after until date", metadata: [
+                            "row_id": String(rowId),
+                            "message_date": String(message.date),
+                            "until": String(u)
+                        ])
+                        continue
+                    }
+                }
+                if let s = sinceEpoch {
+                    if message.date < s {
+                        // Message is too old (before since), stop processing
+                        logger.info("Reached since date constraint, stopping processing")
+                        break
+                    }
+                }
+            } else {
+                // Ascending order: process from oldest to newest
+                // Compare canonical timestamp directly in Apple epoch format
+                if let s = sinceEpoch {
+                    if message.date < s {
+                        // Message is too old (before since), skip and continue to newer messages
+                        logger.debug("Skipping message before since date", metadata: [
+                            "row_id": String(rowId),
+                            "message_date": String(message.date),
+                            "since": String(s)
+                        ])
+                        continue
+                    }
+                }
+                if let u = untilEpoch {
+                    if message.date > u {
+                        // Message is too new (after until), stop processing
+                        logger.info("Reached until date constraint, stopping processing")
+                        break
+                    }
                 }
             }
 
@@ -499,41 +577,75 @@ public actor IMessageHandler {
 
             let document = try buildDocument(message: message, thread: thread, attachments: enrichedAttachments)
             currentBatch.append(document)
+            currentBatchTimestamps.append(messageDate)
             allDocuments.append(document)
             stats.documentsCreated += 1
-            processedCount += 1
 
-            // Track earliest processed rowId
-            if let prev = earliestProcessedRowId {
-                if rowId < prev { earliestProcessedRowId = rowId }
+            // Process batch when it reaches batch size OR when we've reached the limit
+            let shouldFlushBatch: Bool
+            if let lim = params.limit, lim > 0 {
+                // Check if adding this document would exceed limit
+                // We need to account for documents already in currentBatch that haven't been submitted yet
+                let totalPrepared = submittedCount + currentBatch.count
+                shouldFlushBatch = currentBatch.count >= batchSize || totalPrepared >= lim
             } else {
-                earliestProcessedRowId = rowId
+                shouldFlushBatch = currentBatch.count >= batchSize
             }
-
-            // Persist last/earliest processed IDs after each document is prepared
-            do {
-                let lastToSave = max(lastProcessedRowId ?? 0, rowId)
-                try saveIMessageState(last: lastToSave, earliest: earliestProcessedRowId)
-            } catch {
-                logger.warning("Failed to save iMessage collector state", metadata: ["error": error.localizedDescription])
-            }
-
-            // Process batch when it reaches batch size
-            if currentBatch.count >= batchSize {
-                logger.info("Processing batch of \(currentBatch.count) documents")
+            
+            if shouldFlushBatch {
+                // If we have a limit, truncate batch to only submit what we need
+                var batchToSubmit = currentBatch
+                var timestampsToSubmit = currentBatchTimestamps
+                if let lim = params.limit, lim > 0, submittedCount < lim {
+                    let remaining = lim - submittedCount
+                    if currentBatch.count > remaining {
+                        batchToSubmit = Array(currentBatch.prefix(remaining))
+                        timestampsToSubmit = Array(currentBatchTimestamps.prefix(remaining))
+                        logger.info("Truncating batch to respect limit", metadata: [
+                            "original_size": String(currentBatch.count),
+                            "truncated_size": String(remaining),
+                            "limit": String(lim),
+                            "already_submitted": String(submittedCount)
+                        ])
+                    }
+                }
+                
+                logger.info("Processing batch of \(batchToSubmit.count) documents")
                 
                 // Post batch to gateway
-                let batchSuccessCount = try await postDocumentsToGateway(currentBatch)
+                let batchSuccessCount = try await postDocumentsToGateway(batchToSubmit, batchMode: params.batchMode)
                 logger.info("Posted batch to gateway", metadata: [
-                    "batch_size": String(currentBatch.count),
-                    "success_count": String(batchSuccessCount)
+                    "batch_size": String(batchToSubmit.count),
+                    "posted_to_gateway": String(batchSuccessCount),
+                    "submission_mode": params.batchMode ? "batch" : "single"
                 ])
                 
-                // Update earliest/latest timestamps for successfully posted docs
-                for document in currentBatch {
-                    if let contentTs = document["content_timestamp"] as? String,
-                       let contentDate = ISO8601DateFormatter().date(from: contentTs) {
-                        let appleTs = dateToAppleEpoch(contentDate)
+                // Update submitted count (only successful submissions count toward limit)
+                submittedCount += batchSuccessCount
+                
+                // Update fences with successfully submitted timestamps
+                let successfulTimestamps = Array(timestampsToSubmit.prefix(batchSuccessCount))
+                if !successfulTimestamps.isEmpty {
+                    let minTimestamp = successfulTimestamps.min()!
+                    let maxTimestamp = successfulTimestamps.max()!
+                    fences = FenceManager.addFence(newEarliest: minTimestamp, newLatest: maxTimestamp, existingFences: fences)
+                    
+                    // Save updated fences
+                    do {
+                        try saveIMessageState(fences: fences)
+                    } catch {
+                        logger.warning("Failed to save iMessage collector state", metadata: ["error": error.localizedDescription])
+                    }
+                    
+                    // Update earliest/latest timestamps for successfully posted docs using the same timestamps
+                    // These represent messages actually submitted in THIS run only
+                    logger.debug("Updating stats with successful timestamps", metadata: [
+                        "count": String(successfulTimestamps.count),
+                        "min": ISO8601DateFormatter().string(from: successfulTimestamps.min() ?? Date()),
+                        "max": ISO8601DateFormatter().string(from: successfulTimestamps.max() ?? Date())
+                    ])
+                    for timestamp in successfulTimestamps {
+                        let appleTs = dateToAppleEpoch(timestamp)
                         if let prev = stats.earliestMessageTimestamp {
                             if appleTs < prev { stats.earliestMessageTimestamp = appleTs }
                         } else {
@@ -547,25 +659,73 @@ public actor IMessageHandler {
                     }
                 }
                 
-                // Clear current batch
-                currentBatch = []
+                // Remove submitted items from current batch
+                let remainingCount = currentBatch.count - batchToSubmit.count
+                if remainingCount > 0 {
+                    currentBatch = Array(currentBatch.suffix(remainingCount))
+                    currentBatchTimestamps = Array(currentBatchTimestamps.suffix(remainingCount))
+                } else {
+                    currentBatch = []
+                    currentBatchTimestamps = []
+                }
+                
+                // Check if we've reached the limit after this batch
+                if let lim = params.limit, lim > 0, submittedCount >= lim {
+                    logger.info("Reached limit of \(lim) messages after batch submission, stopping processing")
+                    break
+                }
             }
         }
         
         // Process any remaining documents in the final batch
+        // But only if we haven't exceeded the limit
         if !currentBatch.isEmpty {
-            logger.info("Processing final batch of \(currentBatch.count) documents")
-            let batchSuccessCount = try await postDocumentsToGateway(currentBatch)
+            // Truncate to limit if needed
+            var finalBatch = currentBatch
+            var finalTimestamps = currentBatchTimestamps
+            if let lim = params.limit, lim > 0, submittedCount < lim {
+                let remaining = lim - submittedCount
+                if currentBatch.count > remaining {
+                    finalBatch = Array(currentBatch.prefix(remaining))
+                    finalTimestamps = Array(currentBatchTimestamps.prefix(remaining))
+                    logger.info("Truncating final batch to respect limit", metadata: [
+                        "original_size": String(currentBatch.count),
+                        "truncated_size": String(remaining),
+                        "limit": String(lim),
+                        "already_submitted": String(submittedCount)
+                    ])
+                }
+            }
+            
+            logger.info("Processing final batch of \(finalBatch.count) documents")
+            let batchSuccessCount = try await postDocumentsToGateway(finalBatch, batchMode: params.batchMode)
             logger.info("Posted final batch to gateway", metadata: [
-                "batch_size": String(currentBatch.count),
-                "success_count": String(batchSuccessCount)
+                "batch_size": String(finalBatch.count),
+                "posted_to_gateway": String(batchSuccessCount),
+                "submission_mode": params.batchMode ? "batch" : "single"
             ])
             
-            // Update earliest/latest timestamps for successfully posted docs
-            for document in currentBatch {
-                if let contentTs = document["content_timestamp"] as? String,
-                   let contentDate = ISO8601DateFormatter().date(from: contentTs) {
-                    let appleTs = dateToAppleEpoch(contentDate)
+            // Update submitted count
+            submittedCount += batchSuccessCount
+            
+            // Update fences with successfully submitted timestamps
+            let successfulTimestamps = Array(finalTimestamps.prefix(batchSuccessCount))
+            if !successfulTimestamps.isEmpty {
+                let minTimestamp = successfulTimestamps.min()!
+                let maxTimestamp = successfulTimestamps.max()!
+                fences = FenceManager.addFence(newEarliest: minTimestamp, newLatest: maxTimestamp, existingFences: fences)
+                
+                // Save updated fences
+                do {
+                    try saveIMessageState(fences: fences)
+                } catch {
+                    logger.warning("Failed to save iMessage collector state", metadata: ["error": error.localizedDescription])
+                }
+                
+                // Update earliest/latest timestamps for successfully posted docs using the same timestamps
+                // These represent messages actually submitted in THIS run only
+                for timestamp in successfulTimestamps {
+                    let appleTs = dateToAppleEpoch(timestamp)
                     if let prev = stats.earliestMessageTimestamp {
                         if appleTs < prev { stats.earliestMessageTimestamp = appleTs }
                     } else {
@@ -580,7 +740,7 @@ public actor IMessageHandler {
             }
         }
 
-        return allDocuments
+        return (documents: allDocuments, submittedCount: submittedCount)
     }
     
     private func createChatDbSnapshot(sourcePath: String) throws -> String {
@@ -837,6 +997,9 @@ public actor IMessageHandler {
 
     private func fetchMessageRowIds(db: OpaquePointer, params: CollectorParams) throws -> [Int64] {
         var ids: [Int64] = []
+        // Use canonical timestamp: message.date (not date_read or date_delivered)
+        // This is the message's primary timestamp used for all processing, fences, and ordering
+        
         // Determine effective lower-bound (explicit since preferred)
         var lowerBoundEpoch: Int64? = nil
         if let since = params.since {
@@ -845,21 +1008,32 @@ public actor IMessageHandler {
             let lookbackDate = Date().addingTimeInterval(-Double(params.messageLookbackDays) * 24 * 3600)
             lowerBoundEpoch = dateToAppleEpoch(lookbackDate)
         }
+        
+        // Determine upper-bound (until constraint)
+        let upperBoundEpoch: Int64? = params.until != nil ? dateToAppleEpoch(params.until!) : nil
 
         var query = """
             SELECT m.ROWID
             FROM message m
 
             """
+        var whereClauses: [String] = []
+        // Use canonical timestamp field: m.date
         if lowerBoundEpoch != nil {
-            query += "WHERE m.date >= ?\n"
+            whereClauses.append("m.date >= ?")
+        }
+        if upperBoundEpoch != nil {
+            whereClauses.append("m.date <= ?")
+        }
+        if !whereClauses.isEmpty {
+            query += "WHERE " + whereClauses.joined(separator: " AND ") + "\n"
         }
         query += "ORDER BY m.ROWID ASC\n"
 
-    // Log the query to help diagnose SQL syntax issues when dynamically composing the WHERE clause
-    logger.debug("Preparing message rowid query", metadata: ["query": query])
-    var stmt: OpaquePointer?
-    let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
+        // Log the query to help diagnose SQL syntax issues when dynamically composing the WHERE clause
+        logger.debug("Preparing message rowid query", metadata: ["query": query])
+        var stmt: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
         guard prepareResult == SQLITE_OK else {
             let errorMsg = String(cString: sqlite3_errmsg(db))
             logger.error("Failed to prepare message rowid query", metadata: ["error": errorMsg, "code": String(prepareResult)])
@@ -867,8 +1041,15 @@ public actor IMessageHandler {
         }
         defer { sqlite3_finalize(stmt) }
 
+        // Bind parameters in order: lowerBound (since) first, then upperBound (until)
+        var paramIndex: Int32 = 1
         if let lb = lowerBoundEpoch {
-            sqlite3_bind_int64(stmt, 1, lb)
+            sqlite3_bind_int64(stmt, paramIndex, lb)
+            paramIndex += 1
+        }
+        if let ub = upperBoundEpoch {
+            sqlite3_bind_int64(stmt, paramIndex, ub)
+            paramIndex += 1
         }
 
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -1026,6 +1207,9 @@ public actor IMessageHandler {
         return threads
     }
 
+    // MARK: - Fence Management
+    // Uses shared FenceManager from HavenCore
+
     // MARK: - State persistence for iMessage collector
 
     private func iMessageCacheDirURL() -> URL {
@@ -1046,30 +1230,26 @@ public actor IMessageHandler {
         return dir.appendingPathComponent(fileName)
     }
 
-    private func loadIMessageState() throws -> (last: Int64?, earliest: Int64?)? {
+    private func loadIMessageState() throws -> [FenceRange] {
         let url = iMessageCacheFileURL()
         let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return nil }
+        guard fm.fileExists(atPath: url.path) else { return [] }
         let data = try Data(contentsOf: url)
-        let decoder = JSONDecoder()
-        let obj = try decoder.decode([String: Int64].self, from: data)
-        let last = obj["last_processed_rowid"]
-        let earliest = obj["earliest_processed_rowid"]
-        return (last: last, earliest: earliest)
+        let fences = try FenceManager.loadFences(from: data, oldFormatType: [String: Int64].self)
+        if fences.isEmpty && !data.isEmpty {
+            logger.info("Detected old iMessage state format, starting fresh with timestamp-based fences")
+        }
+        return fences
     }
 
-    private func saveIMessageState(last: Int64, earliest: Int64?) throws {
+    private func saveIMessageState(fences: [FenceRange]) throws {
         let url = iMessageCacheFileURL()
         let dir = url.deletingLastPathComponent()
         let fm = FileManager.default
         if !fm.fileExists(atPath: dir.path) {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
-        var obj: [String: Int64] = ["last_processed_rowid": last]
-        if let e = earliest { obj["earliest_processed_rowid"] = e }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let data = try encoder.encode(obj)
+        let data = try FenceManager.saveFences(fences)
         try data.write(to: url, options: .atomic)
     }
 
@@ -1103,9 +1283,30 @@ public actor IMessageHandler {
         }
 
         if normalizedOrder == "desc" {
-            // Process newer messages newest->oldest, then older-than-cache newest->oldest
-            let newDesc = Array(newerAsc.reversed())
-            if let oldestCached = cachedIds.first {
+            // Process newer messages newest->oldest, then continue with older messages newest->oldest
+            // This handles the case where new messages arrive after processing older ones.
+            // Example: First run processes 100..91. New message 101 arrives.
+            // Next run should process 101, then continue with 90..82.
+            if let last = lastProcessedId {
+                // Process new messages (ID > lastProcessedId) first, in descending order
+                let newMessagesDesc = uidsSortedAsc
+                    .filter { $0 > last }
+                    .reversed()
+                
+                // Then continue with older messages (ID < oldestCachedId), in descending order
+                // This allows us to resume processing from where we left off
+                if let oldest = oldestCachedId {
+                    let olderMessagesDesc = uidsSortedAsc
+                        .filter { $0 < oldest }
+                        .reversed()
+                    return Array(newMessagesDesc) + Array(olderMessagesDesc)
+                } else {
+                    // No oldestCachedId: only process new messages
+                    return Array(newMessagesDesc)
+                }
+            } else if let oldestCached = cachedIds.first {
+                // No lastProcessedId but we have cached range: process newer messages and older than cache
+                let newDesc = Array(newerAsc.reversed())
                 let olderThanCacheDesc = Array(uidsSortedAsc.filter { $0 < oldestCached }.reversed())
                 return newDesc + olderThanCacheDesc
             } else {
@@ -1115,7 +1316,14 @@ public actor IMessageHandler {
         } else {
             // Ascending ordering: process messages in ascending order, skipping already-processed ones
             // to enable proper pagination across multiple runs.
-            if let last = lastProcessedId {
+            // If 'since' is provided, start from that date regardless of lastProcessedId,
+            // as the user is explicitly specifying a new starting point.
+            if since != nil {
+                // User specified a date range starting point - process all messages in the result set
+                // (which is already filtered by since date from fetchMessageRowIds)
+                return uidsSortedAsc
+            } else if let last = lastProcessedId {
+                // No since date specified - continue from where we left off
                 return uidsSortedAsc.filter { $0 > last }
             } else {
                 return uidsSortedAsc
@@ -1233,6 +1441,8 @@ public actor IMessageHandler {
         }
         
         // Format timestamps
+        // Use canonical timestamp: message.date (the message's primary timestamp)
+        // This is stored as content_timestamp in the document and used for all time-based operations
         let contentTimestamp = appleEpochToISO8601(message.date)
         let ingestionTimestamp = ISO8601DateFormatter().string(from: Date())
         
@@ -1524,6 +1734,26 @@ public actor IMessageHandler {
         let appleEpoch = Date(timeIntervalSince1970: 978307200) // 2001-01-01 00:00:00 UTC
         let delta = date.timeIntervalSince(appleEpoch)
         return Int64(delta * 1_000_000_000) // Convert to nanoseconds
+    }
+    
+    private func appleEpochToDate(_ timestamp: Int64) -> Date {
+        let appleEpoch = Date(timeIntervalSince1970: 978307200) // 2001-01-01 00:00:00 UTC
+        // Heuristic to detect stored unit and convert to seconds.
+        let seconds: TimeInterval
+        if timestamp > 1_000_000_000_000_000 {
+            // Treat as nanoseconds -> divide by 1e9
+            seconds = Double(timestamp) / 1_000_000_000.0
+        } else if timestamp > 1_000_000_000_000 {
+            // Treat as microseconds -> divide by 1e6
+            seconds = Double(timestamp) / 1_000_000.0
+        } else if timestamp > 1_000_000_000 {
+            // Treat as milliseconds -> divide by 1e3
+            seconds = Double(timestamp) / 1_000.0
+        } else {
+            // Seconds
+            seconds = Double(timestamp)
+        }
+        return appleEpoch.addingTimeInterval(seconds)
     }
     
     private func appleEpochToISO8601(_ timestamp: Int64) -> String {
@@ -1829,13 +2059,27 @@ public actor IMessageHandler {
         return handler.decodeAttributedBody(data)
     }
     
-    /// Post a batch of documents to the gateway /v1/ingest endpoint
-    private func postDocumentsToGateway(_ documents: [[String: Any]]) async throws -> Int {
+    /// Post a batch of documents to the gateway, preferring the batch endpoint when enabled.
+    private func postDocumentsToGateway(_ documents: [[String: Any]], batchMode: Bool) async throws -> Int {
         guard !documents.isEmpty else { return 0 }
-        
+
+        if batchMode {
+            if let batchSuccessCount = try await postDocumentsToGatewayBatch(documents) {
+                return batchSuccessCount
+            }
+            logger.debug("Falling back to single-document ingest for batch", metadata: [
+                "batch_size": String(documents.count)
+            ])
+        }
+
+        return try await postDocumentsToGatewayIndividually(documents)
+    }
+
+    /// Post documents individually to the legacy ingest endpoint.
+    private func postDocumentsToGatewayIndividually(_ documents: [[String: Any]]) async throws -> Int {
         var successCount = 0
-        
-        // Post each document individually since gateway doesn't support batch submission
+
+        // Post each document individually since gateway batch submission may be unavailable.
         for document in documents {
             do {
                 try await postDocumentToGateway(document)
@@ -1856,6 +2100,165 @@ public actor IMessageHandler {
         ])
         
         return successCount
+    }
+
+    /// Attempt to post documents via the gateway batch endpoint.
+    /// - Returns: Success count when the batch endpoint is available, or `nil` if fallback is required.
+    private func postDocumentsToGatewayBatch(_ documents: [[String: Any]]) async throws -> Int? {
+        let payload: [String: Any] = ["documents": documents]
+        let requestBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+        let candidatePaths = batchEndpointCandidates(basePath: config.gateway.ingestPath)
+
+        // Build base URL using URLComponents to avoid unwanted percent-encoding of path
+        guard let baseURL = URL(string: config.gateway.baseUrl) else {
+            logger.error("Invalid gateway base url", metadata: ["base_url": config.gateway.baseUrl])
+            return nil
+        }
+
+        guard let baseComponents = URLComponents(url: baseURL, resolvingAgainstBaseURL: true) else {
+            logger.error("Failed to create URLComponents for gateway base url", metadata: ["base_url": config.gateway.baseUrl])
+            return nil
+        }
+
+        for path in candidatePaths {
+            // Build URL using URLComponents to avoid unwanted percent-encoding of path
+            // Preserve existing base path and append candidate path. Set percentEncodedPath
+            // directly so characters like ':' are not further escaped.
+            var comps = baseComponents
+            let basePath = comps.percentEncodedPath
+            let trimmedBasePath = basePath.hasSuffix("/") ? String(basePath.dropLast()) : basePath
+            let newPercentEncodedPath = trimmedBasePath + path
+            comps.percentEncodedPath = newPercentEncodedPath
+
+            guard let url = comps.url else {
+                logger.error("Failed to compose gateway batch URL", metadata: ["base_url": config.gateway.baseUrl, "path": path])
+                continue
+            }
+            let urlString = url.absoluteString
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("Bearer \(config.auth.secret)", forHTTPHeaderField: "Authorization")
+            request.timeoutInterval = TimeInterval(config.gateway.timeout)
+            request.httpBody = requestBody
+
+            logger.debug("Posting batch to gateway", metadata: [
+                "url": urlString,
+                "document_count": String(documents.count)
+            ])
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw CollectorError.invalidGatewayResponse
+                }
+
+                switch httpResponse.statusCode {
+                case 200, 202, 207:
+                    let parsed = try parseGatewayBatchResponse(data: data, totalDocuments: documents.count)
+                    logger.debug("Gateway batch ingest completed", metadata: [
+                        "url": urlString,
+                        "status": String(httpResponse.statusCode),
+                        "total": String(parsed.totalCount ?? documents.count),
+                        "catalog_success": String(parsed.successCount),
+                        "catalog_failure": String(parsed.failureCount)
+                    ])
+                    // Return the number of documents successfully POSTed to gateway (HTTP success),
+                    // not catalog ingestion success. All documents were accepted by gateway if we got 200/202/207.
+                    return documents.count
+                case 404, 405:
+                    logger.info("Gateway batch endpoint unavailable, will attempt fallback", metadata: [
+                        "url": urlString,
+                        "status": String(httpResponse.statusCode)
+                    ])
+                    continue
+                default:
+                    let body = String(data: data, encoding: .utf8) ?? ""
+                    logger.error("Gateway batch ingest failed", metadata: [
+                        "url": urlString,
+                        "status": String(httpResponse.statusCode),
+                        "body": body
+                    ])
+                    continue
+                }
+            } catch {
+                logger.error("Gateway batch ingest request failed", metadata: [
+                    "url": urlString,
+                    "error": error.localizedDescription
+                ])
+                continue
+            }
+        }
+
+        return nil
+    }
+    
+    private func batchEndpointCandidates(basePath: String) -> [String] {
+        // Only use the colon version: /v1/ingest:batch
+        let colonPath = basePath.hasSuffix(":batch") ? basePath : basePath + ":batch"
+        return [colonPath]
+    }
+
+    private struct GatewayBatchResponseEnvelope: Decodable {
+        let batchId: String?
+        let batchStatus: String?
+        let totalCount: Int?
+        let successCount: Int?
+        let failureCount: Int?
+        let results: [GatewayBatchResponseItem]?
+    }
+
+    private struct GatewayBatchResponseItem: Decodable {
+        let index: Int?
+        let statusCode: Int?
+    }
+
+    private struct ParsedGatewayBatchResponse {
+        let totalCount: Int?
+        let successCount: Int
+        let failureCount: Int
+    }
+
+    private func parseGatewayBatchResponse(data: Data, totalDocuments: Int) throws -> ParsedGatewayBatchResponse {
+        if data.isEmpty {
+            return ParsedGatewayBatchResponse(
+                totalCount: totalDocuments,
+                successCount: totalDocuments,
+                failureCount: 0
+            )
+        }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let envelope = try decoder.decode(GatewayBatchResponseEnvelope.self, from: data)
+
+        let computedSuccess: Int
+        if let successCount = envelope.successCount {
+            computedSuccess = successCount
+        } else if let items = envelope.results {
+            let successes = items.compactMap { item -> Int? in
+                guard let code = item.statusCode else { return nil }
+                return (200...299).contains(code) ? 1 : 0
+            }
+            computedSuccess = successes.reduce(0, +)
+        } else {
+            computedSuccess = totalDocuments
+        }
+
+        let computedFailure: Int
+        if let failureCount = envelope.failureCount {
+            computedFailure = failureCount
+        } else {
+            computedFailure = max(0, totalDocuments - computedSuccess)
+        }
+
+        return ParsedGatewayBatchResponse(
+            totalCount: envelope.totalCount,
+            successCount: computedSuccess,
+            failureCount: computedFailure
+        )
     }
     
     /// Post a document to the gateway /v1/ingest endpoint

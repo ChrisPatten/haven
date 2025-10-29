@@ -45,6 +45,7 @@ Unified Schema v2 represents a complete redesign of Haven's data model, replacin
 | `document_files` | Document-file relationships | Attachment roles, ordering, captions |
 | `chunks` | Text segments for search | Embeddings, source references, ordinals |
 | `chunk_documents` | Chunk-document relationships | Multi-document chunks, relevance weights |
+| `ingest_batches` | Batch submission tracking | Batch-level idempotency, aggregate counts |
 | `ingest_submissions` | Idempotency tracking | Deduplication keys, status tracking |
 | `source_change_tokens` | Incremental sync state | Per-source tokens (contacts, etc.) |
 
@@ -499,10 +500,43 @@ CREATE INDEX idx_chunk_documents_doc ON chunk_documents(doc_id);
 - Single message → single chunk: 1 row with `weight=1.0`
 - 3 short messages → 1 combined chunk: 3 rows with `weight=0.33` each, `ordinal=0,1,2`
 - Long PDF → 50 chunks: 50 rows with `weight=1.0` each
+---
+
+### 7. ingest_batches
+
+Batch-level tracking for grouped ingestion requests.
+
+**Purpose**: Capture idempotency keys, aggregate success/failure counts, and lifecycle status for multi-document submissions.
+
+**Schema**:
+```sql
+CREATE TABLE ingest_batches (
+    batch_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    idempotency_key TEXT UNIQUE NOT NULL,
+    status TEXT NOT NULL DEFAULT 'submitted',   -- "submitted", "processing", "completed", "partial", "failed"
+    total_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    error_details JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+**Key Indexes**:
+```sql
+CREATE INDEX idx_ingest_batches_status ON ingest_batches(status);
+CREATE INDEX idx_ingest_batches_created_at ON ingest_batches(created_at DESC);
+```
+
+**Usage Notes**:
+- `batch_id` is returned to collectors and used to correlate per-document submissions.
+- `success_count` / `failure_count` are updated incrementally, allowing partial success reporting.
+- `ingest_submissions.batch_id` links individual submissions back to their batch for replay/idempotency.
 
 ---
 
-### 7. ingest_submissions
+### 8. ingest_submissions
 
 Idempotency tracking for ingestion requests.
 
@@ -513,15 +547,16 @@ Idempotency tracking for ingestion requests.
 CREATE TABLE ingest_submissions (
     submission_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     idempotency_key TEXT UNIQUE NOT NULL,   -- For preventing duplicate ingestion
-    
+
     source_type TEXT NOT NULL,
     source_id TEXT NOT NULL,
     content_sha256 TEXT NOT NULL,
-    
+
     status TEXT NOT NULL DEFAULT 'submitted', -- "submitted", "processing", "cataloged", "completed", "failed"
     result_doc_id UUID REFERENCES documents(doc_id),
+    batch_id UUID REFERENCES ingest_batches(batch_id),
     error_details JSONB,
-    
+
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -531,6 +566,8 @@ CREATE TABLE ingest_submissions (
 ```sql
 CREATE INDEX idx_ingest_submissions_status ON ingest_submissions(status);
 CREATE INDEX idx_ingest_submissions_source ON ingest_submissions(source_type, source_id);
+CREATE INDEX idx_ingest_submissions_batch_id ON ingest_submissions(batch_id);
+CREATE INDEX idx_ingest_submissions_batch_status ON ingest_submissions(batch_id, status);
 ```
 
 **Usage**:
@@ -538,6 +575,7 @@ CREATE INDEX idx_ingest_submissions_source ON ingest_submissions(source_type, so
 - Catalog checks key before inserting document
 - Enables safe retries and duplicate detection
 - Links submission to resulting document via `result_doc_id`
+- Optional `batch_id` references `ingest_batches` when the submission originated from `/v1/ingest:batch`
 
 ---
 

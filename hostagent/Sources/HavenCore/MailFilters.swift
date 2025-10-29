@@ -1150,7 +1150,7 @@ private struct MailFilterDSLParser {
         expressions.append(current)
         
         while stream.peek() == .or {
-            stream.consume() // or
+            _ = stream.consume() // or
             current = try parseAnd(&stream)
             expressions.append(current)
         }
@@ -1167,7 +1167,7 @@ private struct MailFilterDSLParser {
         expressions.append(current)
         
         while stream.peek() == .and {
-            stream.consume()
+            _ = stream.consume()
             current = try parseNot(&stream)
             expressions.append(current)
         }
@@ -1181,7 +1181,7 @@ private struct MailFilterDSLParser {
     private static func parseNot(_ stream: inout DSLTokenStream) throws -> MailFilterExpression {
         var notCount = 0
         while stream.peek() == .not {
-            stream.consume()
+            _ = stream.consume()
             notCount += 1
         }
         var expression = try parsePrimary(&stream)
@@ -1225,7 +1225,7 @@ private struct MailFilterDSLParser {
             let value = try parseArgumentValue(&stream)
             values.append(value)
             if stream.peek() == .comma {
-                stream.consume()
+                _ = stream.consume()
                 continue
             } else {
                 break

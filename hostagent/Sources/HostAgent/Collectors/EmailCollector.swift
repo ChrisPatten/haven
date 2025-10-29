@@ -14,6 +14,7 @@ public protocol EmailCollecting: Sendable {
     ) async throws -> EmailDocumentPayload
 
     func submitEmailDocument(_ payload: EmailDocumentPayload) async throws -> GatewaySubmissionResponse
+    func submitEmailDocuments(_ payloads: [EmailDocumentPayload], preferBatch: Bool) async throws -> [EmailCollectorSubmissionResult]
 
     func submitEmailAttachment(
         fileURL: URL,
@@ -25,6 +26,28 @@ public protocol EmailCollecting: Sendable {
         sourceType: String?,
         sourceIdPrefix: String?
     ) async throws -> GatewayFileSubmissionResponse
+}
+
+public struct EmailCollectorSubmissionResult: Sendable {
+    public let statusCode: Int
+    public let submission: GatewaySubmissionResponse?
+    public let errorCode: String?
+    public let errorMessage: String?
+    public let retryable: Bool
+
+    public init(
+        statusCode: Int,
+        submission: GatewaySubmissionResponse?,
+        errorCode: String?,
+        errorMessage: String?,
+        retryable: Bool
+    ) {
+        self.statusCode = statusCode
+        self.submission = submission
+        self.errorCode = errorCode
+        self.errorMessage = errorMessage
+        self.retryable = retryable
+    }
 }
 
 public extension EmailCollecting {
@@ -54,12 +77,47 @@ public extension EmailCollecting {
             fileURL: fileURL,
             attachment: attachment,
             messageId: messageId,
-            intent: intent,
-            relevance: relevance,
-            enrichment: enrichment,
-            sourceType: nil,
-            sourceIdPrefix: nil
-        )
+        intent: intent,
+        relevance: relevance,
+        enrichment: enrichment,
+        sourceType: nil,
+        sourceIdPrefix: nil
+    )
+    }
+
+    func submitEmailDocuments(
+        _ payloads: [EmailDocumentPayload],
+        preferBatch: Bool = false
+    ) async throws -> [EmailCollectorSubmissionResult] {
+        var results: [EmailCollectorSubmissionResult] = []
+        results.reserveCapacity(payloads.count)
+
+        for payload in payloads {
+            do {
+                let submission = try await submitEmailDocument(payload)
+                results.append(
+                    EmailCollectorSubmissionResult(
+                        statusCode: 202,
+                        submission: submission,
+                        errorCode: nil,
+                        errorMessage: nil,
+                        retryable: false
+                    )
+                )
+            } catch {
+                results.append(
+                    EmailCollectorSubmissionResult(
+                        statusCode: 500,
+                        submission: nil,
+                        errorCode: "INGEST.EMAIL_ERROR",
+                        errorMessage: error.localizedDescription,
+                        retryable: false
+                    )
+                )
+            }
+        }
+
+        return results
     }
 }
 
@@ -252,7 +310,7 @@ public struct EmailAttachmentMeta: Codable, Equatable {
     }
 }
 
-public struct GatewaySubmissionResponse: Codable, Equatable {
+public struct GatewaySubmissionResponse: Codable, Equatable, Sendable {
     public var submissionId: String
     public var docId: String
     public var externalId: String
@@ -274,7 +332,7 @@ public struct GatewaySubmissionResponse: Codable, Equatable {
     }
 }
 
-public struct GatewayFileSubmissionResponse: Codable, Equatable {
+public struct GatewayFileSubmissionResponse: Codable, Equatable, Sendable {
     public var submissionId: String
     public var docId: String
     public var externalId: String
@@ -446,6 +504,60 @@ public actor EmailCollector {
             "idempotency_key": idempotencyKey
         ])
         return try await gatewayClient.submitDocument(payload: payload, idempotencyKey: idempotencyKey)
+    }
+
+    public func submitEmailDocuments(
+        _ payloads: [EmailDocumentPayload],
+        preferBatch: Bool
+    ) async throws -> [EmailCollectorSubmissionResult] {
+        guard !payloads.isEmpty else { return [] }
+
+        if preferBatch, payloads.count > 1 {
+            if let batchResults = try await gatewayClient.submitDocumentsBatch(payloads: payloads) {
+                return batchResults.map {
+                    EmailCollectorSubmissionResult(
+                        statusCode: $0.statusCode,
+                        submission: $0.submission,
+                        errorCode: $0.errorCode,
+                        errorMessage: $0.errorMessage,
+                        retryable: $0.retryable
+                    )
+                }
+            }
+            logger.debug("Gateway batch ingest unavailable; falling back to single submissions", metadata: [
+                "request_count": "\(payloads.count)"
+            ])
+        }
+
+        var results: [EmailCollectorSubmissionResult] = []
+        results.reserveCapacity(payloads.count)
+
+        for payload in payloads {
+            do {
+                let submission = try await submitEmailDocument(payload)
+                results.append(
+                    EmailCollectorSubmissionResult(
+                        statusCode: 202,
+                        submission: submission,
+                        errorCode: nil,
+                        errorMessage: nil,
+                        retryable: false
+                    )
+                )
+            } catch {
+                results.append(
+                    EmailCollectorSubmissionResult(
+                        statusCode: 500,
+                        submission: nil,
+                        errorCode: "INGEST.EMAIL_ERROR",
+                        errorMessage: error.localizedDescription,
+                        retryable: false
+                    )
+                )
+            }
+        }
+
+        return results
     }
     
     public func submitEmailAttachment(

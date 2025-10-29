@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 try:
@@ -35,7 +36,10 @@ class _StructlogShim:
         if payload:
             kv = " ".join(f"{key}={value!r}" for key, value in payload.items())
             parts.append(kv)
-        self._logger.log(level, " | ".join(parts))
+        message = " | ".join(parts)
+        # Prepend ISO timestamp for fallback logging
+        timestamp = datetime.now(timezone.utc).isoformat()
+        self._logger.log(level, f"{timestamp} {message}")
 
     def debug(self, event: str, **kwargs: Any) -> None:
         self._log(logging.DEBUG, event, **kwargs)
@@ -60,11 +64,41 @@ def setup_logging(level: str | int = "INFO") -> None:
     """
 
     logging_level = _coerce_level(level)
+    
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
         level=logging_level,
     )
+    
+    # Configure timestamp format for uvicorn access logs (HTTP request logs)
+    # These are the "INFO: 172.18.0.8:36656 - "POST /v1/catalog/embeddings HTTP/1.1" 200 OK" logs
+    timestamp_format = "%(asctime)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+    
+    # Create a formatter with timestamp for uvicorn access logs
+    access_formatter = logging.Formatter(
+        f"{timestamp_format} %(levelname)s: %(message)s",
+        datefmt=date_format,
+    )
+    
+    # Configure uvicorn access logger (used for HTTP request logs)
+    # This logger is created by Uvicorn for access logs
+    access_logger = logging.getLogger("uvicorn.access")
+    
+    # Update existing handlers with timestamp formatter (Uvicorn sets these up before app startup)
+    if access_logger.handlers:
+        for handler in access_logger.handlers:
+            handler.setFormatter(access_formatter)
+            handler.setLevel(logging_level)
+    else:
+        # If no handlers yet, configure one (shouldn't happen but handle it)
+        access_handler = logging.StreamHandler(sys.stdout)
+        access_handler.setFormatter(access_formatter)
+        access_handler.setLevel(logging_level)
+        access_logger.addHandler(access_handler)
+    
+    access_logger.setLevel(logging_level)
 
     if structlog is None:
         logging.getLogger().setLevel(logging_level)

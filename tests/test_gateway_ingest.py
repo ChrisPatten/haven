@@ -4,6 +4,7 @@ import hashlib
 import json
 from typing import Any, Dict
 
+from fastapi import status
 from fastapi.testclient import TestClient
 
 from services.gateway_api import app as gateway_app
@@ -80,6 +81,113 @@ def test_gateway_ingest_posts_to_catalog(monkeypatch):
     assert forwarded_json["metadata"] == {"foo": "bar"}
     assert "idempotency_key" in forwarded_json
     assert request_details["headers"]["X-Correlation-ID"].startswith("gw_ingest_")
+
+
+def test_gateway_batch_ingest_uses_new_catalog_endpoint(monkeypatch):
+    original_token = gateway_app.settings.catalog_token
+    gateway_app.settings.catalog_token = None
+
+    calls: Dict[str, Any] = {}
+
+    async def fake_catalog_request(method: str, path: str, correlation_id: str, *, json_payload=None):
+        calls["method"] = method
+        calls["path"] = path
+        calls["payload"] = json_payload
+        calls["correlation_id"] = correlation_id
+
+        class FakeResponse:
+            status_code = status.HTTP_202_ACCEPTED
+
+            def json(self) -> Dict[str, Any]:
+                return {
+                    "batch_id": "batch-123",
+                    "batch_status": "completed",
+                    "total_count": 2,
+                    "success_count": 2,
+                    "failure_count": 0,
+                    "results": [
+                        {
+                            "index": 0,
+                            "status_code": 202,
+                            "document": {
+                                "submission_id": "sub-1",
+                                "doc_id": "doc-1",
+                                "external_id": "ext-1",
+                                "version_number": 1,
+                                "thread_id": None,
+                                "file_ids": [],
+                                "status": "extracted",
+                                "duplicate": False,
+                            },
+                        },
+                        {
+                            "index": 1,
+                            "status_code": 200,
+                            "document": {
+                                "submission_id": "sub-2",
+                                "doc_id": "doc-2",
+                                "external_id": "ext-2",
+                                "version_number": 1,
+                                "thread_id": None,
+                                "file_ids": [],
+                                "status": "extracted",
+                                "duplicate": False,
+                            },
+                        },
+                    ],
+                }
+
+        return FakeResponse()
+
+    monkeypatch.setattr(gateway_app, "_catalog_request", fake_catalog_request)
+
+    documents_payload = [
+        {
+            "source_type": "imessage",
+            "source_id": "thread-1",
+            "content": {"mime_type": "text/plain", "data": "hello one"},
+        },
+        {
+            "source_type": "imessage",
+            "source_id": "thread-2",
+            "content": {"mime_type": "text/plain", "data": "hello two"},
+        },
+    ]
+
+    try:
+        with TestClient(gateway_app.app) as client:
+            response = client.post(
+                "/v1/ingest:batch",
+                json={"documents": documents_payload},
+                headers={"Authorization": "Bearer changeme"},
+            )
+    finally:
+        gateway_app.settings.catalog_token = original_token
+        gateway_app._search_client = None
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["batch_id"] == "batch-123"
+    assert data["batch_status"] == "completed"
+    assert data["total_count"] == 2
+    assert data["success_count"] == 2
+    assert data["failure_count"] == 0
+    assert len(data["results"]) == 2
+    assert data["results"][0]["submission"]["doc_id"] == "doc-1"
+    assert data["results"][1]["submission"]["doc_id"] == "doc-2"
+
+    assert calls["method"] == "POST"
+    assert calls["path"] == "/v1/catalog/documents/batch"
+    payload = calls["payload"]
+    assert payload["documents"][0]["text"] == "hello one"
+    assert payload["documents"][1]["text"] == "hello two"
+
+    keys = [
+        payload["documents"][0]["idempotency_key"],
+        payload["documents"][1]["idempotency_key"],
+    ]
+    expected_batch_key = gateway_app._derive_batch_idempotency_key(keys)
+    assert payload["batch_idempotency_key"] == expected_batch_key
 
 
 def test_gateway_file_ingest_uploads_to_object_store_and_catalog(monkeypatch):
@@ -188,8 +296,9 @@ def test_gateway_file_ingest_uploads_to_object_store_and_catalog(monkeypatch):
     assert upload_call["data"] == file_bytes
     assert upload_call["length"] == len(file_bytes)
     payload = calls["payload"]
-    assert payload["attachments"][0]["object_key"] == data["object_key"]
-    assert payload["attachments"][0]["extraction_status"] == "ready"
+    attachment = payload["attachments"][0]
+    assert attachment["file"]["object_key"] == data["object_key"]
+    assert attachment["file"]["enrichment_status"] == "pending"
     assert payload["metadata"]["file"]["sha256"] == expected_sha
     assert "Hello localfs" in payload["text"]
 
@@ -298,6 +407,9 @@ def test_email_duplicate_ingestion_returns_existing_document(monkeypatch):
             return "ok"
 
     class DummyAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
         async def __aenter__(self) -> "DummyAsyncClient":
             return self
 
@@ -305,7 +417,8 @@ def test_email_duplicate_ingestion_returns_existing_document(monkeypatch):
             return False
 
         async def request(self, method: str, path: str, json=None, headers=None):
-            return DummyResponse()
+            status_code = 200 if submission_count >= 1 else 202
+            return DummyResponse(status_code=status_code)
 
     monkeypatch.setattr(gateway_app.httpx, "AsyncClient", DummyAsyncClient)
 
@@ -350,4 +463,3 @@ def test_email_duplicate_ingestion_returns_existing_document(monkeypatch):
     assert payload2["external_id"] == "email:test-message-id-123"
     assert payload2["version_number"] == 1
     assert payload2["duplicate"] is True
-

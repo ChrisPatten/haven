@@ -185,6 +185,7 @@ Content-Type: application/json
 
 {
   "mode": "backfill",
+  "batch": true,
   "batch_size": 500,
   "max_rows": 10000
 }
@@ -194,6 +195,7 @@ POST /v1/collectors/imessage:run
 
 {
   "mode": "tail",
+  "batch": true,
   "batch_size": 200
 }
 
@@ -209,6 +211,10 @@ Response:
   "last_error": null
 }
 ```
+
+Enabling `"batch": true` tells the collector to call the Gateway batch ingest endpoint; the optional
+`batch_size` controls how many documents are submitted per request (defaults to the collector's
+internal batch size when omitted).
 
 ### Email Local Collector
 
@@ -471,7 +477,7 @@ curl -H "x-auth: changeme" \
 
 ### High memory usage
 
-1. Reduce `batch_size` for iMessage collector
+1. Reduce `batch_size` or disable batching (`batch: false`) for the iMessage or IMAP collectors
 2. Disable unused modules
 3. Check for FSEvents leaks (file watch accumulation)
 4. Restart agent periodically via LaunchAgent

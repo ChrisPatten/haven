@@ -26,6 +26,7 @@ help:
 	@echo "  list-backups              List all available backups with details"
 	@echo "  peek [LIMIT=<n>]          Show the last N documents ingested by Haven (default: 1)"
 	@echo "  logs					   Tail the docker compose logs"
+	@echo "  hostagent-fresh           Runs make purge, make start,and make -C hostagent run"
 	
 # Rebuild docker compose services from scratch, start detached, and follow logs
 # Usage: make rebuild [SERVICE]
@@ -149,3 +150,8 @@ install-hooks: .githooks/install-hooks
 
 peek:
 	@docker compose exec postgres psql -U postgres -d haven -t -c "SELECT text FROM documents ORDER BY ingested_at DESC LIMIT $(LIMIT);"
+
+hostagent-fresh:
+	@make purge
+	@make start
+	@make -C hostagent run

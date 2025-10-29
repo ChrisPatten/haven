@@ -37,4 +37,26 @@ final class CollectorRunRequestTests: XCTestCase {
         XCTAssertNotNil(req.dateRange?.since)
         XCTAssertNotNil(req.dateRange?.until)
     }
+
+    func testBatchFlagsDecode() throws {
+        let dict: [String: Any] = [
+            "batch": true,
+            "batch_size": 250
+        ]
+        let data = try JSONSerialization.data(withJSONObject: dict)
+        let decoder = JSONDecoder()
+        let req = try decoder.decode(CollectorRunRequest.self, from: data)
+        XCTAssertEqual(req.batch, true)
+        XCTAssertEqual(req.batchSize, 250)
+    }
+
+    func testInvalidBatchSizeRejected() throws {
+        let dict: [String: Any] = [
+            "batch": true,
+            "batch_size": 0
+        ]
+        let data = try JSONSerialization.data(withJSONObject: dict)
+        let decoder = JSONDecoder()
+        XCTAssertThrowsError(try decoder.decode(CollectorRunRequest.self, from: data))
+    }
 }
