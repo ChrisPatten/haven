@@ -1,5 +1,6 @@
 import Foundation
-import SwiftSoup
+import Demark
+import HTMLEntities
 import HavenCore
 
 /// Service for extracting clean email body text from raw MIME/HTML content
@@ -8,23 +9,23 @@ public struct EmailBodyExtractor {
     
     public init() {}
     
-    /// Extract clean body text from an email message, removing HTML, quoted content, and signatures
+    /// Extract clean body text from an email message, converting HTML to markdown and removing quoted content and signatures
     /// - Parameter email: The email message to process
-    /// - Returns: Cleaned plain text body
-    public func extractCleanBody(from email: EmailMessage) -> String {
+    /// - Returns: Cleaned markdown body text
+    public func extractCleanBody(from email: EmailMessage) async -> String {
         // Start with the best available body content
         let rawBody = selectBestBody(from: email)
         
-        // Convert HTML to plain text if needed
+        // Convert HTML to markdown if needed
         let isHTML = rawBody.contains("<") && rawBody.contains(">") && 
                     (rawBody.contains("<html") || rawBody.contains("<body") || 
                      rawBody.contains("<p>") || rawBody.contains("<div") ||
                      rawBody.contains("<br") || rawBody.contains("<h1") ||
                      rawBody.contains("<ul") || rawBody.contains("<li"))
-        let plainText = isHTML ? convertToPlainText(rawBody) : rawBody
+        let markdownText = isHTML ? await convertToMarkdown(rawBody) : rawBody
         
         // Strip quoted content (both text patterns and HTML blockquotes)
-        let withoutQuotes = stripQuotedContent(plainText)
+        let withoutQuotes = stripQuotedContent(markdownText)
         
         // Remove signatures
         let withoutSignatures = stripSignature(withoutQuotes)
@@ -49,202 +50,116 @@ public struct EmailBodyExtractor {
         return email.rawContent ?? ""
     }
     
-    /// Convert HTML to plain text using SwiftSoup, preserving formatting
-    private func convertToPlainText(_ content: String) -> String {
+    /// Convert HTML to markdown using Demark html-to-md engine with post-processing
+    @MainActor
+    private func convertToMarkdown(_ content: String) async -> String {
         // If content doesn't look like HTML, return as-is
         if !content.contains("<") || !content.contains(">") {
             return content
         }
         
         do {
-            let doc = try SwiftSoup.parse(content)
+            let demark = Demark()
+            var result = try await demark.convertToMarkdown(content)
             
-            // Remove script, style, and blockquote elements
-            try doc.select("script, style, blockquote").remove()
+            // Post-process the markdown to handle edge cases Demark doesn't address
+            result = postProcessMarkdown(result)
             
-            // Process images and figures for captions
-            try doc.select("img, figure").forEach { element in
-                let tagName = element.tagName()
-                
-                if tagName == "img" {
-                    // Extract alt text and title for standalone images
-                    let altText = try element.attr("alt")
-                    let titleText = try element.attr("title")
-                    
-                    if !altText.isEmpty || !titleText.isEmpty {
-                        let caption: String
-                        if !altText.isEmpty && !titleText.isEmpty {
-                            caption = "\(altText): \(titleText)"
-                        } else {
-                            caption = !titleText.isEmpty ? titleText : altText
-                        }
-                        try element.replaceWith(Element(Tag("p"), "").text("\(caption)"))
-                    } else {
-                        try element.replaceWith(TextNode("", nil))
-                    }
-                } else if tagName == "figure" {
-                    // Process figure elements (img + figcaption)
-                    let img = try element.select("img").first()
-                    let figcaption = try element.select("figcaption").first()
-                    
-                    var captionText = ""
-                    
-                    // Get alt text or title from img
-                    if let img = img {
-                        let altText = try img.attr("alt")
-                        let titleText = try img.attr("title")
-                        if !altText.isEmpty {
-                            captionText = altText
-                        } else if !titleText.isEmpty {
-                            captionText = titleText
-                        }
-                    }
-                    
-                    // Get figcaption text
-                    if let figcaption = figcaption {
-                        let figcaptionText = try figcaption.text()
-                        if !figcaptionText.isEmpty {
-                            if !captionText.isEmpty {
-                                captionText = "\(captionText): \(figcaptionText)"
-                            } else {
-                                captionText = figcaptionText
-                            }
-                        }
-                    }
-                    
-                    // Replace the entire figure with the caption
-                    if !captionText.isEmpty {
-                        try element.replaceWith(Element(Tag("p"), "").text("\(captionText)"))
-                    } else {
-                        try element.replaceWith(TextNode("", nil))
-                    }
-                }
-            }
-            
-            // Convert br tags to newlines
-            try doc.select("br").forEach { element in
-                // Get the next sibling to check for whitespace
-                if let nextSibling = element.nextSibling() as? TextNode {
-                    let nextText = nextSibling.text()
-                    if nextText.hasPrefix(" ") {
-                        // Remove the leading space from the next sibling
-                        nextSibling.text(String(nextText.dropFirst()))
-                    }
-                }
-                try element.replaceWith(TextNode("\\n", nil))
-            }
-            
-            // Add newlines after block elements
-            try doc.select("p, div, h1, h2, h3, h4, h5, h6").forEach { element in
-                try element.appendText("\n")
-            }
-            
-            // Convert links to include URL
-            try doc.select("a[href]").forEach { element in
-                if let href = try? element.attr("href"), !href.isEmpty {
-                    let text = try element.text()
-                    if !text.isEmpty && text != href {
-                        try element.text("\(text) (\(href))")
-                    }
-                }
-            }
-            
-            // Convert list items to bullet points
-            try doc.select("li").forEach { element in
-                let text = try element.text()
-                if !text.isEmpty {
-                    try element.text("• \(text)")
-                }
-            }
-            
-            // Get text while preserving newlines by manually extracting
-            let body = try doc.select("body").first() ?? doc
-            let text = try extractTextWithNewlines(from: body)
-            return text
+            return result
         } catch {
-            logger.warning("Failed to parse HTML content, falling back to regex stripping", metadata: [
+            logger.warning("Demark conversion failed, falling back to regex stripping", metadata: [
                 "error": error.localizedDescription
             ])
             return stripHTMLWithRegex(content)
         }
     }
     
-    /// Extract text from an element while preserving newlines
-    private func extractTextWithNewlines(from element: Element) throws -> String {
-        var result = ""
+    /// Post-process markdown output to handle edge cases and ensure consistent formatting
+    private func postProcessMarkdown(_ markdown: String) -> String {
+        var result = markdown
         
-        for node in element.getChildNodes() {
-            if let textNode = node as? TextNode {
-                let text = textNode.text()
-                // Convert br markers back to newlines
-                let processedText = text.replacingOccurrences(of: "\\n", with: "\n")
-                // Preserve newlines but skip other whitespace-only nodes
-                if !processedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || processedText.contains("\n") {
-                    result += processedText
-                    // If the text ends with a newline, it's likely an image caption, add another newline
-                    if processedText.hasSuffix("\n") && !processedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        result += "\n"
-                    }
-                }
-            } else if let element = node as? Element {
-                let tagName = element.tagName()
-                let elementText = try extractTextWithNewlines(from: element)
-                
-                // Add newlines after block elements, but trim whitespace first
-                if ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6"].contains(tagName) {
-                    // For paragraphs, only trim leading/trailing whitespace, preserve internal newlines
-                    let trimmedText = elementText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !trimmedText.isEmpty {
-                        // Check if this paragraph is followed by a list
-                        let nextSibling = element.nextSibling()
-                        var isFollowedByList = false
-                        
-                        // Check if next sibling is whitespace followed by a ul element
-                        if let nextTextNode = nextSibling as? TextNode, 
-                           nextTextNode.text().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            let nextNextSibling = nextTextNode.nextSibling()
-                            if let nextNextElement = nextNextSibling as? Element, nextNextElement.tagName() == "ul" {
-                                isFollowedByList = true
-                            }
-                        }
-                        
-                        // Also check if this looks like a list header (ends with colon)
-                        let isListHeader = trimmedText.hasSuffix(":")
-                        
-                        if isFollowedByList || isListHeader {
-                            result += trimmedText + "\n"
-                        } else {
-                            result += trimmedText + "\n\n"
-                        }
-                    }
-                } else if tagName == "li" {
-                    let trimmedText = elementText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !trimmedText.isEmpty {
-                        result += trimmedText + "\n"
-                    }
-                } else if tagName == "ul" {
-                    // For ul elements, add a newline after the content
-                    result += elementText + "\n"
+        // Decode HTML entities using HTMLEntities package
+        result = result.htmlUnescape()
+        
+        // Convert markdown images to plain text captions for consistency with our use case
+        result = convertMarkdownImagesToCaptions(result)
+        
+        // Ensure blockquotes are properly stripped (they should be removed, not converted)
+        result = stripMarkdownBlockquotes(result)
+        
+        // Keep markdown formatting - don't convert to plain text
+        // This preserves semantic structure for downstream processing
+        
+        return result
+    }
+    
+    /// Convert markdown images to plain text captions
+    private func convertMarkdownImagesToCaptions(_ markdown: String) -> String {
+        // Pattern: ![alt text](url "title") or ![alt text](url)
+        let imagePattern = #"!\[([^\]]*)\]\([^)]*(?:\s+"([^"]*)")?\)"#
+        
+        guard let regex = try? NSRegularExpression(pattern: imagePattern) else {
+            return markdown
+        }
+        
+        let range = NSRange(location: 0, length: markdown.utf16.count)
+        let matches = regex.matches(in: markdown, options: [], range: range)
+        
+        var result = markdown
+        // Process matches in reverse order to avoid index shifting
+        for match in matches.reversed() {
+            let altText = match.range(at: 1)
+            let titleText = match.range(at: 2)
+            
+            var caption = ""
+            if altText.location != NSNotFound {
+                caption = String(markdown[Range(altText, in: markdown)!])
+            }
+            if titleText.location != NSNotFound {
+                let title = String(markdown[Range(titleText, in: markdown)!])
+                if !caption.isEmpty {
+                    caption = "\(caption): \(title)"
                 } else {
-                    result += elementText
+                    caption = title
                 }
             }
+            
+            let replacement = caption.isEmpty ? "" : "\(caption)"
+            result = (result as NSString).replacingCharacters(in: match.range, with: replacement)
         }
         
         return result
     }
     
+    /// Strip markdown blockquotes (they should be removed, not converted to markdown)
+    private func stripMarkdownBlockquotes(_ markdown: String) -> String {
+        let lines = markdown.components(separatedBy: .newlines)
+        var result: [String] = []
+        
+        for line in lines {
+            // Skip lines that start with > (markdown blockquotes)
+            if line.hasPrefix(">") {
+                continue
+            }
+            result.append(line)
+        }
+        
+        return result.joined(separator: "\n")
+    }
+    
+    
     /// Fallback HTML stripping using regex (less accurate but safer)
     private func stripHTMLWithRegex(_ html: String) -> String {
-        let pattern = "<[^>]+>"
+        // First strip HTML tags - only remove known HTML tags to avoid removing content that looks like tags
+        let pattern = "</?(?:html|body|head|title|meta|link|script|style|div|span|p|br|h[1-6]|ul|ol|li|a|img|table|tr|td|th|form|input|button|strong|em|b|i|u|pre|code|blockquote|hr)(?:\\s[^>]*)?>"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return html
+            return html.htmlUnescape()
         }
         let range = NSRange(location: 0, length: html.utf16.count)
         let stripped = regex.stringByReplacingMatches(in: html, options: [], range: range, withTemplate: " ")
         
-        // Decode common HTML entities
-        return decodeHTMLEntities(stripped)
+        // Then decode HTML entities using HTMLEntities package
+        return stripped.htmlUnescape()
     }
     
     /// Strip quoted content from email body
@@ -313,17 +228,19 @@ public struct EmailBodyExtractor {
     
     /// Check if a line contains quoted content anywhere in the line
     private func containsQuotedContent(_ line: String) -> Bool {
-        // Look for patterns like "> text" anywhere in the line
+        // Look for patterns like "> text" at the beginning of lines or after whitespace
+        // This is more specific to avoid matching decoded HTML entities like "<brackets>"
         let patterns = [
-            " > ",
-            " >",
-            "> ",
-            ">> ",
-            ">>> "
+            "^> ",      // Line starts with "> "
+            "^>> ",     // Line starts with ">> "
+            "^>>> ",    // Line starts with ">>> "
+            " > ",      // Space followed by "> " (but not in middle of words)
+            " >> ",     // Space followed by ">> "
+            " >>> "     // Space followed by ">>> "
         ]
         
         for pattern in patterns {
-            if line.contains(pattern) {
+            if line.range(of: pattern, options: .regularExpression) != nil {
                 return true
             }
         }
@@ -525,28 +442,6 @@ public struct EmailBodyExtractor {
         }
         
         return false
-    }
-    
-    /// Decode HTML entities
-    private func decodeHTMLEntities(_ text: String) -> String {
-        var result = text
-        let entities = [
-            "&nbsp;": " ",
-            "&lt;": "<",
-            "&gt;": ">",
-            "&amp;": "&",
-            "&quot;": "\"",
-            "&apos;": "'",
-            "&copy;": "©",
-            "&reg;": "®",
-            "&trade;": "™"
-        ]
-        
-        for (entity, replacement) in entities {
-            result = result.replacingOccurrences(of: entity, with: replacement)
-        }
-        
-        return result
     }
     
     /// Normalize text formatting

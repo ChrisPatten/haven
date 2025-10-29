@@ -26,10 +26,12 @@ let package = Package(
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.6"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.3"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
-        .package(url: "https://github.com/MailCore/mailcore2.git", branch: "master"),
+        .package(url: "https://github.com/ChrisPatten/mailcore2.git", branch: "master"),
         .package(url: "https://github.com/apple/swift-openapi-generator", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.0.0"),
-        .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.6.0")
+        .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.6.0"),
+        .package(url: "https://github.com/steipete/Demark.git", from: "1.0.0"),
+        .package(url: "https://github.com/Kitura/swift-html-entities.git", from: "3.0.0")
     ],
     targets: [
         .target(
@@ -60,7 +62,7 @@ let package = Package(
         ),
         .target(
             name: "Email",
-            dependencies: ["HavenCore", .product(name: "SwiftSoup", package: "SwiftSoup")],
+            dependencies: ["HavenCore", "OCR", .product(name: "SwiftSoup", package: "SwiftSoup"), .product(name: "Demark", package: "Demark"), .product(name: "HTMLEntities", package: "swift-html-entities")],
             path: "Sources/Email"
         ),
         .target(

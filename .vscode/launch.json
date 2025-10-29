@@ -1,7 +1,7 @@
 {
     "configurations": [
         {
-            "type": "swift",
+            "type": "lldb",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:haven}/hostagent",
@@ -10,7 +10,7 @@
             "preLaunchTask": "swift: Build Debug hostagent (hostagent)"
         },
         {
-            "type": "swift",
+            "type": "lldb",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:haven}/hostagent",

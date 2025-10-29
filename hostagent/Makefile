@@ -17,15 +17,15 @@ help:
 
 # Build debug version
 build:
-	arch -x86_64 swift build
+	swift build
 
 # Build release version
 release:
-	arch -x86_64 swift build -c release
+	swift build -c release
 
 # Run tests
 test:
-	arch -x86_64 swift test
+	swift test
 
 # Clean build artifacts
 clean:

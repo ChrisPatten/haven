@@ -20,12 +20,12 @@ public struct MIMEParser {
         }
         
         // Parse headers
-        let headerLines = Array(lines[0..<headerEndIndex])
+        let headerLines = headerEndIndex > 0 ? Array(lines[0..<headerEndIndex]) : []
         let headers = parseHeaders(headerLines)
         message.headers = headers
         
         // Parse body
-        let bodyLines = Array(lines[headerEndIndex..<lines.count])
+        let bodyLines = headerEndIndex < lines.count ? Array(lines[headerEndIndex..<lines.count]) : []
         let bodyContent = bodyLines.joined(separator: "\n")
         
         // Check if this is a multipart message
@@ -34,8 +34,9 @@ public struct MIMEParser {
         } else {
             // Single part message
             let encoding = headers["content-transfer-encoding"]
-            let decodedContent = MIMEDecoder.decodeContent(bodyContent, encoding: encoding)
-            message.parts = [MIMEPart(content: decodedContent, contentType: headers["content-type"] ?? "text/plain")]
+            let decodedContent = MIMEDecoder.decodeContent(bodyContent, encoding: encoding).trimmingCharacters(in: .whitespacesAndNewlines)
+            let contentType = extractBaseContentType(from: headers["content-type"] ?? "text/plain")
+            message.parts = [MIMEPart(content: decodedContent, contentType: contentType)]
         }
         
         return message
@@ -110,12 +111,12 @@ public struct MIMEParser {
                 }
             }
             
-            let partHeaders = parseHeaders(Array(partLines[0..<partHeaderEndIndex]))
-            let partContent = Array(partLines[partHeaderEndIndex..<partLines.count]).joined(separator: "\n")
+            let partHeaders = partHeaderEndIndex > 0 ? parseHeaders(Array(partLines[0..<partHeaderEndIndex])) : [:]
+            let partContent = partHeaderEndIndex < partLines.count ? Array(partLines[partHeaderEndIndex..<partLines.count]).joined(separator: "\n") : ""
             
             // Decode content based on transfer encoding
             let encoding = partHeaders["content-transfer-encoding"]
-            let decodedContent = MIMEDecoder.decodeContent(partContent, encoding: encoding)
+            let decodedContent = MIMEDecoder.decodeContent(partContent, encoding: encoding).trimmingCharacters(in: .whitespacesAndNewlines)
             
             let mimePart = MIMEPart(
                 content: decodedContent,
@@ -155,6 +156,13 @@ public struct MIMEParser {
         }
         
         return nil
+    }
+    
+    /// Extract base content type without parameters
+    private static func extractBaseContentType(from contentType: String) -> String {
+        // Split by semicolon and take only the first part
+        let components = contentType.components(separatedBy: ";")
+        return components[0].trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

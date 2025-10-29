@@ -1,6 +1,15 @@
 {
   "pins" : [
     {
+      "identity" : "demark",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/steipete/Demark.git",
+      "state" : {
+        "revision" : "9e01f67e57d7115c03c688d906cf0e88f22f6d83",
+        "version" : "1.0.0"
+      }
+    },
+    {
       "identity" : "lrucache",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/nicklockwood/LRUCache.git",
@@ -12,10 +21,10 @@
     {
       "identity" : "mailcore2",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/MailCore/mailcore2.git",
+      "location" : "https://github.com/ChrisPatten/mailcore2.git",
       "state" : {
         "branch" : "master",
-        "revision" : "7417b2e8dd7e2c028aadb72056e4d1428c0627c4"
+        "revision" : "7ab0c0f34c12d8c04989b8a0aeb2444e88bdc4a8"
       }
     },
     {
@@ -79,6 +88,15 @@
       "state" : {
         "revision" : "95ba0316a9b733e92bb6b071255ff46263bbe7dc",
         "version" : "3.15.1"
+      }
+    },
+    {
+      "identity" : "swift-html-entities",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Kitura/swift-html-entities.git",
+      "state" : {
+        "revision" : "2b14531d0c36dbb7c1c45a4d38db9c2e7898a307",
+        "version" : "3.0.200"
       }
     },
     {

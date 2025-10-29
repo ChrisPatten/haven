@@ -355,7 +355,7 @@ public actor EmailCollector {
         
         // Use EmailBodyExtractor to get clean body text
         let bodyExtractor = EmailBodyExtractor()
-        let cleanBody = bodyExtractor.extractCleanBody(from: email)
+        let cleanBody = await bodyExtractor.extractCleanBody(from: email)
         let normalizedBody = normalizeIngestText(cleanBody)
         guard !normalizedBody.isEmpty else {
             throw EmailCollectorError.emptyContent

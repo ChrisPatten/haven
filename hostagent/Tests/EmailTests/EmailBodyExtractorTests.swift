@@ -38,7 +38,7 @@ final class EmailBodyExtractorTests: XCTestCase {
     
     private func assertCleanBodyMatches(fixture: String) async throws {
         let email = try await loadFixture(fixture)
-        let cleanBody = bodyExtractor.extractCleanBody(from: email)
+        let cleanBody = await bodyExtractor.extractCleanBody(from: email)
         let expectedBody = try loadGoldenRecord(fixture)
         
         XCTAssertEqual(cleanBody.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -46,9 +46,9 @@ final class EmailBodyExtractorTests: XCTestCase {
                       "Cleaned body doesn't match golden record for fixture: \(fixture)")
     }
     
-    // MARK: - HTML to Plain Text Tests
+    // MARK: - HTML to Markdown Tests
     
-    func testHTMLToPlainTextConversion() {
+    func testHTMLToMarkdownConversion() async {
         let html = """
         <html>
         <body>
@@ -64,26 +64,27 @@ final class EmailBodyExtractorTests: XCTestCase {
         """
         
         let email = EmailMessage(bodyHTML: html)
-        let result = bodyExtractor.extractCleanBody(from: email)
+        let result = await bodyExtractor.extractCleanBody(from: email)
         
         XCTAssertTrue(result.contains("Product Announcement"))
         XCTAssertTrue(result.contains("We're excited to announce our new product line!"))
         XCTAssertTrue(result.contains("Advanced technology"))
         XCTAssertTrue(result.contains("User-friendly interface"))
-        XCTAssertTrue(result.contains("Visit our website (https://example.com) for more information"))
+        // Links should be in markdown format: [text](url)
+        XCTAssertTrue(result.contains("[website](https://example.com)"))
         XCTAssertFalse(result.contains("<"))
         XCTAssertFalse(result.contains(">"))
     }
     
-    func testHTMLWithEntities() {
+    func testHTMLWithEntities() async {
         let html = """
         <p>This is a test with &nbsp; spaces and &lt;brackets&gt; and &amp; symbols.</p>
         """
         
         let email = EmailMessage(bodyHTML: html)
-        let result = bodyExtractor.extractCleanBody(from: email)
+        let result = await bodyExtractor.extractCleanBody(from: email)
         
-        // Verify that HTML entities are properly decoded
+        // Verify that HTML entities are properly decoded by HTMLEntities package
         XCTAssertTrue(result.contains("This is a test with") && result.contains("spaces and <brackets> and & symbols"))
         XCTAssertFalse(result.contains("&nbsp;"))
         XCTAssertFalse(result.contains("&lt;"))
@@ -98,7 +99,7 @@ final class EmailBodyExtractorTests: XCTestCase {
     
     // MARK: - Quoted Content Tests
     
-    func testStripQuotedContent() {
+    func testStripQuotedContent() async {
         let text = """
         Thanks for your message!
 
@@ -120,7 +121,7 @@ final class EmailBodyExtractorTests: XCTestCase {
         """
         
         let email = EmailMessage(bodyPlainText: text)
-        let result = bodyExtractor.extractCleanBody(from: email)
+        let result = await bodyExtractor.extractCleanBody(from: email)
         
         XCTAssertTrue(result.contains("Thanks for your message!"))
         XCTAssertTrue(result.contains("I'll get back to you soon"))
@@ -131,7 +132,7 @@ final class EmailBodyExtractorTests: XCTestCase {
         XCTAssertFalse(result.contains("I wanted to follow up"))
     }
     
-    func testStripHTMLBlockquotes() {
+    func testStripHTMLBlockquotes() async {
         let html = """
         <html>
         <body>
@@ -150,7 +151,7 @@ final class EmailBodyExtractorTests: XCTestCase {
         """
         
         let email = EmailMessage(bodyHTML: html)
-        let result = bodyExtractor.extractCleanBody(from: email)
+        let result = await bodyExtractor.extractCleanBody(from: email)
         
         XCTAssertTrue(result.contains("Thanks for your message!"))
         XCTAssertTrue(result.contains("I'll get back to you soon"))
@@ -163,7 +164,7 @@ final class EmailBodyExtractorTests: XCTestCase {
     
     // MARK: - Signature Tests
     
-    func testStripSignature() {
+    func testStripSignature() async {
         let text = """
         Hi there,
 
@@ -184,7 +185,7 @@ final class EmailBodyExtractorTests: XCTestCase {
         """
         
         let email = EmailMessage(bodyPlainText: text)
-        let result = bodyExtractor.extractCleanBody(from: email)
+        let result = await bodyExtractor.extractCleanBody(from: email)
         
         XCTAssertTrue(result.contains("Hi there,"))
         XCTAssertTrue(result.contains("This is the main content of the email"))
@@ -202,20 +203,8 @@ final class EmailBodyExtractorTests: XCTestCase {
     
     func testHTMLWithImagesGoldenRecord() async throws {
         let email = try await loadFixture("html-with-images")
-        let cleanBody = bodyExtractor.extractCleanBody(from: email)
+        let cleanBody = await bodyExtractor.extractCleanBody(from: email)
         let expectedBody = try loadGoldenRecord("html-with-images")
-        
-        // Write actual output to .tmp directory for comparison
-        let tmpDir = URL(fileURLWithPath: "/Users/chrispatten/workspace/haven/.tmp")
-        let actualOutputFile = tmpDir.appendingPathComponent("html-with-images-actual.txt")
-        try cleanBody.write(to: actualOutputFile, atomically: true, encoding: .utf8)
-        
-        // Also write expected output for easy comparison
-        let expectedOutputFile = tmpDir.appendingPathComponent("html-with-images-expected.txt")
-        try expectedBody.write(to: expectedOutputFile, atomically: true, encoding: .utf8)
-        
-        print("Actual output written to: \(actualOutputFile.path)")
-        print("Expected output written to: \(expectedOutputFile.path)")
         
         XCTAssertEqual(cleanBody.trimmingCharacters(in: .whitespacesAndNewlines),
                       expectedBody.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -232,16 +221,16 @@ final class EmailBodyExtractorTests: XCTestCase {
     
     // MARK: - Edge Cases
     
-    func testEmptyBody() {
+    func testEmptyBody() async {
         let email = EmailMessage()
-        let result = bodyExtractor.extractCleanBody(from: email)
+        let result = await bodyExtractor.extractCleanBody(from: email)
         XCTAssertEqual(result, "")
     }
     
-    func testMalformedHTML() {
+    func testMalformedHTML() async {
         let malformedHTML = "<html><body><p>Unclosed tag</body>"
         let email = EmailMessage(bodyHTML: malformedHTML)
-        let result = bodyExtractor.extractCleanBody(from: email)
+        let result = await bodyExtractor.extractCleanBody(from: email)
         
         // Should still extract text even with malformed HTML
         XCTAssertTrue(result.contains("Unclosed tag"))
@@ -249,7 +238,7 @@ final class EmailBodyExtractorTests: XCTestCase {
         XCTAssertFalse(result.contains(">"))
     }
     
-    func testMixedContent() {
+    func testMixedContent() async {
         let mixedContent = """
         Plain text content here.
         
@@ -263,7 +252,7 @@ final class EmailBodyExtractorTests: XCTestCase {
         """
         
         let email = EmailMessage(bodyPlainText: mixedContent)
-        let result = bodyExtractor.extractCleanBody(from: email)
+        let result = await bodyExtractor.extractCleanBody(from: email)
         
         XCTAssertTrue(result.contains("Plain text content here"))
         XCTAssertTrue(result.contains("HTML content here"))
