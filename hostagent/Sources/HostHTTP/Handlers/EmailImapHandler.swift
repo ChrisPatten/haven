@@ -66,13 +66,16 @@ public actor EmailImapHandler {
         var dryRun: Bool = false
         var concurrency: Int = 4
         var credentials: ImapCredentials?
-        let batchSize: Int? = nil // IMAP doesn't expose batchSize in collector options
+        var batchMode: Bool = false
+        var batchSize: Int? = nil
         
         if let req = runRequest {
             // Top-level fields
             limit = req.limit ?? config.defaultLimit
             order = req.order.rawValue
             concurrency = req.concurrency ?? 4
+            batchMode = req.batch ?? false
+            batchSize = req.batchSize
             
             // Date range
             if let dateRange = req.dateRange {
@@ -117,6 +120,16 @@ public actor EmailImapHandler {
             foldersToProcess = ["INBOX"]
         }
 
+        logger.info("Starting IMAP collector run", metadata: [
+            "account": account.responseIdentifier,
+            "folders": foldersToProcess.joined(separator: ","),
+            "batch_mode": batchMode ? "true" : "false",
+            "batch_size": batchSize.map(String.init) ?? "default"
+        ])
+
+        let resolvedFetchBatchSize = max(1, batchSize ?? 200)
+        let resolvedSubmissionBatchSize = batchMode ? resolvedFetchBatchSize : 1
+
         // limit: if omitted or 0 -> unlimited. If provided >0, honor it but clamp to maxLimit when maxLimit > 0.
         let providedLimit = limit ?? 0
         let maxLimitValue = maxLimit ?? 0
@@ -160,7 +173,13 @@ public actor EmailImapHandler {
         // Helper: process one folder and return per-folder results. The helper respects
         // the globalLimit (0 == unlimited) by checking submitted counts and stopping
         // early if globalLimit is reached.
-        func processFolder(_ folder: String, remainingGlobalLimit: Int) async -> (totalFound: Int, processed: Int, submitted: Int, results: [ImapMessageResult], errors: [ImapRunError], earliestTouched: Date?, latestTouched: Date?) {
+        func processFolder(
+            _ folder: String,
+            remainingGlobalLimit: Int,
+            fetchBatchSize: Int,
+            submissionBatchSize: Int,
+            batchMode: Bool
+        ) async -> (totalFound: Int, processed: Int, submitted: Int, results: [ImapMessageResult], errors: [ImapRunError], earliestTouched: Date?, latestTouched: Date?) {
             do {
                 logger.info("Starting IMAP search", metadata: [
                     "account": account.responseIdentifier,
@@ -176,36 +195,39 @@ public actor EmailImapHandler {
                 ])
                 let uidsSortedAsc = searchResult.sorted()
 
-                var lastProcessedUid: UInt32 = 0
-                var earliestProcessedUidCache: UInt32? = nil
+                // Load persisted fences (timestamp-based)
+                var fences: [FenceRange] = []
                 do {
-                    if let state = try loadImapState(account: account, folder: folder) {
-                        if let v = state.last { lastProcessedUid = v }
-                        if let e = state.earliest { earliestProcessedUidCache = e }
-                    }
+                    fences = try loadImapState(account: account, folder: folder)
+                    logger.info("Loaded IMAP fences", metadata: [
+                        "account": account.responseIdentifier,
+                        "folder": folder,
+                        "fence_count": String(fences.count)
+                    ])
                 } catch {
                     logger.warning("Failed to load IMAP account state", metadata: ["account": account.responseIdentifier, "folder": folder, "error": error.localizedDescription])
                 }
 
                 if reset == true {
-                    logger.info("IMAP run requested reset; ignoring persisted last_processed_uid", metadata: ["account": account.responseIdentifier, "folder": folder])
-                    lastProcessedUid = 0
+                    logger.info("IMAP run requested reset; clearing fences", metadata: ["account": account.responseIdentifier, "folder": folder])
+                    fences = []
                 }
 
+                // Order UIDs based on requested order, but we'll filter by timestamp during iteration
                 let orderedUIDs = Self.composeProcessingOrder(
                     searchResultAsc: uidsSortedAsc,
-                    lastProcessedUid: lastProcessedUid,
+                    lastProcessedUid: 0,  // No longer used - we filter by timestamp during iteration
                     order: order,
                     since: sinceDate,
                     before: beforeDate,
-                    oldestCachedUid: earliestProcessedUidCache
+                    oldestCachedUid: nil  // No longer used - we filter by timestamp during iteration
                 )
 
                 logger.info("Processing order determined", metadata: [
                     "account": account.responseIdentifier,
                     "folder": folder,
                     "ordered_count": "\(orderedUIDs.count)",
-                    "last_processed_uid": "\(lastProcessedUid)"
+                    "existing_fences": String(fences.count)
                 ])
 
                 var processedCount = 0
@@ -214,17 +236,121 @@ public actor EmailImapHandler {
                 var errors: [ImapRunError] = []
                 var earliestProcessedDate: Date? = nil
                 var latestProcessedDate: Date? = nil
-                var earliestProcessedUid: UInt32? = nil
+                var pendingSubmissions: [PendingImapSubmission] = []
 
                 let sourcePrefix = "email_imap/\(account.responseIdentifier)"
-                let defaultBatchSize = batchSize ?? 200
-                let fetchBatchSize = max(1, defaultBatchSize)
+                let fetchBatch = max(1, fetchBatchSize)
+                let submitBatch = max(1, submissionBatchSize)
 
                 var processedSoFar = 0
                 var stopProcessing = false
+
+                func flushPendingSubmissions(force: Bool = false) async {
+                    guard !pendingSubmissions.isEmpty else { return }
+                    if !force && pendingSubmissions.count < submitBatch {
+                        return
+                    }
+
+                    do {
+                        let preferBatch = batchMode && pendingSubmissions.count > 1
+                        let payloads = pendingSubmissions.map(\.payload)
+                        let outcomes = try await emailCollector.submitEmailDocuments(payloads, preferBatch: preferBatch)
+                        if outcomes.count != pendingSubmissions.count {
+                            logger.warning("Gateway batch response size mismatch", metadata: [
+                                "account": account.responseIdentifier,
+                                "folder": folder,
+                                "expected": "\(pendingSubmissions.count)",
+                                "actual": "\(outcomes.count)"
+                            ])
+                        }
+
+                        // Collect successfully submitted timestamps for fence updates
+                        var successfulTimestamps: [Date] = []
+                        
+                        for (index, pending) in pendingSubmissions.enumerated() {
+                            let outcome: EmailCollectorSubmissionResult
+                            if index < outcomes.count {
+                                outcome = outcomes[index]
+                            } else {
+                                outcome = EmailCollectorSubmissionResult(
+                                    statusCode: 502,
+                                    submission: nil,
+                                    errorCode: "INGEST.BATCH_MISSING_RESULT",
+                                    errorMessage: "Batch response missing entry for index \(index)",
+                                    retryable: true
+                                )
+                            }
+
+                            if let submission = outcome.submission {
+                                submittedCount += 1
+                                let entry = ImapMessageResult(
+                                    uid: pending.uid,
+                                    messageId: pending.payload.metadata.messageId,
+                                    status: submission.status,
+                                    submissionId: submission.submissionId,
+                                    docId: submission.docId,
+                                    duplicate: submission.duplicate
+                                )
+                                results.append(entry)
+
+                                if let msgDate = pending.messageDate {
+                                    successfulTimestamps.append(msgDate)
+                                    
+                                    if let prev = earliestProcessedDate {
+                                        if msgDate < prev { earliestProcessedDate = msgDate }
+                                    } else {
+                                        earliestProcessedDate = msgDate
+                                    }
+                                    if let prev = latestProcessedDate {
+                                        if msgDate > prev { latestProcessedDate = msgDate }
+                                    } else {
+                                        latestProcessedDate = msgDate
+                                    }
+                                }
+                            } else {
+                                let reason = outcome.errorMessage ?? outcome.errorCode ?? "Batch submission failed"
+                                errors.append(ImapRunError(uid: pending.uid, reason: reason))
+                            }
+                        }
+                        
+                        // Update fences with successfully submitted timestamps
+                        if !successfulTimestamps.isEmpty {
+                            let minTimestamp = successfulTimestamps.min()!
+                            let maxTimestamp = successfulTimestamps.max()!
+                            fences = FenceManager.addFence(newEarliest: minTimestamp, newLatest: maxTimestamp, existingFences: fences)
+                            
+                            // Save updated fences
+                            do {
+                                try saveImapState(account: account, folder: folder, fences: fences)
+                            } catch {
+                                logger.warning("Failed to save IMAP account state", metadata: [
+                                    "account": account.responseIdentifier,
+                                    "folder": folder,
+                                    "error": error.localizedDescription
+                                ])
+                            }
+                        }
+
+                        if globalLimit > 0 && submittedCount >= globalLimit {
+                            stopProcessing = true
+                        }
+                    } catch {
+                        logger.error("Failed to submit IMAP batch", metadata: [
+                            "account": account.debugIdentifier,
+                            "folder": folder,
+                            "error": error.localizedDescription
+                        ])
+                        for pending in pendingSubmissions {
+                            errors.append(ImapRunError(uid: pending.uid, reason: error.localizedDescription))
+                        }
+                    }
+
+                    pendingSubmissions.removeAll()
+                }
+
                 while processedSoFar < orderedUIDs.count && !stopProcessing {
                     let remaining = orderedUIDs.count - processedSoFar
-                    let thisBatchSize = min(fetchBatchSize, remaining)
+                    let thisBatchSize = min(fetchBatch, remaining)
                     let startIndex = processedSoFar
                     let endIndex = processedSoFar + thisBatchSize
                     let batchUIDs = Array(orderedUIDs[startIndex..<endIndex])
@@ -235,23 +361,62 @@ public actor EmailImapHandler {
                         do {
                             let data = try await imapSession.fetchRFC822(folder: folder, uid: uid)
                             let message = try await emailService.parseRFC822Data(data)
-                            // NOTE: Do not set earliest/latest here. These should reflect
-                            // only successfully submitted documents — update after submit.
                             processedCount += 1
 
-                            if let prev = earliestProcessedUid {
-                                if uid < prev { earliestProcessedUid = uid }
-                            } else {
-                                earliestProcessedUid = uid
+                            // Check if message timestamp is within any fence - if so, skip
+                            if let msgDate = message.date, FenceManager.isTimestampInFences(msgDate, fences: fences) {
+                                logger.debug("Skipping message within fence", metadata: [
+                                    "account": account.responseIdentifier,
+                                    "folder": folder,
+                                    "uid": String(uid),
+                                    "timestamp": ISO8601DateFormatter().string(from: msgDate)
+                                ])
+                                continue
                             }
 
-                            if let since = sinceDate, let msgDate = message.date, msgDate < since {
-                                stopProcessing = true
-                                break
-                            }
-                            if let before = beforeDate, let msgDate = message.date, msgDate > before {
-                                stopProcessing = true
-                                break
+                            // If date bounds are specified, check them and skip/stop based on processing order
+                            // In descending order (newest first): skip messages > until, stop when < since
+                            // In ascending order (oldest first): skip messages < since, stop when > until
+                            if let msgDate = message.date {
+                                if order == "desc" {
+                                    // Descending order: process from newest to oldest
+                                    if let before = beforeDate, msgDate > before {
+                                        // Message is too new (after until), skip and continue to older messages
+                                        logger.debug("Skipping message after until date", metadata: [
+                                            "account": account.responseIdentifier,
+                                            "folder": folder,
+                                            "uid": String(uid),
+                                            "message_date": ISO8601DateFormatter().string(from: msgDate),
+                                            "until": ISO8601DateFormatter().string(from: before)
+                                        ])
+                                        continue
+                                    }
+                                    if let since = sinceDate, msgDate < since {
+                                        // Message is too old (before since), stop processing
+                                        logger.info("Reached since date constraint, stopping processing")
+                                        stopProcessing = true
+                                        break
+                                    }
+                                } else {
+                                    // Ascending order: process from oldest to newest
+                                    if let since = sinceDate, msgDate < since {
+                                        // Message is too old (before since), skip and continue to newer messages
+                                        logger.debug("Skipping message before since date", metadata: [
+                                            "account": account.responseIdentifier,
+                                            "folder": folder,
+                                            "uid": String(uid),
+                                            "message_date": ISO8601DateFormatter().string(from: msgDate),
+                                            "since": ISO8601DateFormatter().string(from: since)
+                                        ])
+                                        continue
+                                    }
+                                    if let before = beforeDate, msgDate > before {
+                                        // Message is too new (after until), stop processing
+                                        logger.info("Reached until date constraint, stopping processing")
+                                        stopProcessing = true
+                                        break
+                                    }
+                                }
                             }
 
                             let payload = try await emailCollector.buildDocumentPayload(
@@ -275,49 +440,22 @@ public actor EmailImapHandler {
                                 continue
                             }
 
-                            // If a globalLimit is specified, and remainingGlobalLimit is 0, stop submitting.
                             if globalLimit > 0 && remainingGlobalLimit <= 0 {
                                 stopProcessing = true
                                 break
                             }
 
-                            let submission = try await emailCollector.submitEmailDocument(payload)
-                            submittedCount += 1
-
-                            let entry = ImapMessageResult(
-                                uid: uid,
-                                messageId: payload.metadata.messageId,
-                                status: submission.status,
-                                submissionId: submission.submissionId,
-                                docId: submission.docId,
-                                duplicate: submission.duplicate
+                            pendingSubmissions.append(
+                                PendingImapSubmission(
+                                    uid: uid,
+                                    payload: payload,
+                                    messageDate: message.date
+                                )
                             )
-                            results.append(entry)
 
-                            // Update earliest/latest only for actually submitted documents
-                            if let msgDate = message.date {
-                                if let prev = earliestProcessedDate {
-                                    if msgDate < prev { earliestProcessedDate = msgDate }
-                                } else {
-                                    earliestProcessedDate = msgDate
-                                }
-                                if let prev = latestProcessedDate {
-                                    if msgDate > prev { latestProcessedDate = msgDate }
-                                } else {
-                                    latestProcessedDate = msgDate
-                                }
-                            }
+                            await flushPendingSubmissions(force: false)
 
-                            do {
-                                let newLast = max(lastProcessedUid, uid)
-                                lastProcessedUid = newLast
-                                try saveImapState(account: account, folder: folder, last: lastProcessedUid, earliest: earliestProcessedUid)
-                            } catch {
-                                logger.warning("Failed to save IMAP account state", metadata: ["account": account.responseIdentifier, "folder": folder, "error": error.localizedDescription])
-                            }
-
-                            if globalLimit > 0 && submittedCount >= globalLimit {
-                                stopProcessing = true
+                            if stopProcessing {
                                 break
                             }
                         } catch {
@@ -330,9 +468,14 @@ public actor EmailImapHandler {
                             errors.append(ImapRunError(uid: uid, reason: error.localizedDescription))
                         }
                     }
+
+                    await flushPendingSubmissions(force: stopProcessing)
+
                     processedSoFar += batchUIDs.count
                     if stopProcessing { break }
                 }
+
+                await flushPendingSubmissions(force: true)
 
                 return (totalFound: searchResult.count, processed: processedCount, submitted: submittedCount, results: results, errors: errors, earliestTouched: earliestProcessedDate, latestTouched: latestProcessedDate)
             } catch {
@@ -356,7 +499,13 @@ public actor EmailImapHandler {
 
         for folder in foldersToProcess {
             let remainingAllowed = (globalLimit > 0) ? max(0, globalLimit - submittedSum) : 0
-            let folderResult = await processFolder(folder, remainingGlobalLimit: remainingAllowed)
+            let folderResult = await processFolder(
+                folder,
+                remainingGlobalLimit: remainingAllowed,
+                fetchBatchSize: resolvedFetchBatchSize,
+                submissionBatchSize: resolvedSubmissionBatchSize,
+                batchMode: batchMode
+            )
 
             logger.info("Folder processing completed", metadata: [
                 "folder": folder,
@@ -532,6 +681,12 @@ public actor EmailImapHandler {
         var docId: String?
         var duplicate: Bool?
     }
+
+    private struct PendingImapSubmission {
+        var uid: UInt32
+        var payload: EmailDocumentPayload
+        var messageDate: Date?
+    }
     
     private struct ImapRunError: Encodable {
         var uid: UInt32
@@ -601,6 +756,9 @@ extension EmailImapHandler {
     }
 }
 
+// MARK: - Fence Management
+// Uses shared FenceManager from HavenCore
+
 // MARK: - IMAP account state persistence
 
 private extension EmailImapHandler {
@@ -620,32 +778,29 @@ private extension EmailImapHandler {
         return dir.appendingPathComponent(fileName)
     }
 
-    func loadImapState(account: MailSourceConfig, folder: String) throws -> (last: UInt32?, earliest: UInt32?)? {
+    func loadImapState(account: MailSourceConfig, folder: String) throws -> [FenceRange] {
         let url = cacheFileURL(for: account, folder: folder)
         let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return nil }
+        guard fm.fileExists(atPath: url.path) else { return [] }
         let data = try Data(contentsOf: url)
-        let decoder = JSONDecoder()
-        let obj = try decoder.decode([String: Int].self, from: data)
-        let last = obj["last_processed_uid"].map { UInt32($0) }
-        let earliest = obj["earliest_processed_uid"].map { UInt32($0) }
-        return (last: last, earliest: earliest)
+        let fences = try FenceManager.loadFences(from: data, oldFormatType: [String: Int].self)
+        if fences.isEmpty && !data.isEmpty {
+            logger.info("Detected old IMAP state format, starting fresh with timestamp-based fences", metadata: [
+                "account": account.responseIdentifier,
+                "folder": folder
+            ])
+        }
+        return fences
     }
 
-    func saveImapState(account: MailSourceConfig, folder: String, last: UInt32, earliest: UInt32?) throws {
+    func saveImapState(account: MailSourceConfig, folder: String, fences: [FenceRange]) throws {
         let url = cacheFileURL(for: account, folder: folder)
         let dir = url.deletingLastPathComponent()
         let fm = FileManager.default
         if !fm.fileExists(atPath: dir.path) {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
-        var obj: [String: Int] = ["last_processed_uid": Int(last)]
-        if let e = earliest {
-            obj["earliest_processed_uid"] = Int(e)
-        }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let data = try encoder.encode(obj)
+        let data = try FenceManager.saveFences(fences)
         try data.write(to: url, options: .atomic)
     }
 }

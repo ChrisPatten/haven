@@ -521,6 +521,38 @@ class FileExtractionResult:
     error: Optional[Dict[str, Any]] = None
 
 
+@dataclass
+class PreparedIngestDocument:
+    payload: Dict[str, Any]
+    content_sha256: str
+
+
+@dataclass
+class PreparedBatchItem:
+    index: int
+    payload: Dict[str, Any]
+    content_sha256: str
+    correlation_id: str
+
+
+class IngestPreparationError(Exception):
+    def __init__(
+        self,
+        status_code: int,
+        error_code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+        self.message = message
+        self.retryable = retryable
+        self.details = details or {}
+
+
 class LocalFileMeta(BaseModel):
     source: str = "localfs"
     path: str
@@ -564,6 +596,7 @@ class IngestRequestModel(BaseModel):
     source_type: str
     source_id: str
     source_provider: Optional[str] = None
+    external_id: Optional[str] = None
     title: Optional[str] = None
     canonical_uri: Optional[str] = None
     content: IngestContentModel
@@ -575,6 +608,27 @@ class IngestRequestModel(BaseModel):
     people: List[DocumentPerson] = Field(default_factory=list)
     thread_id: Optional[uuid.UUID] = None
     thread: Optional[ThreadPayloadModel] = None
+
+
+class BatchIngestRequest(BaseModel):
+    documents: List[IngestRequestModel] = Field(default_factory=list, min_items=1)
+
+
+class BatchIngestItemResult(BaseModel):
+    index: int
+    status_code: int
+    content_sha256: Optional[str] = None
+    submission: Optional[IngestSubmissionResponse] = None
+    error: Optional[ErrorEnvelope] = None
+
+
+class BatchIngestResponse(BaseModel):
+    batch_id: Optional[str] = None
+    batch_status: Optional[str] = None
+    total_count: Optional[int] = None
+    success_count: int
+    failure_count: int
+    results: List[BatchIngestItemResult]
 
 
 class IngestSubmissionResponse(BaseModel):
@@ -616,6 +670,17 @@ class ErrorEnvelope(BaseModel):
 
 CATALOG_TIMEOUT_SECONDS = float(os.getenv("CATALOG_TIMEOUT_SECONDS", "15"))
 SUPPORTED_TEXT_MIME_TYPES = {"text/plain", "text/markdown"}
+DEFAULT_SENT_SOURCES = {"imessage", "sms", "email"}
+ALLOWED_TIMESTAMP_TYPES = {
+    "sent",
+    "received",
+    "modified",
+    "created",
+    "event_start",
+    "event_end",
+    "due",
+    "completed",
+}
 
 
 def _normalize_ingest_text(value: str) -> str:
@@ -628,6 +693,11 @@ def _compute_sha256(value: str) -> str:
 
 def _build_idempotency_key(source_type: str, source_id: str, text_hash: str) -> str:
     seed = f"{source_type}:{source_id}:{text_hash}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _derive_batch_idempotency_key(keys: Sequence[str]) -> str:
+    seed = "|".join(sorted(keys))
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
@@ -749,6 +819,88 @@ def _extract_text(content: IngestContentModel) -> str:
         status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         detail=f"Unsupported MIME type: {content.mime_type}",
     )
+
+
+def _prepare_ingest_document_payload(
+    payload: IngestRequestModel,
+) -> PreparedIngestDocument:
+    try:
+        raw_text = _extract_text(payload.content)
+    except HTTPException as exc:
+        raise IngestPreparationError(
+            exc.status_code,
+            "INGEST.EXTRACTION_FAILED",
+            str(exc.detail),
+            retryable=False,
+        ) from exc
+
+    text_normalized = _normalize_ingest_text(raw_text)
+    if not text_normalized:
+        raise IngestPreparationError(
+            status.HTTP_400_BAD_REQUEST,
+            "INGEST.EMPTY_TEXT",
+            "Document text empty after extraction",
+        )
+
+    text_hash = _compute_sha256(text_normalized)
+    idempotency_key = _build_idempotency_key(
+        payload.source_type, payload.source_id, text_hash
+    )
+
+    content_timestamp = _ensure_utc(payload.content_timestamp) or datetime.now(tz=UTC)
+    if payload.content_timestamp_type:
+        content_timestamp_type = payload.content_timestamp_type.lower()
+    else:
+        content_timestamp_type = (
+            "sent" if payload.source_type in DEFAULT_SENT_SOURCES else "created"
+        )
+
+    if content_timestamp_type not in ALLOWED_TIMESTAMP_TYPES:
+        raise IngestPreparationError(
+            status.HTTP_400_BAD_REQUEST,
+            "INGEST.INVALID_TIMESTAMP_TYPE",
+            "Invalid content_timestamp_type",
+            details={"value": payload.content_timestamp_type},
+        )
+
+    content_created_at = _ensure_utc(payload.content_created_at)
+    content_modified_at = _ensure_utc(payload.content_modified_at)
+    people_payload = _serialize_people(payload.people)
+    thread_payload = _serialize_thread(payload.thread)
+
+    catalog_payload: Dict[str, Any] = {
+        "idempotency_key": idempotency_key,
+        "source_type": payload.source_type,
+        "source_provider": payload.source_provider,
+        "source_id": payload.source_id,
+        "content_sha256": text_hash,
+        "mime_type": payload.content.mime_type,
+        "text": text_normalized,
+        "title": payload.title,
+        "canonical_uri": payload.canonical_uri,
+        "metadata": payload.metadata,
+        "content_timestamp": content_timestamp.isoformat(),
+        "content_timestamp_type": content_timestamp_type,
+        "people": people_payload,
+    }
+
+    if payload.external_id:
+        catalog_payload["external_id"] = payload.external_id
+
+    if payload.content_created_at or content_created_at:
+        catalog_payload["content_created_at"] = (
+            content_created_at or content_timestamp
+        ).isoformat()
+    if payload.content_modified_at or content_modified_at:
+        catalog_payload["content_modified_at"] = (
+            content_modified_at or content_timestamp
+        ).isoformat()
+    if payload.thread_id:
+        catalog_payload["thread_id"] = str(payload.thread_id)
+    if thread_payload:
+        catalog_payload["thread"] = thread_payload
+
+    return PreparedIngestDocument(payload=catalog_payload, content_sha256=text_hash)
 
 
 async def _catalog_request(
@@ -1239,6 +1391,253 @@ def _update_change_token(
 
 
 @app.post(
+    "/v1/ingest:batch",
+    response_model=BatchIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ingest_documents_batch(
+    payload: BatchIngestRequest,
+    response: Response,
+    _: None = Depends(require_token),
+) -> BatchIngestResponse:
+    batch_correlation_id = _make_correlation_id("gw_ingest_batch")
+    response.headers["X-Correlation-ID"] = batch_correlation_id
+
+    if not payload.documents:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="Batch documents payload must include at least one document",
+        )
+
+    total_documents = len(payload.documents)
+    results_map: Dict[int, BatchIngestItemResult] = {}
+    prepared_items: List[PreparedBatchItem] = []
+    batch_id: Optional[str] = None
+    batch_status: Optional[str] = None
+    catalog_total: Optional[int] = None
+    catalog_success: Optional[int] = None
+    catalog_failure: Optional[int] = None
+
+    for index, document in enumerate(payload.documents):
+        item_correlation_id = f"{batch_correlation_id}:{index}"
+        try:
+            prepared = _prepare_ingest_document_payload(document)
+        except IngestPreparationError as exc:
+            results_map[index] = BatchIngestItemResult(
+                index=index,
+                status_code=exc.status_code,
+                error=ErrorEnvelope(
+                    error_code=exc.error_code,
+                    message=exc.message,
+                    retryable=exc.retryable,
+                    correlation_id=item_correlation_id,
+                    details=exc.details,
+                ),
+            )
+            continue
+
+        prepared_items.append(
+            PreparedBatchItem(
+                index=index,
+                payload=prepared.payload,
+                content_sha256=prepared.content_sha256,
+                correlation_id=item_correlation_id,
+            )
+        )
+
+    if prepared_items:
+        request_payload = {"documents": [item.payload for item in prepared_items]}
+        idempotency_keys = [
+            item.payload.get("idempotency_key")
+            for item in prepared_items
+            if item.payload.get("idempotency_key")
+        ]
+        if idempotency_keys:
+            request_payload["batch_idempotency_key"] = _derive_batch_idempotency_key(idempotency_keys)
+        try:
+            catalog_resp = await _catalog_request(
+                "POST",
+                "/v1/catalog/documents/batch",
+                batch_correlation_id,
+                json_payload=request_payload,
+            )
+        except httpx.HTTPError as exc:
+            for item in prepared_items:
+                results_map[item.index] = BatchIngestItemResult(
+                    index=item.index,
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content_sha256=item.content_sha256,
+                    error=ErrorEnvelope(
+                        error_code="INGEST.CATALOG_UNAVAILABLE",
+                        message="Catalog service unavailable",
+                        retryable=True,
+                        correlation_id=item.correlation_id,
+                        details={"error": str(exc)},
+                    ),
+                )
+        else:
+            if catalog_resp.status_code not in (
+                status.HTTP_200_OK,
+                status.HTTP_202_ACCEPTED,
+                status.HTTP_207_MULTI_STATUS,
+            ):
+                try:
+                    body = catalog_resp.json()
+                except Exception:
+                    body = catalog_resp.text
+                for item in prepared_items:
+                    results_map[item.index] = BatchIngestItemResult(
+                        index=item.index,
+                        status_code=catalog_resp.status_code,
+                        content_sha256=item.content_sha256,
+                        error=ErrorEnvelope(
+                            error_code="INGEST.CATALOG_ERROR",
+                            message="Catalog rejected ingest request",
+                            retryable=catalog_resp.status_code >= 500,
+                            correlation_id=item.correlation_id,
+                            details={"status_code": catalog_resp.status_code, "body": body},
+                        ),
+                    )
+            else:
+                try:
+                    payload_json = catalog_resp.json()
+                except Exception as exc:  # pragma: no cover - defensive
+                    for item in prepared_items:
+                        results_map[item.index] = BatchIngestItemResult(
+                            index=item.index,
+                            status_code=status.HTTP_502_BAD_GATEWAY,
+                            content_sha256=item.content_sha256,
+                            error=ErrorEnvelope(
+                                error_code="INGEST.CATALOG_ERROR",
+                                message="Catalog returned invalid response",
+                                retryable=True,
+                                correlation_id=item.correlation_id,
+                                details={"error": str(exc)},
+                            ),
+                        )
+                else:
+                    if payload_json.get("batch_id"):
+                        batch_id = str(payload_json["batch_id"])
+                    if payload_json.get("batch_status"):
+                        batch_status = str(payload_json["batch_status"])
+                    if "total_count" in payload_json:
+                        catalog_total = payload_json["total_count"]
+                    if "success_count" in payload_json:
+                        catalog_success = payload_json["success_count"]
+                    if "failure_count" in payload_json:
+                        catalog_failure = payload_json["failure_count"]
+
+                    catalog_results = payload_json.get("results", [])
+                    result_lookup: Dict[int, Dict[str, Any]] = {}
+                    for entry in catalog_results:
+                        if not isinstance(entry, dict):
+                            continue
+                        idx = entry.get("index")
+                        if idx is None:
+                            continue
+                        try:
+                            result_lookup[int(idx)] = entry or {}
+                        except (TypeError, ValueError):
+                            continue
+
+                    for item in prepared_items:
+                        entry = result_lookup.get(item.index)
+                        if entry is None:
+                            results_map[item.index] = BatchIngestItemResult(
+                                index=item.index,
+                                status_code=status.HTTP_502_BAD_GATEWAY,
+                                content_sha256=item.content_sha256,
+                                error=ErrorEnvelope(
+                                    error_code="INGEST.CATALOG_ERROR",
+                                    message="Catalog returned mismatched batch result index",
+                                    retryable=True,
+                                    correlation_id=item.correlation_id,
+                                    details={"index": item.index, "catalog_indexes": list(result_lookup.keys())},
+                                ),
+                            )
+                            continue
+
+                        status_code = int(entry.get("status_code", catalog_resp.status_code))
+                        document_payload = entry.get("document")
+                        if document_payload:
+                            submission = _map_catalog_ingest_response(document_payload)
+                            results_map[item.index] = BatchIngestItemResult(
+                                index=item.index,
+                                status_code=status_code,
+                                content_sha256=item.content_sha256,
+                                submission=submission,
+                            )
+                            continue
+
+                        error_info = entry.get("error") or {}
+                        message = error_info.get("message", "Catalog rejected ingest request")
+                        error_code = error_info.get("code", "INGEST.CATALOG_ERROR")
+                        details = error_info.get("details") or {}
+                        results_map[item.index] = BatchIngestItemResult(
+                            index=item.index,
+                            status_code=status_code,
+                            content_sha256=item.content_sha256,
+                            error=ErrorEnvelope(
+                                error_code=error_code,
+                                message=message,
+                                retryable=status_code >= 500,
+                                correlation_id=item.correlation_id,
+                                details=details,
+                            ),
+                        )
+
+    results: List[BatchIngestItemResult] = []
+    for idx in range(total_documents):
+        result = results_map.get(idx)
+        if result is None:
+            result = BatchIngestItemResult(
+                index=idx,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                error=ErrorEnvelope(
+                    error_code="INGEST.UNKNOWN_ERROR",
+                    message="No result available for batch document",
+                    retryable=True,
+                    correlation_id=f"{batch_correlation_id}:{idx}",
+                    details={},
+                ),
+            )
+        results.append(result)
+
+    computed_success = sum(1 for item in results if item.submission is not None)
+    computed_failure = total_documents - computed_success
+
+    try:
+        success_count = int(catalog_success) if catalog_success is not None else computed_success
+    except (TypeError, ValueError):
+        success_count = computed_success
+
+    try:
+        failure_count = int(catalog_failure) if catalog_failure is not None else computed_failure
+    except (TypeError, ValueError):
+        failure_count = computed_failure
+
+    try:
+        total_count = int(catalog_total) if catalog_total is not None else total_documents
+    except (TypeError, ValueError):
+        total_count = total_documents
+
+    response.status_code = (
+        status.HTTP_202_ACCEPTED
+        if failure_count == 0
+        else status.HTTP_207_MULTI_STATUS
+    )
+
+    return BatchIngestResponse(
+        batch_id=batch_id,
+        batch_status=batch_status,
+        total_count=total_count,
+        success_count=success_count,
+        failure_count=failure_count,
+        results=results,
+    )
+
+
+@app.post(
     "/v1/ingest",
     response_model=IngestSubmissionResponse,
     status_code=status.HTTP_202_ACCEPTED,
@@ -1252,85 +1651,19 @@ async def ingest_document(
     response.headers["X-Correlation-ID"] = correlation_id
 
     try:
-        raw_text = _extract_text(payload.content)
-    except HTTPException as exc:
+        prepared = _prepare_ingest_document_payload(payload)
+    except IngestPreparationError as exc:
         return _error_response(
             exc.status_code,
-            "INGEST.EXTRACTION_FAILED",
-            str(exc.detail),
+            exc.error_code,
+            exc.message,
             correlation_id,
-            retryable=False,
+            retryable=exc.retryable,
+            details=exc.details,
         )
 
-    text_normalized = _normalize_ingest_text(raw_text)
-    if not text_normalized:
-        return _error_response(
-            status.HTTP_400_BAD_REQUEST,
-            "INGEST.EMPTY_TEXT",
-            "Document text empty after extraction",
-            correlation_id,
-        )
-
-    text_hash = _compute_sha256(text_normalized)
-    idempotency_key = _build_idempotency_key(
-        payload.source_type, payload.source_id, text_hash
-    )
-
-    content_timestamp = _ensure_utc(payload.content_timestamp) or datetime.now(tz=UTC)
-    if payload.content_timestamp_type:
-        content_timestamp_type = payload.content_timestamp_type.lower()
-    else:
-        default_sent_sources = {"imessage", "sms", "email"}
-        content_timestamp_type = (
-            "sent" if payload.source_type in default_sent_sources else "created"
-        )
-    allowed_timestamp_types = {
-        "sent",
-        "received",
-        "modified",
-        "created",
-        "event_start",
-        "event_end",
-        "due",
-        "completed",
-    }
-    if content_timestamp_type not in allowed_timestamp_types:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail="Invalid content_timestamp_type",
-        )
-    content_created_at = _ensure_utc(payload.content_created_at)
-    content_modified_at = _ensure_utc(payload.content_modified_at)
-    people_payload = _serialize_people(payload.people)
-    thread_payload = _serialize_thread(payload.thread)
-
-    catalog_payload: Dict[str, Any] = {
-        "idempotency_key": idempotency_key,
-        "source_type": payload.source_type,
-        "source_provider": payload.source_provider,
-        "source_id": payload.source_id,
-        "content_sha256": text_hash,
-        "mime_type": payload.content.mime_type,
-        "text": text_normalized,
-        "title": payload.title,
-        "canonical_uri": payload.canonical_uri,
-        "metadata": payload.metadata,
-        "content_timestamp": content_timestamp.isoformat(),
-        "content_timestamp_type": content_timestamp_type,
-        "people": people_payload,
-    }
-    if payload.content_created_at or content_created_at:
-        catalog_payload["content_created_at"] = (
-            content_created_at or content_timestamp
-        ).isoformat()
-    if payload.content_modified_at or content_modified_at:
-        catalog_payload["content_modified_at"] = (
-            content_modified_at or content_timestamp
-        ).isoformat()
-    if payload.thread_id:
-        catalog_payload["thread_id"] = str(payload.thread_id)
-    if thread_payload:
-        catalog_payload["thread"] = thread_payload
+    catalog_payload = prepared.payload
+    text_hash = prepared.content_sha256
 
     try:
         catalog_resp = await _catalog_request(
@@ -1662,16 +1995,6 @@ async def get_ingest_status(
 ) -> IngestStatusResponse | JSONResponse:
     correlation_id = _make_correlation_id("gw_status")
     response.headers["X-Correlation-ID"] = correlation_id
-
-    try:
-        uuid.UUID(submission_id)
-    except ValueError:
-        return _error_response(
-            status.HTTP_400_BAD_REQUEST,
-            "INGEST.INVALID_SUBMISSION_ID",
-            "submission_id must be a valid UUID",
-            correlation_id,
-        )
 
     try:
         catalog_resp = await _catalog_request(

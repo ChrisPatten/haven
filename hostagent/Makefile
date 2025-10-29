@@ -34,17 +34,40 @@ clean:
 
 # Install binary to system
 install: release
-	@echo "Installing hostagent to /usr/local/bin..."
-	@sudo cp .build/release/hostagent /usr/local/bin/
-	@sudo chmod +x /usr/local/bin/hostagent
-	@echo "Creating config directory..."
-	@mkdir -p ~/.haven
-	@if [ ! -f ~/.haven/hostagent.yaml ]; then \
+	@echo "Installing hostagent to /usr/local/bin..."; \
+	RELEASE_BIN=$$(swift build -c release --show-bin-path)/hostagent; \
+	if [ ! -f "$$RELEASE_BIN" ]; then \
+		echo "Error: Release binary not found at $$RELEASE_BIN"; \
+		exit 1; \
+	fi; \
+	FRAMEWORK_PATH=$$(dirname $$RELEASE_BIN)/MailCore.framework; \
+	if [ ! -d "$$FRAMEWORK_PATH" ]; then \
+		echo "Error: MailCore.framework not found at $$FRAMEWORK_PATH"; \
+		exit 1; \
+	fi; \
+	sudo cp "$$RELEASE_BIN" /usr/local/bin/; \
+	sudo chmod +x /usr/local/bin/hostagent; \
+	echo "Bundling MailCore.framework with binary..."; \
+	sudo mkdir -p /usr/local/bin/Frameworks; \
+	sudo rm -rf /usr/local/bin/Frameworks/MailCore.framework; \
+	sudo ditto "$$FRAMEWORK_PATH" /usr/local/bin/Frameworks/MailCore.framework; \
+	echo "Creating framework symlinks if needed..."; \
+	[ -L /usr/local/bin/Frameworks/MailCore.framework/Versions/Current ] || sudo ln -sf Versions/A /usr/local/bin/Frameworks/MailCore.framework/Versions/Current; \
+	[ -L /usr/local/bin/Frameworks/MailCore.framework/MailCore ] || sudo ln -sf Versions/Current/MailCore /usr/local/bin/Frameworks/MailCore.framework/MailCore; \
+	echo "Updating binary to use bundled framework via rpath..."; \
+	sudo install_name_tool -change @rpath/MailCore.framework/Versions/A/MailCore @executable_path/Frameworks/MailCore.framework/Versions/A/MailCore /usr/local/bin/hostagent; \
+	sudo install_name_tool -add_rpath @executable_path/Frameworks /usr/local/bin/hostagent 2>/dev/null || true; \
+	echo "Re-signing binary after modification..."; \
+	sudo codesign --force --sign - --timestamp=none /usr/local/bin/hostagent; \
+	echo "Note: Framework keeps original signature to avoid validation issues"; \
+	echo "Creating config directory..."; \
+	mkdir -p ~/.haven; \
+	if [ ! -f ~/.haven/hostagent.yaml ]; then \
 		cp Resources/default-config.yaml ~/.haven/hostagent.yaml; \
 		echo "Created default config at ~/.haven/hostagent.yaml"; \
 		echo "⚠️  IMPORTANT: Edit this file and change the auth secret!"; \
-	fi
-	@echo "Installation complete!"
+	fi; \
+	echo "Installation complete!"
 
 # Reset config to default (create ~/.haven if needed, backup existing)
 reset-config:
@@ -62,6 +85,9 @@ reset-config:
 uninstall:
 	@echo "Removing hostagent from /usr/local/bin..."
 	@sudo rm -f /usr/local/bin/hostagent
+	@echo "Removing bundled MailCore.framework..."
+	@sudo rm -rf /usr/local/bin/Frameworks/MailCore.framework
+	@sudo rmdir /usr/local/bin/Frameworks 2>/dev/null || true
 	@echo "Uninstall complete (config preserved at ~/.haven/)"
 
 # Run debug version (with dev mode if ~/.haven/chat.db exists)

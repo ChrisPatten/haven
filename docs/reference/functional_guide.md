@@ -30,34 +30,40 @@ This guide describes the day-to-day workflows exposed by the Haven platform afte
 3. Catalog returns `submission_id`, `doc_id`, `external_id`, `version_number`, `status`, `thread_id` (if linked), `file_ids` (if applicable), and `duplicate` flag.
 4. Check status via `GET /v1/ingest/{submission_id}` which returns `total_chunks`, `embedded_chunks`, `pending_chunks`, and document status.
 
-### 2.2 Ingesting Files
+### 2.2 Batch Ingestion
+1. POST `gateway /v1/ingest:batch` with `{ "documents": [ ... ] }`. The gateway reuses the same preparation pipeline as the single-document route but derives a deterministic batch idempotency key so retries remain safe.
+2. Gateway forwards the payload to `catalog /v1/catalog/documents:batch`, which creates an `ingest_batches` record, processes each document (continuing on partial failure), and forwards all successful documents to search in a single `abatch_upsert` call.
+3. Response includes `batch_id`, `batch_status` (`submitted`, `processing`, `completed`, `partial`, `failed`), aggregate counts, and per-document results (`status_code`, ingestion response, or error envelope).
+4. Collectors can continue to call `/v1/ingest` for single documents; the gateway only switches to the batch endpoint when more than one document is supplied.
+
+### 2.3 Ingesting Files
 1. POST multipart to `gateway /v1/ingest/file` with `meta` JSON (path, mtime, optional tags) and binary `upload`.
 2. Gateway uploads to MinIO, calculates SHA256, optionally enriches (if image), extracts text, and forwards a unified payload with `attachments` array containing file descriptors.
 3. Catalog deduplicates files by SHA, links them to the document (`document_files`), and records facet overrides (`has_attachments`, `attachment_count`).
 4. Response includes `file_sha256`, `object_key`, `extraction_status`, plus standard ingestion response fields (`submission_id`, `doc_id`, `external_id`, `version_number`, `thread_id`, `file_ids`, `duplicate`).
 
-### 2.3 Versioning Existing Documents
+### 2.4 Versioning Existing Documents
 1. PATCH `catalog /v1/catalog/documents/{doc_id}/version` with fields to change (`text`, `metadata`, `content_timestamp`, new attachments, etc.).
 2. Catalog clones the document, increments `version_number`, marks previous version inactive, and rebuilds chunks.
 3. Response includes new `doc_id`, `previous_version_id`, `version_number`, updated `file_ids`, and status.
 4. Gateway will surface the active version when queried by external ID.
 
-### 2.4 Running Hybrid Search
+### 2.5 Running Hybrid Search
 1. GET `gateway /v1/search?q=dinner&has_attachments=true&source_type=imessage&person=%2B15085551212&start_date=2023-01-01&end_date=2023-12-31`.
 2. Gateway forwards the filters to search service (which queries Postgres chunks + Qdrant).
 3. Response includes hits with facets (`source_type`, `has_attachments`, `person`), metadata (timeline, people, attachments), and ranking scores.
 4. Set `thread_id=<uuid>&context_window=5` to include neighbouring messages for thread context.
 
-### 2.5 Ask / Summarise
+### 2.6 Ask / Summarise
 1. POST `gateway /v1/ask` with `{ "query": "What invoices did Alex send?", "k": 5 }`.
 2. Gateway runs a search, selects top `k` hits, and returns a summary plus citations.
 3. Each citation references `document_id`, `chunk_id`, `score`.
 
-### 2.6 Catalog Context Insights
+### 2.7 Catalog Context Insights
 1. GET `gateway /v1/context/general` (requires `CATALOG_TOKEN` if enforced).
 2. Catalog responds with `total_threads`, `total_messages` (active documents), `last_message_ts`, top threads, and recent highlights (with people + timeline data).
 
-### 2.7 Monitoring Embeddings
+### 2.8 Monitoring Embeddings
 1. Embedding worker logs `embedding_job_completed` for each chunk.
 2. Query `GET /v1/catalog/submissions/{submission_id}` or `/v1/catalog/documents/{doc_id}/status` to inspect chunk counts and status (`pending`, `processing`, `embedded`).
 3. If `embedding_status='failed'`, reset to `pending` manually or re-run version creation.

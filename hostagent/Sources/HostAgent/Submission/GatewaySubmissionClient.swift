@@ -1,6 +1,28 @@
 import Foundation
 import HavenCore
 
+struct GatewayBatchSubmissionResult: @unchecked Sendable {
+    let statusCode: Int
+    let submission: GatewaySubmissionResponse?
+    let errorCode: String?
+    let errorMessage: String?
+    let retryable: Bool
+
+    init(
+        statusCode: Int,
+        submission: GatewaySubmissionResponse? = nil,
+        errorCode: String? = nil,
+        errorMessage: String? = nil,
+        retryable: Bool = false
+    ) {
+        self.statusCode = statusCode
+        self.submission = submission
+        self.errorCode = errorCode
+        self.errorMessage = errorMessage
+        self.retryable = retryable
+    }
+}
+
 actor GatewaySubmissionClient {
     private let config: GatewayConfig
     private let authToken: String
@@ -50,6 +72,78 @@ actor GatewaySubmissionClient {
         let data = try await performRequest(request: request)
         return try decode(GatewaySubmissionResponse.self, from: data)
     }
+
+    func submitDocumentsBatch(payloads: [EmailDocumentPayload]) async throws -> [GatewayBatchSubmissionResult]? {
+        guard !payloads.isEmpty else { return [] }
+
+        let requestPayload = BatchSubmitRequest(documents: payloads)
+        let requestData = try encoder.encode(requestPayload)
+        let candidatePaths = batchEndpointCandidates(for: config.ingestPath)
+
+        for path in candidatePaths {
+            // Build URL using URLComponents to avoid unwanted percent-encoding of path
+            guard let baseURL = URL(string: config.baseUrl) else {
+                logger.error("Invalid gateway base url", metadata: ["base_url": config.baseUrl])
+                continue
+            }
+
+            guard var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: true) else {
+                logger.error("Failed to create URLComponents for gateway base url", metadata: ["base_url": config.baseUrl])
+                continue
+            }
+
+            // Preserve existing base path and append candidate path. Set percentEncodedPath
+            // directly so characters like ':' are not further escaped.
+            let basePath = comps.percentEncodedPath
+            let trimmedBasePath = basePath.hasSuffix("/") ? String(basePath.dropLast()) : basePath
+            let newPercentEncodedPath = trimmedBasePath + path
+            comps.percentEncodedPath = newPercentEncodedPath
+
+            guard let url = comps.url else {
+                logger.error("Failed to compose gateway batch URL", metadata: ["base_url": config.baseUrl, "path": path])
+                continue
+            }
+            let urlString = url.absoluteString
+            logger.debug("Gateway batch URL", metadata: ["url": urlString])
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = timeout
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
+            request.httpBody = requestData
+
+            do {
+                let data = try await performRequest(request: request)
+                let response = try decoder.decode(BatchSubmitResponse.self, from: data)
+                return mapBatchResponse(response: response, total: payloads.count)
+            } catch let error as EmailCollectorError {
+                switch error {
+                case .gatewayHTTPError(let statusCode, _ ) where statusCode == 404 || statusCode == 405:
+                    logger.info("Gateway batch endpoint unavailable", metadata: [
+                        "url": urlString,
+                        "status": "\(statusCode)"
+                    ])
+                    continue
+                default:
+                    logger.error("Gateway batch ingest failed", metadata: [
+                        "url": urlString,
+                        "error": error.localizedDescription
+                    ])
+                    continue
+                }
+            } catch {
+                logger.error("Gateway batch ingest unexpected error", metadata: [
+                    "url": urlString,
+                    "error": error.localizedDescription
+                ])
+                continue
+            }
+        }
+
+        return nil
+    }
     
     func submitAttachment(
         fileURL: URL,
@@ -97,7 +191,99 @@ actor GatewaySubmissionClient {
         return try decode(GatewayFileSubmissionResponse.self, from: responseData)
     }
     
-    // MARK: - Internal helpers
+    private func batchEndpointCandidates(for basePath: String) -> [String] {
+        // Only use the colon version: /v1/ingest:batch
+        let colonPath = basePath.hasSuffix(":batch") ? basePath : basePath + ":batch"
+        return [colonPath]
+    }
+
+    private func mapBatchResponse(response: BatchSubmitResponse, total: Int) -> [GatewayBatchSubmissionResult] {
+        var mapped = Array(
+            repeating: GatewayBatchSubmissionResult(
+                statusCode: 0,
+                submission: nil,
+                errorCode: nil,
+                errorMessage: nil,
+                retryable: false
+            ),
+            count: total
+        )
+
+        for result in response.results {
+            guard result.index >= 0 && result.index < total else { continue }
+            let errorInfo = result.error
+            mapped[result.index] = GatewayBatchSubmissionResult(
+                statusCode: result.statusCode,
+                submission: result.submission,
+                errorCode: errorInfo?.errorCode,
+                errorMessage: errorInfo?.message,
+                retryable: errorInfo?.retryable ?? false
+            )
+        }
+
+        for index in 0..<total where mapped[index].statusCode == 0 && mapped[index].submission == nil {
+            mapped[index] = GatewayBatchSubmissionResult(
+                statusCode: 502,
+                submission: nil,
+                errorCode: "INGEST.BATCH_MISSING_RESULT",
+                errorMessage: "Batch response missing entry for index \(index)",
+                retryable: true
+            )
+        }
+
+        return mapped
+    }
+
+    private struct BatchSubmitRequest: Encodable {
+        let documents: [EmailDocumentPayload]
+    }
+
+    private struct BatchSubmitResponse: Decodable {
+        let successCount: Int?
+        let failureCount: Int?
+        let results: [BatchSubmitResult]
+
+        private enum CodingKeys: String, CodingKey {
+            case successCount = "success_count"
+            case failureCount = "failure_count"
+            case results
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            successCount = try container.decodeIfPresent(Int.self, forKey: .successCount)
+            failureCount = try container.decodeIfPresent(Int.self, forKey: .failureCount)
+            results = try container.decodeIfPresent([BatchSubmitResult].self, forKey: .results) ?? []
+        }
+    }
+
+    private struct BatchSubmitResult: Decodable {
+        let index: Int
+        let statusCode: Int
+        let submission: GatewaySubmissionResponse?
+        let error: BatchSubmitError?
+
+        private enum CodingKeys: String, CodingKey {
+            case index
+            case statusCode = "status_code"
+            case submission
+            case error
+        }
+    }
+
+    private struct BatchSubmitError: Decodable {
+        let errorCode: String
+        let message: String
+        let retryable: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case errorCode = "error_code"
+            case message
+            case retryable
+        }
+    }
+
+// MARK: - Internal helpers
     
     private func performRequest(request: URLRequest) async throws -> Data {
         let maxAttempts = 3

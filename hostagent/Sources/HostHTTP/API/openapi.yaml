@@ -93,6 +93,15 @@ components:
           type: integer
           minimum: 1
           maximum: 12
+        batch:
+          type: boolean
+          description: When true, the collector SHOULD submit documents via the gateway batch ingest endpoint.
+          default: false
+        batch_size:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: Preferred number of documents per submission when batching is enabled. Defaults to a collector-specific value.
         date_range:
           $ref: '#/components/schemas/DateRange'
         time_window:

@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import orjson
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
@@ -24,6 +24,10 @@ from shared.logging import get_logger, setup_logging
 from shared.context import fetch_context_overview
 from services.catalog_api.models_v2 import (
     DeleteDocumentResponse,
+    DocumentBatchIngestError,
+    DocumentBatchIngestItem,
+    DocumentBatchIngestRequest,
+    DocumentBatchIngestResponse,
     DocumentFileLink,
     DocumentIngestRequest,
     DocumentIngestResponse,
@@ -109,6 +113,13 @@ class ChunkCandidate:
     ordinal: int
     text: str
     text_sha256: str
+
+
+@dataclass
+class IngestExecutionResult:
+    response: DocumentIngestResponse
+    status_code: int
+    doc_record: Optional[Dict[str, Any]] = None
 
 
 def _chunk_text(text: str, *, max_chars: int = 1200, overlap: int = 200) -> List[ChunkCandidate]:
@@ -329,22 +340,36 @@ def _extract_sender(people: Iterable[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
-def _ensure_submission(cur, payload: DocumentIngestRequest) -> Dict[str, Any]:
+def _ensure_submission(
+    cur,
+    payload: DocumentIngestRequest,
+    *,
+    batch_id: Optional[uuid.UUID] = None,
+) -> Dict[str, Any]:
     cur.execute(
         """
-        INSERT INTO ingest_submissions (idempotency_key, source_type, source_id, content_sha256, status)
-        VALUES (%s, %s, %s, %s, 'submitted')
+        INSERT INTO ingest_submissions (
+            idempotency_key,
+            source_type,
+            source_id,
+            content_sha256,
+            batch_id,
+            status
+        )
+        VALUES (%s, %s, %s, %s, %s, 'submitted')
         ON CONFLICT (idempotency_key) DO UPDATE
         SET source_type = EXCLUDED.source_type,
             source_id = EXCLUDED.source_id,
-            content_sha256 = EXCLUDED.content_sha256
-        RETURNING submission_id, status, result_doc_id
+            content_sha256 = EXCLUDED.content_sha256,
+            batch_id = COALESCE(ingest_submissions.batch_id, EXCLUDED.batch_id)
+        RETURNING submission_id, status, result_doc_id, batch_id
         """,
         (
             payload.idempotency_key,
             payload.source_type,
             payload.source_id,
             payload.content_sha256,
+            batch_id,
         ),
     )
     return cur.fetchone()  # type: ignore[return-value]
@@ -543,12 +568,88 @@ def _mark_submission_failed(submission_id: uuid.UUID, message: str) -> None:
             )
 
 
-def _schedule_forward_to_search(doc_record: Dict[str, Any]) -> None:
-    if not settings.forward_to_search:
-        return
-    client = get_search_client()
-    if client is None:
-        return
+def _derive_batch_idempotency_key(documents: Sequence[DocumentIngestRequest]) -> str:
+    keys = sorted(document.idempotency_key for document in documents if document.idempotency_key)
+    seed = "|".join(keys)
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _ensure_batch(cur, batch_key: str, total_count: int) -> Dict[str, Any]:
+    cur.execute(
+        """
+        INSERT INTO ingest_batches (idempotency_key, total_count, status)
+        VALUES (%s, %s, 'submitted')
+        ON CONFLICT (idempotency_key) DO UPDATE
+        SET total_count = GREATEST(ingest_batches.total_count, EXCLUDED.total_count),
+            updated_at = NOW()
+        RETURNING batch_id, status, total_count, success_count, failure_count
+        """,
+        (batch_key, total_count),
+    )
+    return cur.fetchone()
+
+
+def _set_batch_status(cur, batch_id: uuid.UUID, status_value: str, *, total_count: Optional[int] = None) -> None:
+    cur.execute(
+        """
+        UPDATE ingest_batches
+        SET status = %s,
+            total_count = COALESCE(%s, total_count),
+            updated_at = NOW()
+        WHERE batch_id = %s
+        """,
+        (status_value, total_count, batch_id),
+    )
+
+
+def _finalize_batch(
+    batch_id: uuid.UUID,
+    total_count: int,
+    success_count: int,
+    failure_count: int,
+) -> Dict[str, Any]:
+    with get_connection(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                UPDATE ingest_batches
+                SET total_count = %s,
+                    success_count = %s,
+                    failure_count = %s,
+                    status = CASE
+                        WHEN %s = 0 AND %s = %s THEN 'completed'
+                        WHEN %s = 0 AND %s > 0 THEN 'failed'
+                        ELSE 'partial'
+                    END,
+                    updated_at = NOW()
+                WHERE batch_id = %s
+                RETURNING batch_id, status, total_count, success_count, failure_count
+                """,
+                (
+                    total_count,
+                    success_count,
+                    failure_count,
+                    failure_count,
+                    success_count,
+                    total_count,
+                    success_count,
+                    failure_count,
+                    batch_id,
+                ),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Batch not found")
+    return row
+
+
+def _build_search_document(doc_record: Dict[str, Any]):
+    try:
+        from haven.search.models import Acl, DocumentUpsert, Facet
+    except ImportError:  # pragma: no cover - optional dependency
+        logger.warning("search_models_not_available", doc_id=doc_record.get("doc_id"))
+        return None
 
     metadata = _coerce_json(doc_record.get("metadata") or {}) or {}
     if not isinstance(metadata, dict):
@@ -556,16 +657,14 @@ def _schedule_forward_to_search(doc_record: Dict[str, Any]) -> None:
     metadata.setdefault("source_type", doc_record["source_type"])
     if doc_record.get("source_provider"):
         metadata.setdefault("source_provider", doc_record["source_provider"])
-    metadata["content_timestamp"] = doc_record["content_timestamp"].isoformat()
+    if isinstance(doc_record.get("content_timestamp"), datetime):
+        metadata["content_timestamp"] = doc_record["content_timestamp"].isoformat()
     metadata["content_timestamp_type"] = doc_record["content_timestamp_type"]
     if doc_record.get("thread_id"):
         metadata["thread_id"] = str(doc_record["thread_id"])
 
     people = _coerce_json(doc_record.get("people") or [])
-    if isinstance(people, list):
-        metadata["people"] = people
-    else:
-        metadata["people"] = []
+    metadata["people"] = people if isinstance(people, list) else []
 
     facets = {
         "has_attachments": doc_record["has_attachments"],
@@ -574,85 +673,70 @@ def _schedule_forward_to_search(doc_record: Dict[str, Any]) -> None:
         "is_completed": doc_record["is_completed"],
     }
 
-    def _task() -> None:
-        try:
-            asyncio.run(
-                forward_to_search(
-                    doc_id=str(doc_record["doc_id"]),
-                    source_id=doc_record["external_id"],
-                    title=doc_record.get("title"),
-                    canonical_uri=doc_record.get("canonical_uri"),
-                    text=doc_record["text"],
-                    metadata=metadata,
-                    facets=facets,
-                )
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("search_forward_failed", doc_id=str(doc_record["doc_id"]), error=str(exc))
-
-    threading.Thread(target=_task, daemon=True).start()
-
-
-async def forward_to_search(
-    doc_id: str,
-    source_id: str,
-    title: Optional[str],
-    canonical_uri: Optional[str],
-    text: str,
-    metadata: Dict[str, Any],
-    facets: Dict[str, Any],
-) -> None:
-    client = get_search_client()
-    if client is None:
-        return
-    try:
-        from haven.search.models import Acl, DocumentUpsert, Facet
-    except ImportError:  # pragma: no cover - optional dependency
-        logger.warning("search_models_not_available", doc_id=doc_id)
-        return
-
-    acl = Acl(org_id="default")
     facet_payload = [
         Facet(key=key, value=str(value))
         for key, value in facets.items()
         if value not in (None, False)
     ]
-    # Only populate the search `url` field for http(s) URLs. Some collectors
-    # (e.g. local mail collectors) emit non-http schemes like `message://...`
-    # which are rejected by pydantic's HttpUrl. Avoid forwarding those to
-    # the search model to reduce validation noise.
+
+    canonical_uri = doc_record.get("canonical_uri")
     safe_url = None
     if canonical_uri and isinstance(canonical_uri, str):
         lower = canonical_uri.lower()
         if lower.startswith("http://") or lower.startswith("https://"):
             safe_url = canonical_uri
         else:
-            logger.debug("skip_non_http_canonical_uri", doc_id=doc_id, canonical_uri=canonical_uri)
+            logger.debug("skip_non_http_canonical_uri", doc_id=doc_record["doc_id"], canonical_uri=canonical_uri)
 
-    document = DocumentUpsert(
-        document_id=doc_id,
-        source_id=source_id,
-        title=title,
+    return DocumentUpsert(
+        document_id=str(doc_record["doc_id"]),
+        source_id=doc_record["external_id"],
+        title=doc_record.get("title"),
         url=safe_url,
-        text=text,
+        text=doc_record["text"],
         metadata=metadata,
         facets=facet_payload,
-        acl=acl,
+        acl=Acl(org_id="default"),
     )
-    await client.abatch_upsert([document])
-    logger.info("search_forward_complete", doc_id=doc_id)
 
 
-@app.post(
-    "/v1/catalog/documents",
-    response_model=DocumentIngestResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def register_document(
+def _schedule_forward_to_search(doc_records: Sequence[Dict[str, Any]]) -> None:
+    if not doc_records or not settings.forward_to_search:
+        return
+    client = get_search_client()
+    if client is None:
+        return
+
+    search_documents = []
+    doc_ids: List[str] = []
+    for record in doc_records:
+        document = _build_search_document(record)
+        if document is None:
+            continue
+        search_documents.append(document)
+        doc_ids.append(str(record["doc_id"]))
+
+    if not search_documents:
+        return
+
+    async def _forward() -> None:
+        await client.abatch_upsert(search_documents)
+
+    def _task() -> None:
+        try:
+            asyncio.run(_forward())
+            logger.info("search_forward_complete", doc_ids=doc_ids)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("search_forward_failed", doc_ids=doc_ids, error=str(exc))
+
+    threading.Thread(target=_task, daemon=True).start()
+
+
+def _ingest_document(
     payload: DocumentIngestRequest,
-    response: Response,
-    _token: None = Depends(verify_token),
-) -> DocumentIngestResponse:
+    *,
+    batch_id: Optional[uuid.UUID] = None,
+) -> IngestExecutionResult:
     chunk_candidates = _chunk_text(payload.text)
     if not chunk_candidates:
         raise HTTPException(
@@ -666,16 +750,16 @@ def register_document(
 
     log = logger.bind(external_id=external_id, source_type=payload.source_type)
     submission_id: Optional[uuid.UUID] = None
+    file_ids: List[uuid.UUID] = []
+    doc_record: Optional[Dict[str, Any]] = None
 
     try:
         with get_connection(autocommit=False) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                submission = _ensure_submission(cur, payload)
+                submission = _ensure_submission(cur, payload, batch_id=batch_id)
                 submission_id = submission["submission_id"]
                 # Acquire a row-level lock on the submission to serialize processing of
-                # concurrent requests that share the same idempotency_key. This prevents
-                # race conditions where multiple workers attempt to INSERT the same
-                # document (same external_id + version_number) at the same time.
+                # concurrent requests that share the same idempotency_key.
                 cur.execute(
                     "SELECT submission_id FROM ingest_submissions WHERE submission_id = %s FOR UPDATE",
                     (submission_id,),
@@ -689,21 +773,20 @@ def register_document(
                         submission_id=submission_id,
                     )
                     conn.commit()
-                    response.status_code = status.HTTP_200_OK
-                    return duplicate
+                    return IngestExecutionResult(
+                        response=duplicate,
+                        status_code=status.HTTP_200_OK,
+                    )
 
                 people_json = _person_dicts(payload.people)
                 thread_id = _upsert_thread(cur, payload)
 
-                # For immutable source types (email, sms), check if document already exists
-                # These represent a point in time and should never have multiple versions
-                # Note: iMessage is NOT included as messages can be edited
                 immutable_source_types = ("email", "email_local", "sms")
                 if payload.source_type in immutable_source_types:
                     cur.execute(
                         """
-                        SELECT doc_id, version_number 
-                        FROM documents 
+                        SELECT doc_id, version_number
+                        FROM documents
                         WHERE external_id = %s AND is_active_version = true
                         """,
                         (external_id,),
@@ -715,7 +798,6 @@ def register_document(
                             doc_id=str(existing_doc["doc_id"]),
                             version_number=existing_doc["version_number"],
                         )
-                        # Update submission to point to existing document
                         cur.execute(
                             """
                             UPDATE ingest_submissions
@@ -733,8 +815,10 @@ def register_document(
                             submission_id=submission_id,
                         )
                         conn.commit()
-                        response.status_code = status.HTTP_200_OK
-                        return duplicate
+                        return IngestExecutionResult(
+                            response=duplicate,
+                            status_code=status.HTTP_200_OK,
+                        )
 
                 facet_overrides = payload.facet_overrides or {}
                 source_doc_ids = list(payload.source_doc_ids or [])
@@ -816,7 +900,7 @@ def register_document(
                         "submitted",
                     ),
                 )
-                doc_record: Dict[str, Any] = cur.fetchone()
+                doc_record = cur.fetchone()
                 if not doc_record:
                     conn.rollback()
                     raise HTTPException(
@@ -849,7 +933,6 @@ def register_document(
                     (doc_id,),
                 )
 
-                file_ids: List[uuid.UUID] = []
                 if payload.attachments:
                     file_ids, computed_has_attachments, computed_attachment_count = _apply_document_files(
                         cur, doc_id, payload.attachments
@@ -908,18 +991,19 @@ def register_document(
             }
         )
 
-        _schedule_forward_to_search(doc_record)
-
-        response.status_code = status.HTTP_202_ACCEPTED
-        return DocumentIngestResponse(
-            submission_id=submission_id,
-            doc_id=doc_id,
-            external_id=doc_record["external_id"],
-            version_number=doc_record["version_number"],
-            thread_id=doc_record["thread_id"],
-            file_ids=file_ids,
-            status=doc_record["status"],
-            duplicate=False,
+        return IngestExecutionResult(
+            response=DocumentIngestResponse(
+                submission_id=submission_id,
+                doc_id=doc_record["doc_id"],
+                external_id=doc_record["external_id"],
+                version_number=doc_record["version_number"],
+                thread_id=doc_record["thread_id"],
+                file_ids=file_ids,
+                status=doc_record["status"],
+                duplicate=False,
+            ),
+            status_code=status.HTTP_202_ACCEPTED,
+            doc_record=doc_record,
         )
     except HTTPException as exc:
         if submission_id:
@@ -935,6 +1019,117 @@ def register_document(
             detail="Failed to ingest document",
         ) from exc
 
+@app.post(
+    "/v1/catalog/documents",
+    response_model=DocumentIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def register_document(
+    payload: DocumentIngestRequest,
+    response: Response,
+    _token: None = Depends(verify_token),
+) -> DocumentIngestResponse:
+    result = _ingest_document(payload)
+    if result.doc_record:
+        _schedule_forward_to_search([result.doc_record])
+    response.status_code = result.status_code
+    return result.response
+
+
+@app.post(
+    "/v1/catalog/documents/batch",
+    response_model=DocumentBatchIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def register_documents_batch(
+    payload: DocumentBatchIngestRequest,
+    response: Response,
+    _token: None = Depends(verify_token),
+) -> DocumentBatchIngestResponse:
+    if not payload.documents:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="Batch documents payload must include at least one document",
+        )
+
+    batch_key = payload.batch_idempotency_key or _derive_batch_idempotency_key(payload.documents)
+    total_documents = len(payload.documents)
+
+    with get_connection(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            batch_record = _ensure_batch(cur, batch_key, total_documents)
+            batch_id = batch_record["batch_id"]
+            _set_batch_status(cur, batch_id, "processing", total_count=total_documents)
+        conn.commit()
+
+    results: List[DocumentBatchIngestItem] = []
+    search_records: List[Dict[str, Any]] = []
+    success_count = 0
+    failure_count = 0
+    batch_id_uuid = uuid.UUID(str(batch_id)) if not isinstance(batch_id, uuid.UUID) else batch_id
+
+    for index, document in enumerate(payload.documents):
+        try:
+            result = _ingest_document(document, batch_id=batch_id_uuid)
+        except HTTPException as exc:
+            failure_count += 1
+            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+            results.append(
+                DocumentBatchIngestItem(
+                    index=index,
+                    status_code=exc.status_code,
+                    error=DocumentBatchIngestError(
+                        code="INGEST.BATCH_HTTP_ERROR",
+                        message=detail,
+                        details={"status_code": exc.status_code},
+                    ),
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            failure_count += 1
+            results.append(
+                DocumentBatchIngestItem(
+                    index=index,
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    error=DocumentBatchIngestError(
+                        code="INGEST.BATCH_UNEXPECTED_ERROR",
+                        message="Unexpected error during batch ingest",
+                        details={"error": str(exc)},
+                    ),
+                )
+            )
+        else:
+            results.append(
+                DocumentBatchIngestItem(
+                    index=index,
+                    status_code=result.status_code,
+                    document=result.response,
+                )
+            )
+            if result.doc_record:
+                search_records.append(result.doc_record)
+            if 200 <= result.status_code < 300:
+                success_count += 1
+            else:
+                failure_count += 1
+
+    batch_summary = _finalize_batch(batch_id_uuid, total_documents, success_count, failure_count)
+
+    if search_records:
+        _schedule_forward_to_search(search_records)
+
+    response.status_code = (
+        status.HTTP_202_ACCEPTED if failure_count == 0 else status.HTTP_207_MULTI_STATUS
+    )
+
+    return DocumentBatchIngestResponse(
+        batch_id=batch_summary["batch_id"],
+        batch_status=batch_summary["status"],
+        total_count=batch_summary["total_count"],
+        success_count=batch_summary["success_count"],
+        failure_count=batch_summary["failure_count"],
+        results=results,
+    )
 
 @app.patch(
     "/v1/catalog/documents/{doc_id}/version",
@@ -1059,7 +1254,7 @@ def create_document_version_endpoint(
             doc_record = cur.fetchone()
 
     if doc_record:
-        _schedule_forward_to_search(doc_record)
+        _schedule_forward_to_search([doc_record])
 
     return DocumentVersionResponse(
         doc_id=new_doc.doc_id,
