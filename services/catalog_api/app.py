@@ -22,6 +22,8 @@ from shared.db import (
 )
 from shared.logging import get_logger, setup_logging
 from shared.context import fetch_context_overview
+from shared.people_repository import PeopleResolver
+from shared.people_normalization import IdentifierKind
 from services.catalog_api.models_v2 import (
     DeleteDocumentResponse,
     DocumentBatchIngestError,
@@ -974,6 +976,48 @@ def _ingest_document(
                     """,
                     (doc_id, submission_id),
                 )
+
+                # hv-111: Link resolved people to document_people
+                try:
+                    resolver = PeopleResolver(conn)
+                    resolved = {}
+                    for person_entry in people_json:
+                        identifier = person_entry.get('identifier')
+                        identifier_type = person_entry.get('identifier_type')
+                        role = person_entry.get('role') or 'participant'
+                        kind = None
+                        if identifier_type == 'phone':
+                            kind = IdentifierKind.PHONE
+                        elif identifier_type == 'email':
+                            kind = IdentifierKind.EMAIL
+                        if not kind or not identifier:
+                            continue
+                        try:
+                            result = resolver.resolve(kind, identifier)
+                        except Exception as exc:
+                            logger.warning("person_resolve_exception", identifier=identifier, type=identifier_type, error=str(exc))
+                            continue
+                        if result and result.get('person_id'):
+                            person_id = uuid.UUID(result['person_id'])
+                            resolved[(doc_id, person_id)] = role
+                        else:
+                            logger.warning("person_resolution_failed", identifier=identifier, type=identifier_type, doc_id=str(doc_id))
+                    # Write to document_people
+                    if resolved:
+                        for (did, pid), role in resolved.items():
+                            try:
+                                cur.execute(
+                                    """
+                                    INSERT INTO document_people (doc_id, person_id, role)
+                                    VALUES (%s, %s, %s)
+                                    ON CONFLICT (doc_id, person_id) DO UPDATE SET role = EXCLUDED.role
+                                    """,
+                                    (did, pid, role)
+                                )
+                            except Exception as exc:
+                                logger.warning("document_people_insert_failed", doc_id=str(did), person_id=str(pid), error=str(exc))
+                except Exception as exc:
+                    logger.warning("people_linking_failed", doc_id=str(doc_id), error=str(exc))
 
             conn.commit()
 
