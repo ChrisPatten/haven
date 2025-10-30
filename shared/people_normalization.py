@@ -34,17 +34,20 @@ class NormalizedIdentifier:
 def normalize_phone(value: str, default_region: str | None = None) -> str:
     cleaned = value.strip()
     if phonenumbers is None:  # pragma: no cover - lightweight fallback when phonenumbers missing
-        digits = re.sub(r"\D", "", cleaned)
+        # Clean all characters except + and digits
+        digits = re.sub(r"[^\+\d]", "", cleaned)
         if not digits:
             raise ValueError(f"Invalid phone number: {value}")
-        if cleaned.startswith("+"):
-            return "+" + digits.lstrip("+")
-        region = (default_region or "").upper()
-        if len(digits) == 10 and region in {"US", "CA"}:
-            return "+1" + digits
-        if len(digits) == 11 and digits.startswith("1"):
-            return "+" + digits
-        return "+" + digits
+        # Remove any leading + signs to normalize
+        digits = digits.lstrip("+")
+        if not digits:
+            raise ValueError(f"Invalid phone number: {value}")
+        # Prepend + if not already present
+        result = "+" + digits
+        # If 11 characters long (including +), assume US number and add 1 after +
+        if len(result) == 11 and not result.startswith("+1"):
+            result = "+1" + digits
+        return result
 
     parsed = phonenumbers.parse(cleaned, default_region or None)
     if not phonenumbers.is_valid_number(parsed):

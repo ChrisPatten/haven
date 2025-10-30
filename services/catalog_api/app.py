@@ -21,6 +21,8 @@ from shared.db import (
     get_connection,
 )
 from shared.logging import get_logger, setup_logging
+from shared.people_repository import PeopleResolver
+from shared.people_normalization import IdentifierKind
 from shared.context import fetch_context_overview
 from shared.people_repository import PeopleResolver
 from shared.people_normalization import IdentifierKind
@@ -42,6 +44,8 @@ from services.catalog_api.models_v2 import (
     PersonPayload,
     SubmissionStatusResponse,
 )
+
+print("catalog_api.app.py loaded")
 
 logger = get_logger("catalog.api")
 
@@ -93,6 +97,72 @@ def on_startup() -> None:
     setup_logging()
     os.environ.setdefault("DATABASE_URL", settings.database_url)
     logger.info("catalog_api_startup", forward_to_search=settings.forward_to_search)
+
+
+def _link_document_people(conn, doc_id: uuid.UUID, people_json: List[Dict[str, Any]]) -> None:
+    """Resolve identifiers to person_id and insert into document_people.
+    Supports: phone, email, imessage, social, shortcode. Logs others.
+    """
+    from shared.people_normalization import IdentifierKind
+    resolver = PeopleResolver(conn)
+    resolved: Dict[tuple[uuid.UUID, uuid.UUID], str] = {}
+    kind_map = {
+        "phone": IdentifierKind.PHONE,
+        "email": IdentifierKind.EMAIL,
+        "imessage": IdentifierKind.IMESSAGE,
+        "social": IdentifierKind.SOCIAL,
+        "shortcode": IdentifierKind.SHORTCODE,
+    }
+    for person_entry in people_json:
+        identifier = person_entry.get("identifier")
+        identifier_type = (person_entry.get("identifier_type") or "").lower()
+        role = person_entry.get("role") or "participant"
+        if not identifier:
+            continue
+        kind = kind_map.get(identifier_type)
+        if not kind:
+            logger.info(
+                "people_link_skip_unsupported_kind",
+                identifier=identifier,
+                identifier_type=identifier_type,
+                role=role,
+                doc_id=str(doc_id),
+            )
+            continue
+        try:
+            result = resolver.resolve(kind, identifier)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning(
+                "person_resolve_exception", identifier=identifier, type=identifier_type, error=str(exc)
+            )
+            continue
+        if result and result.get("person_id"):
+            person_id = uuid.UUID(result["person_id"])
+            resolved[(doc_id, person_id)] = role
+        else:
+            logger.info(
+                "person_resolution_not_found",
+                identifier=identifier,
+                identifier_type=identifier_type,
+                doc_id=str(doc_id),
+            )
+    if not resolved:
+        return
+    with conn.cursor() as cur:
+        for (did, pid), role in resolved.items():
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO document_people (doc_id, person_id, role)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (doc_id, person_id) DO UPDATE SET role = EXCLUDED.role
+                    """,
+                    (did, pid, role),
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.warning(
+                    "document_people_insert_failed", doc_id=str(did), person_id=str(pid), error=str(exc)
+                )
 
 
 def verify_token(request: Request) -> None:
@@ -739,6 +809,7 @@ def _ingest_document(
     *,
     batch_id: Optional[uuid.UUID] = None,
 ) -> IngestExecutionResult:
+    logger.debug("ingest_document", payload=payload)
     chunk_candidates = _chunk_text(payload.text)
     if not chunk_candidates:
         raise HTTPException(
@@ -768,6 +839,17 @@ def _ingest_document(
                 )
                 if submission["result_doc_id"] and submission["status"] != "failed":
                     log.info("ingest_duplicate_submission", submission_id=submission_id)
+                    # Even for duplicates, ensure document_people is populated based on incoming payload
+                    people_json = _person_dicts(payload.people)
+                    try:
+                        logger.debug("linking document people (ingest duplicate submission)", doc_id=str(submission["result_doc_id"]), people_json=people_json)
+                        _link_document_people(conn, submission["result_doc_id"], people_json)
+                    except Exception as exc:  # pragma: no cover - defensive logging
+                        logger.warning(
+                            "people_linking_failed_duplicate",
+                            doc_id=str(submission["result_doc_id"]),
+                            error=str(exc),
+                        )
                     duplicate = _fetch_document_response(
                         cur,
                         submission["result_doc_id"],
@@ -800,6 +882,17 @@ def _ingest_document(
                             doc_id=str(existing_doc["doc_id"]),
                             version_number=existing_doc["version_number"],
                         )
+                        # Ensure people links are created/updated for duplicates as well
+                        people_json = _person_dicts(payload.people)
+                        try:
+                            logger.debug("linking document people (ingest duplicate immutable document)", doc_id=str(existing_doc["doc_id"]), people_json=people_json)
+                            _link_document_people(conn, existing_doc["doc_id"], people_json)
+                        except Exception as exc:  # pragma: no cover - defensive logging
+                            logger.warning(
+                                "people_linking_failed_duplicate",
+                                doc_id=str(existing_doc["doc_id"]),
+                                error=str(exc),
+                            )
                         cur.execute(
                             """
                             UPDATE ingest_submissions
@@ -979,43 +1072,8 @@ def _ingest_document(
 
                 # hv-111: Link resolved people to document_people
                 try:
-                    resolver = PeopleResolver(conn)
-                    resolved = {}
-                    for person_entry in people_json:
-                        identifier = person_entry.get('identifier')
-                        identifier_type = person_entry.get('identifier_type')
-                        role = person_entry.get('role') or 'participant'
-                        kind = None
-                        if identifier_type == 'phone':
-                            kind = IdentifierKind.PHONE
-                        elif identifier_type == 'email':
-                            kind = IdentifierKind.EMAIL
-                        if not kind or not identifier:
-                            continue
-                        try:
-                            result = resolver.resolve(kind, identifier)
-                        except Exception as exc:
-                            logger.warning("person_resolve_exception", identifier=identifier, type=identifier_type, error=str(exc))
-                            continue
-                        if result and result.get('person_id'):
-                            person_id = uuid.UUID(result['person_id'])
-                            resolved[(doc_id, person_id)] = role
-                        else:
-                            logger.warning("person_resolution_failed", identifier=identifier, type=identifier_type, doc_id=str(doc_id))
-                    # Write to document_people
-                    if resolved:
-                        for (did, pid), role in resolved.items():
-                            try:
-                                cur.execute(
-                                    """
-                                    INSERT INTO document_people (doc_id, person_id, role)
-                                    VALUES (%s, %s, %s)
-                                    ON CONFLICT (doc_id, person_id) DO UPDATE SET role = EXCLUDED.role
-                                    """,
-                                    (did, pid, role)
-                                )
-                            except Exception as exc:
-                                logger.warning("document_people_insert_failed", doc_id=str(did), person_id=str(pid), error=str(exc))
+                    logger.debug("linking document people (ingest document)", doc_id=str(doc_id), people_json=people_json)
+                    _link_document_people(conn, doc_id, people_json)
                 except Exception as exc:
                     logger.warning("people_linking_failed", doc_id=str(doc_id), error=str(exc))
 
@@ -1073,6 +1131,7 @@ def register_document(
     response: Response,
     _token: None = Depends(verify_token),
 ) -> DocumentIngestResponse:
+    logger.info("register_document", payload=payload)
     result = _ingest_document(payload)
     if result.doc_record:
         _schedule_forward_to_search([result.doc_record])
@@ -1090,6 +1149,7 @@ def register_documents_batch(
     response: Response,
     _token: None = Depends(verify_token),
 ) -> DocumentBatchIngestResponse:
+    logger.info("register_documents_batch", payload=payload)
     if not payload.documents:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

@@ -12,9 +12,10 @@ help:
 	@echo "  run        - Run debug version (auto-detects dev mode)"
 	@echo "  dev        - Run with auto-reload (requires entr, auto-detects dev mode)"
 	@echo "  dev-setup  - Set up development mode (copy chat.db to ~/.haven)"
-  @echo "  launchd    - Install and start LaunchAgent"
-  @echo "  launchd-restart - Restart LaunchAgent (use after granting Full Disk Access)"
-  @echo "  unlaunchd  - Stop and uninstall LaunchAgent"
+	@echo "  reset-config - Reset config to default"
+	@echo "  launchd    - Install and start LaunchAgent"
+	@echo "  launchd-restart - Restart LaunchAgent (use after granting Full Disk Access)"
+	@echo "  unlaunchd  - Stop and uninstall LaunchAgent"
 
 # Build debug version
 build:
