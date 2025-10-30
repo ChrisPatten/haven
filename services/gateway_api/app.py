@@ -59,6 +59,7 @@ from shared.people_repository import (
     ContactUrl,
     ContactValue,
     PersonIngestRecord,
+    PeopleRepository,
 )
 
 
@@ -1284,6 +1285,26 @@ def ingest_contacts(
             skipped=skipped,
             since_token_next=next_token,
         )
+
+    # Normalize contacts into people/person_identifiers using PeopleRepository
+    try:
+        with get_connection(autocommit=False) as conn:
+            repo = PeopleRepository(conn)
+            people_stats = repo.upsert_batch(source, records)
+            conn.commit()
+            # Log stats; response fields remain focused on document-level ingestion
+            logger.info(
+                "contacts_people_upsert",
+                accepted=people_stats.accepted,
+                upserts=people_stats.upserts,
+                deletes=people_stats.deletes,
+                conflicts=people_stats.conflicts,
+                skipped=people_stats.skipped,
+                source=source,
+            )
+    except Exception:
+        logger.exception("contacts_people_upsert_failed", source=source)
+        # Continue with document ingestion even if people upsert fails
 
     for record in records:
         accepted += 1
