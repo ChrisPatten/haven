@@ -238,6 +238,93 @@ CREATE TABLE source_change_tokens (
 );
 
 -- ============================================================================
+-- PEOPLE NORMALIZATION TABLES
+-- ============================================================================
+
+-- Identifier kind enum type
+CREATE TYPE identifier_kind AS ENUM ('phone', 'email', 'imessage', 'shortcode', 'social');
+
+-- People (canonical person records)
+CREATE TABLE people (
+    person_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    display_name TEXT NOT NULL,
+    given_name TEXT,
+    family_name TEXT,
+    organization TEXT,
+    nicknames TEXT[] DEFAULT '{}',
+    notes TEXT,
+    photo_hash TEXT,
+    source TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    deleted BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Person identifiers (normalized phone/email identifiers)
+CREATE TABLE person_identifiers (
+    person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    kind identifier_kind NOT NULL,
+    value_raw TEXT NOT NULL,
+    value_canonical TEXT NOT NULL,
+    label TEXT,
+    priority INTEGER NOT NULL DEFAULT 100,
+    verified BOOLEAN NOT NULL DEFAULT true,
+    CONSTRAINT person_identifiers_unique UNIQUE (person_id, kind, value_canonical)
+);
+
+-- People source map (maps external contact IDs to person_id)
+CREATE TABLE people_source_map (
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    CONSTRAINT people_source_map_unique UNIQUE (source, external_id)
+);
+
+-- Person addresses (contact addresses)
+CREATE TABLE person_addresses (
+    person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    street TEXT,
+    city TEXT,
+    region TEXT,
+    postal_code TEXT,
+    country TEXT,
+    CONSTRAINT person_addresses_unique UNIQUE (person_id, label)
+);
+
+-- Person URLs (contact URLs)
+CREATE TABLE person_urls (
+    person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    url TEXT NOT NULL,
+    CONSTRAINT person_urls_unique UNIQUE (person_id, label)
+);
+
+-- People conflict log (identifier conflict tracking)
+CREATE TABLE people_conflict_log (
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    kind identifier_kind NOT NULL,
+    value_canonical TEXT NOT NULL,
+    existing_person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    incoming_person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Document ↔ People junction table (links documents to normalized person entities)
+CREATE TABLE document_people (
+    doc_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    PRIMARY KEY (doc_id, person_id),
+    CONSTRAINT document_people_valid_role CHECK (
+        role IN ('sender', 'recipient', 'participant', 'mentioned', 'contact')
+    )
+);
+
+-- ============================================================================
 -- INDEXES
 -- ============================================================================
 
@@ -305,6 +392,35 @@ CREATE INDEX IF NOT EXISTS idx_ingest_submissions_source ON ingest_submissions(s
 -- Source change tokens
 CREATE INDEX IF NOT EXISTS idx_source_change_tokens_updated ON source_change_tokens(updated_at);
 
+-- People
+CREATE INDEX IF NOT EXISTS idx_people_display_name ON people(display_name);
+CREATE INDEX IF NOT EXISTS idx_people_deleted ON people(deleted) WHERE deleted = false;
+CREATE INDEX IF NOT EXISTS idx_people_source ON people(source);
+
+-- Person identifiers
+CREATE INDEX IF NOT EXISTS idx_person_identifiers_lookup ON person_identifiers(kind, value_canonical);
+CREATE INDEX IF NOT EXISTS idx_person_identifiers_person_id ON person_identifiers(person_id);
+
+-- People source map
+CREATE INDEX IF NOT EXISTS idx_people_source_map_lookup ON people_source_map(source, external_id);
+CREATE INDEX IF NOT EXISTS idx_people_source_map_person_id ON people_source_map(person_id);
+
+-- Person addresses
+CREATE INDEX IF NOT EXISTS idx_person_addresses_person_id ON person_addresses(person_id);
+
+-- Person URLs
+CREATE INDEX IF NOT EXISTS idx_person_urls_person_id ON person_urls(person_id);
+
+-- People conflict log
+CREATE INDEX IF NOT EXISTS idx_people_conflict_log_source ON people_conflict_log(source, external_id);
+CREATE INDEX IF NOT EXISTS idx_people_conflict_log_created_at ON people_conflict_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_people_conflict_log_identifier ON people_conflict_log(kind, value_canonical);
+
+-- Document ↔ People junction
+CREATE INDEX IF NOT EXISTS idx_document_people_person ON document_people(person_id);
+CREATE INDEX IF NOT EXISTS idx_document_people_doc ON document_people(doc_id);
+CREATE INDEX IF NOT EXISTS idx_document_people_role ON document_people(role);
+
 -- ============================================================================
 -- FUNCTIONS & TRIGGERS
 -- ============================================================================
@@ -350,6 +466,12 @@ CREATE TRIGGER trg_ingest_submissions_set_updated
 DROP TRIGGER IF EXISTS trg_source_change_tokens_set_updated ON source_change_tokens;
 CREATE TRIGGER trg_source_change_tokens_set_updated
     BEFORE UPDATE ON source_change_tokens
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_people_set_updated ON people;
+CREATE TRIGGER trg_people_set_updated
+    BEFORE UPDATE ON people
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
 
