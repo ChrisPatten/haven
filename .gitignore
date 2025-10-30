@@ -222,4 +222,5 @@ tests/fixtures/email/*
 
 .beads/daemon.log
 .beads/daemon.pid
-.beads/bd.sock
+.beads/bd.sock.beads/daemon.pid
+.beads/daemon.lock
