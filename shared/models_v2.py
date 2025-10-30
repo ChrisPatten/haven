@@ -124,3 +124,15 @@ class IngestSubmission(BaseModel):
     error_details: Optional[Dict[str, Any]] = None
     created_at: datetime
     updated_at: datetime
+
+
+class CrmRelationship(BaseModel):
+    relationship_id: UUID
+    self_person_id: UUID
+    person_id: UUID
+    score: float
+    last_contact_at: datetime
+    decay_bucket: int
+    edge_features: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime

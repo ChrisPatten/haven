@@ -14,10 +14,11 @@
 4. [Core Tables](#core-tables)
 5. [Type-Specific Metadata](#type-specific-metadata)
 6. [File Enrichment Schema](#file-enrichment-schema)
-7. [Query Patterns](#query-patterns)
-8. [Workflow Status](#workflow-status)
-9. [Service Integration](#service-integration)
-10. [Performance Considerations](#performance-considerations)
+7. [CRM Relationship Schema](#crm-relationship-schema)
+8. [Query Patterns](#query-patterns)
+9. [Workflow Status](#workflow-status)
+10. [Service Integration](#service-integration)
+11. [Performance Considerations](#performance-considerations)
 11. [Complete DDL Reference](#complete-ddl-reference)
 
 ---
@@ -899,6 +900,169 @@ The `enrichment` JSONB column in `files` contains content-based enrichment data.
         ]
     }
 }
+```
+
+---
+
+## CRM Relationship Schema
+
+### Overview
+
+The CRM relationship tables store relationship strength scores between people, enabling efficient queries for contact prioritization and relationship management. This system computes and tracks relationship metrics (frequency, recency, etc.) to power Haven's contact intelligence features.
+
+### Architecture
+
+**Key Tables**:
+- `crm_relationships`: Directional relationship scores between person pairs
+- `people`: Contact/person records (existing; referenced by FK)
+
+**Data Flow**:
+1. **Ingestion**: Documents with people metadata create raw contact signals
+2. **Feature Aggregation** (hv-62): Scheduled job computes edge metrics from documents
+3. **Scoring** (hv-63): Scheduled job updates relationship scores using hv-62 features
+4. **Query**: Gateway queries for top relationships, recent contacts, etc.
+
+### Table: crm_relationships
+
+Primary table for directional relationship scoring.
+
+**Purpose**: Store computed relationship strength scores and metadata for efficient top-N queries.
+
+**Schema**:
+```sql
+CREATE TABLE crm_relationships (
+    relationship_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    
+    -- Relationship Endpoints (directional: self_person_id → person_id)
+    self_person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    
+    -- Scoring & Metrics
+    score FLOAT NOT NULL,                   -- Relationship strength (0.0 and above; range/normalization per hv-62)
+    last_contact_at TIMESTAMPTZ NOT NULL,  -- Most recent message/contact with this person
+    decay_bucket INT NOT NULL,              -- Temporal bucket: 0=today, 1=week, 2=month, 3=quarter, etc.
+    
+    -- Computed Edge Features (used by scoring jobs)
+    edge_features JSONB DEFAULT '{}',       -- {"days_since_contact": 3, "messages_30d": 12, "messages_90d": 42, ...}
+    
+    -- Metadata
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    
+    -- Constraints
+    CONSTRAINT crm_relationships_unique UNIQUE (self_person_id, person_id),
+    CONSTRAINT crm_relationships_valid_score CHECK (score >= 0.0),
+    CONSTRAINT crm_relationships_valid_decay_bucket CHECK (decay_bucket >= 0)
+);
+```
+
+**Key Columns**:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `relationship_id` | UUID | Immutable primary key for the relationship edge |
+| `self_person_id` | UUID | FK to `people`: the observer/subject ("me") |
+| `person_id` | UUID | FK to `people`: the other party ("contact") |
+| `score` | FLOAT | Relationship strength score (computed and updated by hv-63 job) |
+| `last_contact_at` | TIMESTAMPTZ | Timestamp of most recent message/contact with this person |
+| `decay_bucket` | INT | Temporal bucketing for efficient time-windowed queries |
+| `edge_features` | JSONB | Raw metrics: `days_since_contact`, `messages_30d`, `messages_90d`, etc. |
+| `created_at` | TIMESTAMPTZ | When the relationship record was created |
+| `updated_at` | TIMESTAMPTZ | Last update timestamp (maintained by trigger) |
+
+**Design Notes**:
+- **Directionality**: Relationship is directional. `(self_person_id=A, person_id=B)` means "A's relationship with B". The reverse relationship `(A→B)` is separate.
+- **Score Range**: Determined by hv-62; may be 0-1 or 0-100. Constraint is `>= 0.0`.
+- **Decay Bucket**: Integer enabling efficient queries like "relationships from this week" via index on `(self_person_id, score DESC) WHERE decay_bucket IN (0, 1)`.
+- **Edge Features**: JSONB storing raw metrics for debugging, analytics, and downstream feature engineering. Examples:
+  - `messages_30d`: Count of messages in last 30 days
+  - `messages_90d`: Count in last 90 days
+  - `days_since_contact`: Days since last message
+  - `thread_count`: Number of distinct threads
+  - `avg_message_length`: Average message length in conversation
+- **Update Frequency**: Refreshed by scheduled jobs (hv-63). Manual inserts via API not expected during normal operation.
+
+### Indexes
+
+**Designed to Support Primary Query Patterns**:
+
+```sql
+-- 1. Top N relationships for person X (primary access pattern)
+CREATE INDEX idx_crm_relationships_top_score ON crm_relationships(
+    self_person_id,
+    score DESC,
+    last_contact_at DESC
+);
+-- Usage: WHERE self_person_id = ? ORDER BY score DESC, last_contact_at DESC LIMIT N
+
+-- 2. Recent contacts (time-windowed queries)
+CREATE INDEX idx_crm_relationships_recent_contacts ON crm_relationships(
+    self_person_id,
+    last_contact_at DESC
+);
+-- Usage: WHERE self_person_id = ? AND last_contact_at > ? ORDER BY last_contact_at DESC
+
+-- 3. Reverse lookup (who has me as a relationship)
+CREATE INDEX idx_crm_relationships_person_lookup ON crm_relationships(person_id);
+-- Usage: WHERE person_id = ?
+
+-- 4. Partial index on recent decay buckets (optimization for common time windows)
+CREATE INDEX idx_crm_relationships_decay_bucket_recent ON crm_relationships(
+    self_person_id,
+    score DESC
+)
+WHERE decay_bucket IN (0, 1, 2);  -- Today, week, month
+-- Usage: WHERE self_person_id = ? AND decay_bucket IN (0, 1, 2) ORDER BY score DESC
+```
+
+**Index Rationale**:
+- **`idx_crm_relationships_top_score`**: Primary query pattern. Efficiently finds strongest relationships for a given person. Sort by score desc, then by recency.
+- **`idx_crm_relationships_recent_contacts`**: Supports time-windowed queries without filtering on score. Useful for "recent contacts" regardless of strength.
+- **`idx_crm_relationships_person_lookup`**: Reverse lookup. Finds all relationships where this person is the contact (used for deduplication, conflict detection).
+- **`idx_crm_relationships_decay_bucket_recent`**: Partial index for common time windows. Reduces index size and improves query performance for recent relationships.
+
+### Example Queries
+
+**Get top 10 relationships for current user**:
+```sql
+SELECT 
+    cr.relationship_id,
+    cr.person_id,
+    p.display_name,
+    cr.score,
+    cr.last_contact_at,
+    cr.edge_features
+FROM crm_relationships cr
+JOIN people p ON cr.person_id = p.person_id
+WHERE cr.self_person_id = $1
+ORDER BY cr.score DESC, cr.last_contact_at DESC
+LIMIT 10;
+```
+
+**Get top 5 relationships in last 90 days**:
+```sql
+SELECT 
+    cr.relationship_id,
+    cr.person_id,
+    p.display_name,
+    cr.score,
+    cr.last_contact_at
+FROM crm_relationships cr
+JOIN people p ON cr.person_id = p.person_id
+WHERE cr.self_person_id = $1
+    AND cr.last_contact_at > NOW() - interval '90 days'
+ORDER BY cr.score DESC
+LIMIT 5;
+```
+
+**Get all people who have user as a contact**:
+```sql
+SELECT DISTINCT
+    cr.self_person_id,
+    p.display_name
+FROM crm_relationships cr
+JOIN people p ON cr.self_person_id = p.person_id
+WHERE cr.person_id = $1;
 ```
 
 ---

@@ -324,6 +324,34 @@ CREATE TABLE document_people (
     )
 );
 
+-- CRM Relationships (relationship strength scoring)
+CREATE TABLE crm_relationships (
+    relationship_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    self_person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    score FLOAT NOT NULL,
+    last_contact_at TIMESTAMPTZ NOT NULL,
+    decay_bucket INT NOT NULL,
+    edge_features JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT crm_relationships_unique UNIQUE (self_person_id, person_id),
+    CONSTRAINT crm_relationships_valid_score CHECK (score >= 0.0),
+    CONSTRAINT crm_relationships_valid_decay_bucket CHECK (decay_bucket >= 0)
+);
+
+-- Comments for crm_relationships table
+COMMENT ON TABLE crm_relationships IS 'Relationship strength scores between people. Directional: (self_person_id, person_id) represents "my relationship with contact".';
+COMMENT ON COLUMN crm_relationships.relationship_id IS 'Immutable UUID primary key for the relationship edge.';
+COMMENT ON COLUMN crm_relationships.self_person_id IS 'UUID reference to people table (FK): "me", the observer/subject.';
+COMMENT ON COLUMN crm_relationships.person_id IS 'UUID reference to people table (FK): "contact", the other party in the relationship.';
+COMMENT ON COLUMN crm_relationships.score IS 'Float score (0.0 and above) representing relationship strength. Exact range and normalization determined by hv-62.';
+COMMENT ON COLUMN crm_relationships.last_contact_at IS 'TIMESTAMPTZ of the most recent message/contact with this person.';
+COMMENT ON COLUMN crm_relationships.decay_bucket IS 'Integer temporal bucket for efficient time-windowed queries: 0=today, 1=week, 2=month, 3=quarter, etc.';
+COMMENT ON COLUMN crm_relationships.edge_features IS 'JSONB object storing computed edge metrics: days_since_contact, message_count_30d, message_count_90d, etc. Used for debugging and analytics.';
+COMMENT ON COLUMN crm_relationships.created_at IS 'TIMESTAMPTZ when the relationship record was created.';
+COMMENT ON COLUMN crm_relationships.updated_at IS 'TIMESTAMPTZ of the last update to this relationship.';
+
 -- ============================================================================
 -- INDEXES
 -- ============================================================================
@@ -421,6 +449,23 @@ CREATE INDEX IF NOT EXISTS idx_document_people_person ON document_people(person_
 CREATE INDEX IF NOT EXISTS idx_document_people_doc ON document_people(doc_id);
 CREATE INDEX IF NOT EXISTS idx_document_people_role ON document_people(role);
 
+-- CRM Relationships
+CREATE INDEX IF NOT EXISTS idx_crm_relationships_top_score ON crm_relationships(
+    self_person_id,
+    score DESC,
+    last_contact_at DESC
+);
+CREATE INDEX IF NOT EXISTS idx_crm_relationships_recent_contacts ON crm_relationships(
+    self_person_id,
+    last_contact_at DESC
+);
+CREATE INDEX IF NOT EXISTS idx_crm_relationships_person_lookup ON crm_relationships(person_id);
+CREATE INDEX IF NOT EXISTS idx_crm_relationships_decay_bucket_recent ON crm_relationships(
+    self_person_id,
+    score DESC
+)
+WHERE decay_bucket IN (0, 1, 2);
+
 -- ============================================================================
 -- FUNCTIONS & TRIGGERS
 -- ============================================================================
@@ -472,6 +517,12 @@ CREATE TRIGGER trg_source_change_tokens_set_updated
 DROP TRIGGER IF EXISTS trg_people_set_updated ON people;
 CREATE TRIGGER trg_people_set_updated
     BEFORE UPDATE ON people
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_crm_relationships_set_updated ON crm_relationships;
+CREATE TRIGGER trg_crm_relationships_set_updated
+    BEFORE UPDATE ON crm_relationships
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
 
