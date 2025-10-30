@@ -42,7 +42,6 @@ nav:
       - Graph Reference: reference/graph.md
       - Backup & Restore: reference/BACKUP_RESTORE.md
       - Schema v2 Reference: reference/SCHEMA_V2_REFERENCE.md
-      - Relationship Features: reference/relationship_features.md
       - Mail.app Information:
           - Mail.app Cache Structure: reference/mail_app_cache_structure.md
           - Envelope Index Schema: reference/Envelope_Index_schema.md

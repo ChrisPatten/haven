@@ -152,3 +152,22 @@ Then use `mcp__beads__*` functions instead of CLI commands.
 - ❌ Do NOT duplicate tracking systems
 
 For more details, see README.md and QUICKSTART.md.
+--- END AGENTS.MD CONTENT ---
+
+2. Update CLAUDE.md (if present)
+   If CLAUDE.md exists in this directory, add this note at the top:
+
+   **Note**: This project uses [bd (beads)](https://github.com/steveyegge/beads)
+   for issue tracking. Use `bd` commands instead of markdown TODOs.
+   See AGENTS.md for workflow details.
+
+3. Remove bootstrap instruction
+   If AGENTS.md or CLAUDE.md contains a line like:
+   "BEFORE ANYTHING ELSE: run 'bd onboard' and follow the instructions"
+   Delete that line after completing steps 1 and 2.
+
+Important reminders:
+   • Use bd for ALL task tracking - NO markdown TODO lists
+   • Always use --json flag for programmatic bd commands
+   • Link discovered work with discovered-from dependencies
+   • Check bd ready before asking "what should I work on?"
