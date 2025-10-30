@@ -100,22 +100,28 @@ def main():
     # Determine duplicates and identify items to keep/delete
     ids_to_delete = []
     keep_lines = set()
+    
+    def get_numeric_id(id_str):
+        """Extract numeric part of ID (e.g., 'hv-27' -> 27)"""
+        if not id_str:
+            return float('inf')  # treat missing IDs as highest value
+        try:
+            return int(id_str.split('-')[1])
+        except (IndexError, ValueError):
+            return float('inf')
+    
     for title, items in groups.items():
         if len(items) <= 1:
             # keep the only item (if it has a line index)
             if items:
                 keep_lines.add(items[0]["line"])
             continue
-        # sort by created_at (parsed) then by line number
+        # sort by numeric ID to find the lowest
         def keyfn(x):
-            dt = parse_created_at(x.get("created_at"))
-            if dt is None:
-                # push invalid/missing timestamps to the end by using min
-                dt = datetime.min
-            return (dt, x["line"]) 
+            return get_numeric_id(x.get("id"))
 
         sorted_items = sorted(items, key=keyfn)
-        # keep the first, delete the rest
+        # keep the first (lowest ID), delete the rest
         if sorted_items:
             keep_lines.add(sorted_items[0]["line"])
         to_delete = [it["id"] for it in sorted_items[1:] if it.get("id")]

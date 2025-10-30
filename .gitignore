@@ -219,8 +219,3 @@ tests/fixtures/images/*
 tests/fixtures/email/*
 
 .tmp/
-
-.beads/daemon.log
-.beads/daemon.pid
-.beads/bd.sock.beads/daemon.pid
-.beads/daemon.lock
