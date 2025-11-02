@@ -26,6 +26,10 @@ The unified schema is defined in `schema/init.sql` and documented in `documentat
 | `document_files` | Document ↔ file mapping | Role (`attachment`, `extracted_from`), order, caption, filename override |
 | `chunks` | Text segments for lexical/vector search | `embedding_status` (`pending`, `processing`, `embedded`, `failed`), optional vector |
 | `chunk_documents` | Many-to-many chunk mapping | Supports multi-document chunks, stores ordinal & weight |
+| `people` | Normalized person records | Display names, structured names, merged contacts |
+| `person_identifiers` | Phone/email in canonical format | E.164 phones, lowercase emails, priority ordering |
+| `document_people` | Document ↔ person junction | Roles: sender, recipient, participant, mentioned, contact |
+| `crm_relationships` | Relationship strength scoring | Directional edges, decay buckets, computed features |
 | `ingest_submissions` | Idempotency tracker | Stores submission metadata, result doc ID, failure details |
 | `source_change_tokens` | Collector sync state | Stores last change token per source/device (used by contacts collector) |
 
@@ -36,11 +40,12 @@ Active-document views (`active_documents`, `documents_with_files`, `thread_summa
 1. **Collectors** generate source-specific payloads:
    * iMessage collector normalises chat.db rows, enriches attachments, builds people/thread metadata, deduplicates via SHA256, and tracks per-message versions to avoid duplicates.
    * Localfs collector uploads binaries to MinIO, extracts text, attaches image enrichment, and forwards v2 document payloads.
-   * Contacts collector converts address book entries into `contact` documents (metadata stored under `metadata.contact`, phone/email identifiers in the `people` array) and tracks change tokens.
+   * Contacts collector (Swift HostAgent) imports from macOS Contacts or VCF files, normalizes identifiers, creates/updates `people` records via `PeopleRepository`, and populates `document_people` junction table.
 2. **Gateway** validates/normalises payloads (`/v1/ingest`, `/v1/ingest/file`), computes idempotency keys, adds timestamps and facet overrides, then forwards them to catalog.
-3. **Catalog** inserts into `ingest_submissions`, `documents`, `document_files`, `chunks`, `chunk_documents`, updates thread metadata, and returns `DocumentIngestResponse` with submission & version info.
+3. **Catalog** inserts into `ingest_submissions`, `documents`, `document_files`, `chunks`, `chunk_documents`, updates thread metadata, resolves people via `PeopleResolver`, links via `document_people`, and returns `DocumentIngestResponse` with submission & version info.
 4. **Embedding worker** polls `chunks` with `embedding_status='pending'`, marks them `processing`, generates vectors, posts to `/v1/catalog/embeddings`, which sets `embedding_status='embedded'` and updates document workflow status.
 5. **Search service** queries `documents` / `chunks` for combined lexical/vector search and exposes timeline/facet filters.
+6. **Relationship scoring** (background job) computes relationship features from message history, calculates scores, and updates `crm_relationships` table.
 
 Versioning: `PATCH /v1/catalog/documents/{doc_id}/version` clones document state with incremental `version_number`, marks prior version inactive, and rebuilds chunks/file links.
 
@@ -53,6 +58,7 @@ Versioning: `PATCH /v1/catalog/documents/{doc_id}/version` clones document state
 | `POST /v1/ingest/file` | Handles multipart uploads; stores in MinIO, extracts text, populates file descriptors (`content_sha256`, `object_key`, enrichment) |
 | `GET /v1/ingest/{submission_id}` | Returns catalog submission status: chunk counts, document status, errors |
 | `GET /v1/search` | Hybrid search; supports filters `has_attachments`, `source_type`, `person`, `thread_id`, `start_date`, `end_date`, `context_window` |
+| `GET /search/people` | Search normalized people records by name, email, phone, or organization |
 | `POST /v1/ask` | Executes search & builds summarised answer with citations |
 | `GET /v1/doc/{doc_id}` / `PATCH /v1/documents/{doc_id}` | Document retrieval and metadata/text updates |
 | `GET /v1/context/general` | Returns aggregated timeline highlights & top threads (via catalog proxy) |

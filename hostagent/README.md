@@ -217,6 +217,62 @@ Response:
 }
 ```
 
+### Contacts Collector
+
+The contacts collector imports contact records from macOS Contacts.app or VCF (vCard) files, normalizing them into Haven's unified people schema.
+
+```bash
+# Import from macOS Contacts
+POST /v1/collectors/contacts:run
+Content-Type: application/json
+
+{
+  "mode": "real"
+}
+
+# Import from VCF directory
+POST /v1/collectors/contacts:run
+Content-Type: application/json
+
+{
+  "mode": "real",
+  "collector_options": {
+    "vcf_directory": "/Users/chris/Contacts"
+  }
+}
+
+Response:
+{
+  "status": "success",
+  "contacts_processed": 423,
+  "contacts_created": 15,
+  "contacts_updated": 408,
+  "contacts_deleted": 2,
+  "duration_ms": 3421
+}
+```
+
+**Supported vCard Properties**:
+- FN (Formatted Name): Display name
+- N (Name): Structured name (family;given;middle;prefix;suffix)
+- ORG (Organization): Organization name
+- EMAIL: Email addresses with labels
+- TEL: Phone numbers with labels
+- URL: Website URLs
+- ADR: Physical addresses
+- NOTE: Contact notes
+- BDAY: Birthday
+
+**Permissions Required**: Contacts permission (granted via System Settings → Privacy & Security → Contacts)
+
+**Data Flow**:
+1. HostAgent reads contacts from Contacts.app or parses VCF files
+2. Normalizes phone numbers to E.164 format, emails to lowercase
+3. Posts normalized records to Gateway `/catalog/contacts/ingest`
+4. Gateway forwards to Catalog, which uses `PeopleRepository` to upsert
+5. Identifiers stored in `person_identifiers`, person records in `people`
+6. Change tokens tracked in `source_change_tokens` for incremental sync
+
 ### File System Watch
 
 ```bash
@@ -273,6 +329,9 @@ modules:
     enabled: true          # Enable iMessage collection
     ocr_enabled: true      # Enable image OCR enrichment
   
+  contacts:
+    enabled: true          # Enable contacts collection (requires Contacts permission)
+  
   ocr:
     enabled: true
     languages: [en]        # Hint for Vision (best-effort)
@@ -283,7 +342,6 @@ modules:
     watches: []            # Managed via API
   
   # Stub modules (not yet implemented)
-  contacts: { enabled: false }
   calendar: { enabled: false }
   reminders: { enabled: false }
   mail: { enabled: false }

@@ -15,9 +15,10 @@ Supporting datastores include Postgres (primary), Qdrant (vectors), and MinIO (b
 ## Data Flow at a Glance
 1. **Collectors emit payloads** — HostAgent (iMessage, Contacts, filesystem watchers) or CLI collectors normalise source data and send them to Gateway.
 2. **Gateway validates and queues** — It computes idempotency keys, attaches metadata, and forwards the document payload to Catalog while staging files in MinIO.
-3. **Catalog persists state** — Documents, threads, files, and chunks are written transactionally. Ingest submissions capture status for retries and audit trails.
+3. **Catalog persists state** — Documents, threads, files, and chunks are written transactionally. Ingest submissions capture status for retries and audit trails. People are normalized via `PeopleRepository`, identifiers canonicalized, and linked to documents via `document_people`.
 4. **Embedding worker enriches** — Pending chunks are vectorised and written via `/v1/catalog/embeddings`, flipping their status to `embedded`.
-5. **Search exposes results** — Hybrid search queries join Catalog tables with Qdrant vectors, enabling Ask/answer workflows and filtered exploration.
+5. **Search exposes results** — Hybrid search queries join Catalog tables with Qdrant vectors, enabling Ask/answer workflows and filtered exploration. People search queries the normalized `people` table.
+6. **Relationship scoring** — Background job computes relationship strength from message history, updating `crm_relationships` table.
 
 ## Topology
 

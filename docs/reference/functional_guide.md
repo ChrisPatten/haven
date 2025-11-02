@@ -85,17 +85,70 @@ This guide describes the day-to-day workflows exposed by the Haven platform afte
 3. Metadata contains mtime/ctime, tags, enrichment output; attachments stored in MinIO with SHA keys.
 
 ### 3.3 Contacts Collector
-1. Install macOS-specific dependencies: `pip install -r local_requirements.txt`.
-2. Run `python scripts/collectors/collector_contacts.py --once` (requires GUI permission for Contacts).
-3. Collector posts batches to `catalog/contacts/ingest`; gateway transforms each entry into a `contact` document with structured metadata (`metadata.contact`) and phone/email identifiers in the `people` array.
-4. Deletions trigger catalog document removal; change tokens persist in `source_change_tokens` so incremental sync resumes gracefully.
+1. The macOS Contacts collector has been ported to Swift and runs as part of HostAgent.
+2. **HostAgent Method**: POST to `http://localhost:7090/v1/collectors/contacts:run` with `{"mode": "real"}`.
+3. **VCF Import**: Include `collector_options: {"vcf_directory": "/path/to/vcf"}` to import from VCF files instead of macOS Contacts.
+4. Contacts are transformed into unified person records in the `people` table with normalized identifiers.
+5. The PeopleRepository handles deduplication and merging based on phone/email overlap.
+6. Change tokens persist in `source_change_tokens` for incremental sync.
 
-## 4. Backfill & Enrichment
+**Legacy Python Collector**: The original `scripts/collectors/collector_contacts.py` is deprecated but remains available for non-macOS environments.
+
+### 3.4 People Normalization
+1. All contacts and message participants are normalized into the `people` table.
+2. Phone numbers normalized to E.164 format, emails to lowercase.
+3. `PeopleResolver` enables lookup of person records by identifier:
+   ```python
+   from shared.people_repository import PeopleResolver, IdentifierKind
+   resolver = PeopleResolver(conn, default_region="US")
+   person = resolver.resolve(IdentifierKind.PHONE, "+1 555 123 4567")
+   ```
+4. `document_people` junction table links documents to people with roles (sender, recipient, participant, mentioned, contact).
+5. Gateway `/search/people` endpoint enables full-text search across normalized contacts.
+
+### 3.5 Relationship Intelligence
+1. The `crm_relationships` table stores directional relationship strength scores.
+2. Background job computes features from message history:
+   - Message frequency (30d, 90d)
+   - Recency (days since last contact)
+   - Thread diversity
+   - Reply latency
+   - Attachment exchange
+3. Scores computed using weighted combination of recency, frequency, and engagement signals.
+4. Self-person detection identifies the user's person record for relationship calculations.
+5. Query top relationships:
+   ```sql
+   SELECT person_id, display_name, score, last_contact_at
+   FROM crm_relationships cr
+   JOIN people p ON cr.person_id = p.person_id
+   WHERE cr.self_person_id = $1
+   ORDER BY score DESC LIMIT 10;
+   ```
+
+## 4. People and Relationship Workflows
+
+### 4.1 Searching for People
+1. GET `gateway /search/people?q=john&limit=20` to search across display names, emails, phone numbers.
+2. Response includes person records with identifiers, addresses, and metadata.
+3. Use `offset` parameter for pagination.
+
+### 4.2 Viewing Relationship Strength
+1. Relationship scores updated periodically by background job.
+2. Query `crm_relationships` to see top contacts ranked by score.
+3. `edge_features` JSONB field contains raw metrics for analysis.
+4. Filter by `decay_bucket` for time-windowed queries (recent contacts, active relationships).
+
+### 4.3 Self-Person Configuration
+1. System detects self-person automatically based on message patterns.
+2. Manual override via `system_settings` table: `UPDATE system_settings SET value = '{"self_person_id": "<uuid>"}' WHERE key = 'self_person'`.
+3. Self-person ID used as subject for all relationship scoring calculations.
+
+## 5. Backfill & Enrichment
 
 * `python scripts/backfill_image_enrichment.py --use-chat-db --limit 50` reprocesses image attachments, writing updated enrichment to `files.enrichment` and requeuing chunks.
 * Requires gateway (`GATEWAY_URL`) and `AUTH_TOKEN`. For missing files, script records placeholder statistics.
 
-## 5. Operational Tips
+## 6. Operational Tips
 
 | Task | Command / Notes |
 | --- | --- |
@@ -105,8 +158,10 @@ This guide describes the day-to-day workflows exposed by the Haven platform afte
 | Check search filters | Use `--simulate` collector runs, query `GET /v1/search` with matching filters |
 | Update document version | `curl -X PATCH http://catalog:8081/v1/catalog/documents/<doc_id>/version` with JSON body |
 | Retry failed embeddings | Update `chunks` row `embedding_status='pending'` and watch worker logs |
+| Search people | `curl "http://localhost:8085/search/people?q=john"` |
+| View top relationships | Query `crm_relationships` joined with `people` table, order by `score DESC` |
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 | Issue | Resolution |
 | --- | --- |
@@ -115,8 +170,10 @@ This guide describes the day-to-day workflows exposed by the Haven platform afte
 | Search missing facets | Confirm gateway forwards `facets` list and search service logs processed filters. |
 | Embedding worker idle | Check for `chunks.embedding_status='pending'`; if none, ingestion finished or errors flagged. |
 | Catalog context empty | Ensure collectors ran successfully and gateway forwarded data with `content_timestamp`. |
+| People not resolving | Check `person_identifiers` table for canonical format; phone numbers must be E.164, emails lowercase. |
+| Relationship scores stale | Run relationship feature aggregation job manually or check scheduled job logs. |
 
-## 7. Reference Links
+## 8. Reference Links
 
 * **Schema:** `documentation/SCHEMA_unified_v2.md`
 * **Migration Summary:** `documentation/unified_schema_v2_overview.md`

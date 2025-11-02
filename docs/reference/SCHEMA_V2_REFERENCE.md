@@ -46,6 +46,10 @@ Unified Schema v2 represents a complete redesign of Haven's data model, replacin
 | `document_files` | Document-file relationships | Attachment roles, ordering, captions |
 | `chunks` | Text segments for search | Embeddings, source references, ordinals |
 | `chunk_documents` | Chunk-document relationships | Multi-document chunks, relevance weights |
+| `people` | Normalized person records | Contact merging, identifier normalization |
+| `person_identifiers` | Phone/email identifiers | Canonical format, priority, verification |
+| `document_people` | Document-person relationships | Sender/recipient/participant roles |
+| `crm_relationships` | Relationship strength scoring | Directional edges, decay buckets, features |
 | `ingest_batches` | Batch submission tracking | Batch-level idempotency, aggregate counts |
 | `ingest_submissions` | Idempotency tracking | Deduplication keys, status tracking |
 | `source_change_tokens` | Incremental sync state | Per-source tokens (contacts, etc.) |
@@ -904,6 +908,320 @@ The `enrichment` JSONB column in `files` contains content-based enrichment data.
 
 ---
 
+## People Normalization Schema
+
+### Overview
+
+The people normalization system resolves and merges contact identities across multiple sources (iMessage, Contacts, email) into unified person records. This enables accurate attribution of documents to people, contact deduplication, and relationship intelligence.
+
+### Architecture
+
+**Key Tables**:
+- `people`: Normalized person records with display names, structured names, and metadata
+- `person_identifiers`: Phone numbers and email addresses in canonical format
+- `person_addresses`: Physical addresses associated with people
+- `person_urls`: Web URLs and social profiles
+- `people_source_map`: Maps external contact IDs to unified person records
+- `document_people`: Junction table linking documents to people with roles
+- `people_conflict_log`: Tracks merge conflicts for manual resolution
+
+**Data Flow**:
+1. **Contact Ingestion**: Contacts collector imports from macOS Contacts or VCF files
+2. **Identifier Normalization**: Phone/email identifiers converted to canonical format (E.164 for phones, lowercase for emails)
+3. **Person Resolution**: Identifiers matched against existing people records
+4. **Merge Detection**: Duplicate detection based on identifier overlap
+5. **Document Attribution**: Documents linked to people via `document_people` junction
+
+### Table: people
+
+Primary table for normalized person records.
+
+**Purpose**: Store unified person records merged from multiple contact sources.
+
+**Schema**:
+```sql
+CREATE TABLE people (
+    person_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    display_name TEXT NOT NULL,
+    given_name TEXT,
+    family_name TEXT,
+    organization TEXT,
+    nicknames TEXT[] DEFAULT '{}',
+    notes TEXT,
+    photo_hash TEXT,
+    source TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    deleted BOOLEAN NOT NULL DEFAULT false,
+    merged_into UUID REFERENCES people(person_id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+**Key Columns**:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `person_id` | UUID | Immutable primary key for the person |
+| `display_name` | TEXT | Primary name shown in UI (required) |
+| `given_name` | TEXT | First/given name |
+| `family_name` | TEXT | Last/family name |
+| `organization` | TEXT | Company or organization affiliation |
+| `nicknames` | TEXT[] | Array of alternate names |
+| `notes` | TEXT | Free-form notes about the person |
+| `photo_hash` | TEXT | Hash of contact photo for deduplication |
+| `source` | TEXT | Primary source (e.g., 'macos_contacts', 'vcf') |
+| `version` | INTEGER | Version number for optimistic locking |
+| `deleted` | BOOLEAN | Soft delete flag |
+| `merged_into` | UUID | Points to person this record was merged into |
+| `created_at` | TIMESTAMPTZ | When the person record was created |
+| `updated_at` | TIMESTAMPTZ | Last update timestamp |
+
+**Design Notes**:
+- **Soft Deletes**: `deleted=true` marks person as removed but preserves history
+- **Merge Tracking**: `merged_into` creates a chain to final person record
+- **Version Control**: `version` enables optimistic locking for concurrent updates
+- **Source Tracking**: `source` indicates primary source for conflict resolution
+
+### Table: person_identifiers
+
+Normalized phone numbers and email addresses.
+
+**Purpose**: Store canonical identifiers for person matching and resolution.
+
+**Schema**:
+```sql
+CREATE TYPE identifier_kind AS ENUM ('phone', 'email');
+
+CREATE TABLE person_identifiers (
+    person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    kind identifier_kind NOT NULL,
+    value_raw TEXT NOT NULL,
+    value_canonical TEXT NOT NULL,
+    label TEXT,
+    priority INTEGER NOT NULL DEFAULT 100,
+    verified BOOLEAN NOT NULL DEFAULT true,
+    CONSTRAINT person_identifiers_unique UNIQUE (person_id, kind, value_canonical)
+);
+
+CREATE INDEX idx_person_identifiers_lookup ON person_identifiers(kind, value_canonical);
+```
+
+**Key Columns**:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `person_id` | UUID | Foreign key to people |
+| `kind` | ENUM | Type: 'phone' or 'email' |
+| `value_raw` | TEXT | Original value as entered |
+| `value_canonical` | TEXT | Normalized value (E.164 for phone, lowercase for email) |
+| `label` | TEXT | Optional label (e.g., 'work', 'home', 'mobile') |
+| `priority` | INTEGER | Display order (lower = higher priority) |
+| `verified` | BOOLEAN | Whether identifier is verified |
+
+**Design Notes**:
+- **Canonical Format**: Phone numbers normalized to E.164 (+country code), emails to lowercase
+- **Deduplication**: Unique constraint on `(person_id, kind, value_canonical)`
+- **Fast Lookup**: Index on `(kind, value_canonical)` enables efficient person resolution
+- **Label Flexibility**: Label is free-form text, not constrained
+
+### Table: document_people
+
+Junction table linking documents to people.
+
+**Purpose**: Track which people are associated with each document and their role.
+
+**Schema**:
+```sql
+CREATE TABLE document_people (
+    doc_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    PRIMARY KEY (doc_id, person_id),
+    CONSTRAINT document_people_valid_role CHECK (
+        role IN ('sender', 'recipient', 'participant', 'mentioned', 'contact')
+    )
+);
+
+CREATE INDEX idx_document_people_person ON document_people(person_id);
+CREATE INDEX idx_document_people_doc ON document_people(doc_id);
+CREATE INDEX idx_document_people_role ON document_people(role);
+```
+
+**Key Columns**:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `doc_id` | UUID | Foreign key to documents |
+| `person_id` | UUID | Foreign key to people |
+| `role` | TEXT | Role: 'sender', 'recipient', 'participant', 'mentioned', 'contact' |
+
+**Roles**:
+- **sender**: Person who authored/sent the message or document
+- **recipient**: Direct recipient of a message
+- **participant**: Thread participant (group conversations)
+- **mentioned**: Person referenced in the content
+- **contact**: For contact-type documents, the person the contact represents
+
+**Design Notes**:
+- **Many-to-Many**: Documents can have multiple people, people can be in multiple documents
+- **Role-Based Queries**: Index on `role` enables efficient filtering
+- **Cascade Deletes**: Removing document or person cleans up junction records
+
+### Table: people_source_map
+
+Maps external contact IDs to unified person records.
+
+**Purpose**: Track which external contact IDs map to which person_id for sync operations.
+
+**Schema**:
+```sql
+CREATE TABLE people_source_map (
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE CASCADE,
+    CONSTRAINT people_source_map_unique UNIQUE (source, external_id)
+);
+
+CREATE INDEX idx_people_source_map_person ON people_source_map(person_id);
+```
+
+**Key Columns**:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `source` | TEXT | Source system (e.g., 'macos_contacts', 'vcf') |
+| `external_id` | TEXT | ID in source system |
+| `person_id` | UUID | Unified person record |
+
+**Design Notes**:
+- **Idempotency**: Enables repeated imports to update same person record
+- **Multi-Source**: Same person can have entries from multiple sources
+- **Sync Support**: Used by contacts collector to detect updates vs. creates
+
+### PeopleRepository API
+
+The `PeopleRepository` class provides high-level operations for person management.
+
+**Key Methods**:
+
+```python
+class PeopleRepository:
+    def upsert_batch(
+        self, 
+        source: str, 
+        batch: Sequence[PersonIngestRecord]
+    ) -> UpsertStats
+    """
+    Upsert multiple person records atomically.
+    - Resolves person_id via source_map or creates new
+    - Updates person fields only if changed
+    - Refreshes identifiers, addresses, URLs
+    - Handles soft deletes
+    - Returns statistics (created, updated, deleted, skipped)
+    """
+    
+    def get_person(
+        self, 
+        person_id: UUID, 
+        include_identifiers: bool = True
+    ) -> Optional[Dict]
+    """
+    Retrieve full person record with optional identifiers.
+    """
+    
+    def list_people(
+        self, 
+        limit: int = 100, 
+        offset: int = 0, 
+        include_deleted: bool = False
+    ) -> List[Dict]
+    """
+    List people with pagination and optional deleted records.
+    """
+    
+    def search_people(
+        self, 
+        query: str, 
+        limit: int = 20
+    ) -> List[Dict]
+    """
+    Full-text search across display_name, given_name, family_name, organization.
+    """
+```
+
+### PeopleResolver API
+
+The `PeopleResolver` class handles identifier-to-person lookups.
+
+**Key Methods**:
+
+```python
+class PeopleResolver:
+    def resolve(
+        self, 
+        kind: IdentifierKind, 
+        value: str
+    ) -> Optional[Dict[str, str]]
+    """
+    Resolve a single identifier to person.
+    Returns: {'person_id': '...', 'display_name': '...'}
+    """
+    
+    def resolve_many(
+        self, 
+        items: Sequence[tuple[IdentifierKind, str]]
+    ) -> Dict[str, Dict[str, str]]
+    """
+    Batch resolve multiple identifiers.
+    Returns: {'phone:+15551234567': {'person_id': '...', 'display_name': '...'}}
+    """
+```
+
+**Usage Example**:
+```python
+from shared.people_repository import PeopleResolver
+from shared.people_normalization import IdentifierKind
+
+resolver = PeopleResolver(conn, default_region="US")
+
+# Resolve single identifier
+person = resolver.resolve(IdentifierKind.PHONE, "+1 (555) 123-4567")
+if person:
+    print(f"Found {person['display_name']} ({person['person_id']})")
+
+# Batch resolve
+items = [
+    (IdentifierKind.PHONE, "+15551234567"),
+    (IdentifierKind.EMAIL, "john@example.com")
+]
+results = resolver.resolve_many(items)
+```
+
+### Self-Person Detection
+
+The system supports identifying which person record represents the user ("self") for relationship calculations.
+
+**Storage**: `system_settings` table stores `self_person_id`
+
+**Detection Methods**:
+1. **Manual Configuration**: Admin sets self_person_id via API
+2. **Auto-Detection**: Analyzes message patterns (high outbound ratio, specific identifiers)
+3. **MIME Charset Analysis**: Uses charset metadata from email sources as a signal
+
+**API Functions**:
+```python
+def get_self_person_id_from_settings(conn: Connection) -> Optional[UUID]
+    """Retrieve self_person_id from system_settings"""
+
+def store_self_person_id_if_needed(conn: Connection, person_id: UUID) -> bool
+    """Store self_person_id if not already set"""
+```
+
+**Usage**: CRM relationship calculations use `self_person_id` as the subject for directional scoring.
+
+---
+
 ## CRM Relationship Schema
 
 ### Overview
@@ -1064,6 +1382,225 @@ FROM crm_relationships cr
 JOIN people p ON cr.self_person_id = p.person_id
 WHERE cr.person_id = $1;
 ```
+
+### Relationship Feature Aggregation
+
+Haven computes relationship strength scores based on communication patterns extracted from message history. The feature aggregation pipeline analyzes document metadata to generate metrics that feed the scoring algorithm.
+
+**Feature Computation Pipeline**:
+
+1. **Extract Message Events**: Query `document_people` joined with `documents` to extract directional message events (sender → recipient)
+2. **Compute Edge Features**: For each `(self_person_id, person_id)` pair, calculate:
+   - `days_since_last_message`: Days elapsed since most recent message
+   - `messages_30d`: Message count in last 30 days
+   - `messages_90d`: Message count in last 90 days
+   - `distinct_threads_90d`: Number of distinct conversation threads
+   - `attachments_30d`: Attachment count in last 30 days
+   - `avg_reply_latency_seconds`: Average time between outbound and inbound messages
+3. **Compute Decay Bucket**: Temporal bucket based on recency (0=today, 1=week, 2=month, 3=quarter, etc.)
+4. **Calculate Score**: Weighted combination of features (implementation in `relationship_features.py`)
+5. **Upsert to `crm_relationships`**: Store or update relationship records with computed metrics
+
+**Feature Implementation** (`services/search_service/relationship_features.py`):
+
+```python
+@dataclass(frozen=True, slots=True)
+class RelationshipEvent:
+    """Single directional message event"""
+    self_person_id: UUID
+    person_id: UUID
+    timestamp: datetime
+    thread_id: Optional[UUID]
+    direction: str  # "inbound" | "outbound"
+    attachment_count: int
+    thread_participant_count: int
+
+@dataclass(frozen=True, slots=True)
+class RelationshipFeatureSummary:
+    last_contact_at: datetime
+    days_since_last_message: float
+    messages_30d: int
+    distinct_threads_90d: int
+    attachments_30d: int
+    avg_reply_latency_seconds: Optional[float]
+    decay_bucket: int
+```
+
+**SQL Query for Event Extraction**:
+
+The feature aggregation job runs this query to extract all message events:
+
+```sql
+WITH sender_events AS (
+    SELECT 
+        dp_sender.person_id AS sender_person_id,
+        dp_recipient.person_id AS recipient_person_id,
+        d.content_timestamp,
+        d.thread_id,
+        d.attachment_count,
+        COUNT(DISTINCT dp_all.person_id) AS participant_count
+    FROM documents d
+    JOIN document_people dp_sender ON d.doc_id = dp_sender.doc_id AND dp_sender.role = 'sender'
+    JOIN document_people dp_recipient ON d.doc_id = dp_recipient.doc_id AND dp_recipient.role = 'recipient'
+    LEFT JOIN document_people dp_all ON d.doc_id = dp_all.doc_id
+    WHERE d.is_active_version = true
+        AND d.source_type IN ('imessage', 'sms', 'email')
+    GROUP BY dp_sender.person_id, dp_recipient.person_id, d.doc_id
+),
+bidirectional_events AS (
+    SELECT 
+        b.sender_person_id AS self_person_id,
+        b.recipient_person_id AS person_id,
+        b.content_timestamp,
+        b.thread_id,
+        'outbound' AS direction,
+        b.attachment_count,
+        b.participant_count
+    FROM sender_events b
+    UNION ALL
+    SELECT 
+        b.recipient_person_id AS self_person_id,
+        b.sender_person_id AS person_id,
+        b.content_timestamp,
+        b.thread_id,
+        'inbound' AS direction,
+        b.attachment_count,
+        b.participant_count
+    FROM sender_events b
+)
+SELECT 
+    self_person_id,
+    person_id,
+    content_timestamp,
+    thread_id,
+    direction,
+    attachment_count,
+    participant_count
+FROM bidirectional_events
+WHERE self_person_id <> person_id
+ORDER BY self_person_id, person_id, content_timestamp;
+```
+
+**Feature Calculation Logic**:
+
+```python
+def compute_features(events: List[RelationshipEvent]) -> RelationshipFeatureSummary:
+    """
+    Compute relationship features from chronological event list.
+    
+    Metrics:
+    - last_contact_at: Most recent message timestamp
+    - days_since_last_message: Time since last contact
+    - messages_30d: Count of messages in last 30 days
+    - distinct_threads_90d: Unique threads in last 90 days
+    - attachments_30d: Attachments exchanged in last 30 days
+    - avg_reply_latency_seconds: Average time between outbound and next inbound
+    - decay_bucket: Temporal bucket (0=today, 1=this week, 2=this month, etc.)
+    """
+    now = datetime.now(UTC)
+    last_contact = events[-1].timestamp
+    days_since = (now - last_contact).total_seconds() / 86400
+    
+    cutoff_30d = now - timedelta(days=30)
+    cutoff_90d = now - timedelta(days=90)
+    
+    messages_30d = sum(1 for e in events if e.timestamp >= cutoff_30d)
+    attachments_30d = sum(e.attachment_count for e in events if e.timestamp >= cutoff_30d)
+    threads_90d = len({e.thread_id for e in events if e.timestamp >= cutoff_90d and e.thread_id})
+    
+    # Reply latency: time between outbound message and next inbound
+    latencies = []
+    for i in range(len(events) - 1):
+        if events[i].direction == 'outbound' and events[i+1].direction == 'inbound':
+            delta = (events[i+1].timestamp - events[i].timestamp).total_seconds()
+            if 0 < delta < 86400:  # Only count replies within 24 hours
+                latencies.append(delta)
+    
+    avg_latency = sum(latencies) / len(latencies) if latencies else None
+    
+    # Decay bucket: 0=today, 1=this week, 2=this month, 3=this quarter, 4=older
+    if days_since < 1:
+        decay_bucket = 0
+    elif days_since < 7:
+        decay_bucket = 1
+    elif days_since < 30:
+        decay_bucket = 2
+    elif days_since < 90:
+        decay_bucket = 3
+    else:
+        decay_bucket = 4
+    
+    return RelationshipFeatureSummary(
+        last_contact_at=last_contact,
+        days_since_last_message=days_since,
+        messages_30d=messages_30d,
+        distinct_threads_90d=threads_90d,
+        attachments_30d=attachments_30d,
+        avg_reply_latency_seconds=avg_latency,
+        decay_bucket=decay_bucket
+    )
+```
+
+**Scoring Algorithm**:
+
+The relationship score combines multiple signals:
+
+```python
+def compute_score(features: RelationshipFeatureSummary) -> float:
+    """
+    Compute relationship strength score from features.
+    
+    Scoring factors:
+    - Recency: Exponential decay based on days_since_last_message
+    - Frequency: Message count with diminishing returns
+    - Engagement: Thread diversity, attachments, reply speed
+    """
+    # Recency factor (exponential decay, half-life = 30 days)
+    recency = math.exp(-features.days_since_last_message / 30.0)
+    
+    # Frequency factor (log scale with saturation)
+    frequency = math.log1p(features.messages_30d)
+    
+    # Engagement factor
+    thread_diversity = math.log1p(features.distinct_threads_90d)
+    attachment_bonus = min(features.attachments_30d * 0.1, 2.0)  # Cap at +2.0
+    reply_speed_bonus = 1.0
+    if features.avg_reply_latency_seconds:
+        # Faster replies = higher score (inverse of latency in hours)
+        reply_speed_bonus = 1.0 / (1.0 + features.avg_reply_latency_seconds / 3600)
+    
+    # Weighted combination
+    score = (
+        recency * 40.0 +           # Recency is most important
+        frequency * 20.0 +          # Frequency matters but saturates
+        thread_diversity * 15.0 +   # Multi-thread engagement
+        attachment_bonus * 10.0 +   # Multimedia richness
+        reply_speed_bonus * 15.0    # Responsiveness
+    )
+    
+    return round(score, 2)
+```
+
+**Scheduled Job Execution**:
+
+The feature aggregation job should run periodically (e.g., daily or hourly) to keep relationship scores current:
+
+```bash
+# Example: Daily refresh at 3am
+0 3 * * * python -m services.search_service.relationship_features --refresh-all
+```
+
+The job:
+1. Extracts all message events from `document_people` + `documents`
+2. Groups events by `(self_person_id, person_id)` pair
+3. Computes features for each pair
+4. Calculates scores
+5. Upserts to `crm_relationships` table
+
+**Performance Considerations**:
+- Full refresh scans all active documents; consider incremental updates for large datasets
+- Indexes on `document_people(role)` and `documents(content_timestamp)` are critical
+- Consider materialized view for event extraction query if dataset is very large
 
 ---
 
