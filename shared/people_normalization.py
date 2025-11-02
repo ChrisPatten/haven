@@ -33,6 +33,10 @@ class NormalizedIdentifier:
 
 def normalize_phone(value: str, default_region: str | None = None) -> str:
     cleaned = value.strip()
+    # Strip iMessage type prefixes (e.g., "P:+1234567890")
+    # These come from the Messages database on macOS
+    if cleaned and cleaned[0] in ('E', 'P', 'S') and len(cleaned) > 2 and cleaned[1] == ':':
+        cleaned = cleaned[2:]
     if phonenumbers is None:  # pragma: no cover - lightweight fallback when phonenumbers missing
         # Clean all characters except + and digits
         digits = re.sub(r"[^\+\d]", "", cleaned)
@@ -57,6 +61,10 @@ def normalize_phone(value: str, default_region: str | None = None) -> str:
 
 def normalize_email(value: str) -> str:
     cleaned = value.strip()
+    # Strip iMessage type prefixes (e.g., "E:email@example.com" or "P:+1234567890")
+    # These come from the Messages database on macOS
+    if cleaned and cleaned[0] in ('E', 'P', 'S') and len(cleaned) > 2 and cleaned[1] == ':':
+        cleaned = cleaned[2:]
     if "@" not in cleaned:
         raise ValueError(f"Invalid email address: {value}")
     local, domain = cleaned.split("@", 1)
@@ -108,3 +116,63 @@ def normalize_imessage_handle(value: str, default_region: str | None = None) -> 
         default_region=default_region,
         value_raw=value,
     )
+
+
+def find_duplicate_candidates(conn) -> list[dict]:
+    """
+    Find groups of people who share the same normalized phone or email identifier.
+    
+    Returns a list of dicts with structure:
+    {
+        'kind': 'phone' | 'email',
+        'value_canonical': 'normalized_value',
+        'person_ids': [uuid1, uuid2, ...],
+        'count': N
+    }
+    
+    Only includes groups with 2+ people (actual duplicates).
+    Excludes merged records (where merged_into IS NOT NULL).
+    """
+    from typing import Any
+    
+    try:
+        from psycopg.rows import dict_row
+    except ImportError:
+        dict_row = None
+    
+    query = """
+        SELECT
+            pi.kind,
+            pi.value_canonical,
+            ARRAY_AGG(DISTINCT pi.person_id) as person_ids,
+            COUNT(DISTINCT pi.person_id) as count
+        FROM person_identifiers pi
+        JOIN people p ON p.person_id = pi.person_id
+        WHERE pi.kind IN ('phone', 'email')
+          AND p.merged_into IS NULL
+          AND p.deleted = FALSE
+        GROUP BY pi.kind, pi.value_canonical
+        HAVING COUNT(DISTINCT pi.person_id) >= 2
+        ORDER BY count DESC, pi.kind, pi.value_canonical
+    """
+    
+    results: list[dict] = []
+    with conn.cursor(row_factory=dict_row) if dict_row else conn.cursor() as cur:
+        cur.execute(query)
+        for row in cur.fetchall():
+            if dict_row:
+                results.append({
+                    'kind': row['kind'],
+                    'value_canonical': row['value_canonical'],
+                    'person_ids': row['person_ids'],
+                    'count': row['count']
+                })
+            else:
+                results.append({
+                    'kind': row[0],
+                    'value_canonical': row[1],
+                    'person_ids': row[2],
+                    'count': row[3]
+                })
+    
+    return results

@@ -19,6 +19,7 @@ public actor ContactsHandler {
     private var lastRunStatus: String = "idle"
     private var lastRunStats: CollectorStats?
     private var lastRunError: String?
+    private var runRequest: CollectorRunRequest?
     
     private struct CollectorStats: Codable {
         var contactsScanned: Int
@@ -84,6 +85,9 @@ public actor ContactsHandler {
                 return HTTPResponse.badRequest(message: "Invalid request format: \(error.localizedDescription)")
             }
         }
+        
+        // Store request for access in collectContacts
+        self.runRequest = runRequest
         
         logger.info("Starting Contacts collector", metadata: [
             "mode": mode.rawValue,
@@ -199,6 +203,9 @@ public actor ContactsHandler {
         var warnings: [String] = []
         var errors: [String] = []
         
+        // Check if a VCF directory was specified
+        let vcfDirectory = runRequest?.collectorOptions?.vcf_directory
+        
         // In simulate mode, return mock data
         if mode == .simulate {
             logger.info("Running in simulate mode - returning mock contacts")
@@ -213,35 +220,51 @@ public actor ContactsHandler {
             return CollectionResult(warnings: warnings, errors: errors)
         }
         
-        // Real mode: access macOS Contacts
-        let contacts: [CNContact]
-        do {
-            contacts = try fetchContacts(limit: limit)
-        } catch {
-            let errorMsg = "Failed to fetch contacts: \(error.localizedDescription)"
-            logger.error(errorMsg)
-            errors.append(errorMsg)
-            throw ContactsError.contactAccessFailed(errorMsg)
-        }
-        
-        stats.contactsScanned = contacts.count
-        
-        // Convert CNContact to PersonPayloadModel
+        // Real mode: check for VCF directory first, otherwise access macOS Contacts
         var people: [PersonPayloadModel] = []
-        for contact in contacts {
+        
+        if let vcfDir = vcfDirectory, !vcfDir.isEmpty {
+            logger.info("Loading contacts from VCF directory", metadata: ["directory": vcfDir])
             do {
-                let person = try convertContactToPerson(contact: contact)
-                people.append(person)
-                stats.contactsProcessed += 1
+                people = try loadContactsFromVCFDirectory(path: vcfDir, limit: limit)
+                stats.contactsScanned = people.count
+                stats.contactsProcessed = people.count
             } catch {
-                let errorMsg = "Failed to convert contact: \(error.localizedDescription)"
-                logger.warning("contact_conversion_failed", metadata: [
-                    "error": error.localizedDescription,
-                    "identifier": contact.identifier
-                ])
-                warnings.append(errorMsg)
-                stats.contactsSkipped += 1
-                continue
+                let errorMsg = "Failed to load VCF contacts: \(error.localizedDescription)"
+                logger.error(errorMsg)
+                errors.append(errorMsg)
+                throw ContactsError.vcfLoadFailed(errorMsg)
+            }
+        } else {
+            // Use macOS Contacts
+            let contacts: [CNContact]
+            do {
+                contacts = try fetchContacts(limit: limit)
+            } catch {
+                let errorMsg = "Failed to fetch contacts: \(error.localizedDescription)"
+                logger.error(errorMsg)
+                errors.append(errorMsg)
+                throw ContactsError.contactAccessFailed(errorMsg)
+            }
+            
+            stats.contactsScanned = contacts.count
+            
+            // Convert CNContact to PersonPayloadModel
+            for contact in contacts {
+                do {
+                    let person = try convertContactToPerson(contact: contact)
+                    people.append(person)
+                    stats.contactsProcessed += 1
+                } catch {
+                    let errorMsg = "Failed to convert contact: \(error.localizedDescription)"
+                    logger.warning("contact_conversion_failed", metadata: [
+                        "error": error.localizedDescription,
+                        "identifier": contact.identifier
+                    ])
+                    warnings.append(errorMsg)
+                    stats.contactsSkipped += 1
+                    continue
+                }
             }
         }
         
@@ -400,6 +423,260 @@ public actor ContactsHandler {
             _ = CC_SHA256($0.baseAddress, CC_LONG(data.count), &hash)
         }
         return hash.map { String(format: "%02x", $0) }.joined()
+    }
+    
+    // MARK: - VCF Loading
+    
+    private func loadContactsFromVCFDirectory(path: String, limit: Int?) throws -> [PersonPayloadModel] {
+        let fileManager = FileManager.default
+        
+        // Expand ~ to home directory
+        let expandedPath = NSString(string: path).expandingTildeInPath
+        let directoryURL = URL(fileURLWithPath: expandedPath)
+        
+        // Check if directory exists
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: expandedPath, isDirectory: &isDir), isDir.boolValue else {
+            throw ContactsError.vcfLoadFailed("VCF directory does not exist: \(expandedPath)")
+        }
+        
+        // Get all VCF files
+        let vcfFiles: [URL]
+        do {
+            let allFiles = try fileManager.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil)
+            vcfFiles = allFiles.filter { $0.pathExtension.lowercased() == "vcf" }
+        } catch {
+            throw ContactsError.vcfLoadFailed("Failed to read VCF directory: \(error.localizedDescription)")
+        }
+        
+        logger.info("Found VCF files", metadata: ["count": String(vcfFiles.count), "directory": expandedPath])
+        
+        var people: [PersonPayloadModel] = []
+        
+        for vcfURL in vcfFiles {
+            do {
+                let fileData = try Data(contentsOf: vcfURL)
+                guard let content = String(data: fileData, encoding: .utf8) else {
+                    logger.warning("Failed to decode VCF file as UTF-8", metadata: ["file": vcfURL.lastPathComponent])
+                    continue
+                }
+                
+                let parsedContacts = try parseVCF(content: content)
+                logger.info("Parsed contacts from VCF", metadata: ["file": vcfURL.lastPathComponent, "count": String(parsedContacts.count)])
+                
+                people.append(contentsOf: parsedContacts)
+                
+                if let limit = limit, people.count >= limit {
+                    people = Array(people.prefix(limit))
+                    break
+                }
+            } catch {
+                logger.warning("Failed to parse VCF file", metadata: [
+                    "file": vcfURL.lastPathComponent,
+                    "error": error.localizedDescription
+                ])
+                continue
+            }
+        }
+        
+        logger.info("Total contacts loaded from VCF", metadata: ["count": String(people.count)])
+        return people
+    }
+    
+    private func parseVCF(content: String) throws -> [PersonPayloadModel] {
+        var people: [PersonPayloadModel] = []
+        
+        // Normalize line endings: handle both \r\n and \n
+        let normalizedContent = content.replacingOccurrences(of: "\r\n", with: "\n")
+        let lines = normalizedContent.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        
+        var currentVCard: [String: [String]] = [:]
+        var inVCard = false
+        
+        for line in lines {
+            let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+            
+            if trimmedLine.uppercased() == "BEGIN:VCARD" {
+                inVCard = true
+                currentVCard = [:]
+            } else if trimmedLine.uppercased() == "END:VCARD" {
+                if inVCard {
+                    do {
+                        let person = try parseVCardData(currentVCard)
+                        people.append(person)
+                    } catch {
+                        logger.warning("Failed to parse vcard data", metadata: ["error": error.localizedDescription])
+                    }
+                    inVCard = false
+                    currentVCard = [:]
+                }
+            } else if inVCard && !trimmedLine.isEmpty {
+                // Parse VCard property
+                parseVCardProperty(line: trimmedLine, into: &currentVCard)
+            }
+        }
+        
+        return people
+    }
+    
+    private func parseVCardProperty(line: String, into vcard: inout [String: [String]]) {
+        // VCard property parser
+        // Format: PROPERTY:value or PROPERTY;PARAM=value;PARAM=value:value
+        
+        // Handle line folding (continuation lines that start with space/tab)
+        let unfoldedLine = line
+        
+        let parts = unfoldedLine.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count >= 1 else { return }
+        
+        let keyPart = String(parts[0])
+        let value = parts.count > 1 ? String(parts[1]) : ""
+        
+        // Extract property name (ignore parameters for now)
+        let keyComponents = keyPart.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+        let key = String(keyComponents[0]).trimmingCharacters(in: .whitespaces).uppercased()
+        
+        guard !key.isEmpty && !value.trimmingCharacters(in: .whitespaces).isEmpty else {
+            return
+        }
+        
+        if vcard[key] == nil {
+            vcard[key] = []
+        }
+        vcard[key]?.append(value)
+    }
+    
+    private func parseVCardData(_ vcard: [String: [String]]) throws -> PersonPayloadModel {
+        var givenName: String? = nil
+        var familyName: String? = nil
+        var displayName: String? = nil
+        var organization: String? = nil
+        var nicknames: [String] = []
+        var emails: [ContactValueModel] = []
+        var phones: [ContactValueModel] = []
+        var urls: [ContactUrlModel] = []
+        var photoHash: String? = nil
+        
+        // Parse FN (formatted name)
+        if let fn = vcard["FN"]?.first {
+            displayName = fn.isEmpty ? nil : fn
+        }
+        
+        // Parse N (name: family;given;middle;prefix;suffix)
+        if let n = vcard["N"]?.first {
+            let nameParts = n.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+            if nameParts.count > 0 && !nameParts[0].isEmpty {
+                familyName = nameParts[0]
+            }
+            if nameParts.count > 1 && !nameParts[1].isEmpty {
+                givenName = nameParts[1]
+            }
+        }
+        
+        // Parse ORG
+        if let org = vcard["ORG"]?.first, !org.isEmpty {
+            organization = org
+        }
+        
+        // Parse NICKNAME
+        for nick in vcard["NICKNAME"] ?? [] {
+            if !nick.isEmpty {
+                nicknames.append(nick)
+            }
+        }
+        
+        // Parse EMAIL
+        for emailLine in vcard["EMAIL"] ?? [] {
+            let emailValue = emailLine.trimmingCharacters(in: .whitespaces)
+            if !emailValue.isEmpty {
+                emails.append(ContactValueModel(
+                    value: emailValue,
+                    value_raw: emailValue,
+                    label: "other"
+                ))
+            }
+        }
+        
+        // Parse TEL
+        for telLine in vcard["TEL"] ?? [] {
+            let telValue = telLine.trimmingCharacters(in: .whitespaces)
+            if !telValue.isEmpty {
+                phones.append(ContactValueModel(
+                    value: telValue,
+                    value_raw: telValue,
+                    label: "other"
+                ))
+            }
+        }
+        
+        // Parse URL
+        for urlLine in vcard["URL"] ?? [] {
+            let urlValue = urlLine.trimmingCharacters(in: .whitespaces)
+            if !urlValue.isEmpty {
+                urls.append(ContactUrlModel(label: "other", url: urlValue))
+            }
+        }
+        
+        // Parse PHOTO (base64 encoded)
+        if let photoData = vcard["PHOTO"]?.first, !photoData.isEmpty {
+            // Try to extract base64 data - typically in format like "data:image/jpeg;base64,xxx"
+            if let base64String = extractBase64FromPhoto(photoData),
+               let imageData = Data(base64Encoded: base64String) {
+                photoHash = sha256(data: imageData)
+            }
+        }
+        
+        // Generate external ID
+        let externalId: String
+        if let fn = displayName {
+            externalId = "vcf_\(fn.lowercased().replacingOccurrences(of: " ", with: "_"))"
+        } else if let given = givenName, let family = familyName {
+            externalId = "vcf_\(given.lowercased())_\(family.lowercased())"
+        } else {
+            externalId = "vcf_\(UUID().uuidString)"
+        }
+        
+        // Build display name
+        let finalDisplayName: String
+        if let dn = displayName {
+            finalDisplayName = dn
+        } else if let given = givenName, let family = familyName {
+            finalDisplayName = "\(given) \(family)"
+        } else if let given = givenName {
+            finalDisplayName = given
+        } else if let family = familyName {
+            finalDisplayName = family
+        } else {
+            finalDisplayName = organization ?? externalId
+        }
+        
+        return PersonPayloadModel(
+            external_id: externalId,
+            display_name: finalDisplayName,
+            given_name: givenName,
+            family_name: familyName,
+            organization: organization,
+            nicknames: nicknames,
+            notes: nil,
+            photo_hash: photoHash,
+            emails: emails,
+            phones: phones,
+            addresses: [],
+            urls: urls
+        )
+    }
+    
+    private func extractBase64FromPhoto(_ photoData: String) -> String? {
+        // Handle various PHOTO encoding formats
+        if photoData.contains("base64,") {
+            let components = photoData.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
+            return components.count > 1 ? String(components[1]) : nil
+        } else if photoData.hasPrefix("base64:") {
+            return String(photoData.dropFirst(7))
+        } else {
+            // Assume it's raw base64
+            return photoData
+        }
     }
     
     private func submitContactsToGateway(contacts: [PersonPayloadModel], stats: inout CollectorStats) async throws {
@@ -690,6 +967,7 @@ public actor ContactsHandler {
 enum ContactsError: Error, LocalizedError {
     case contactAccessDenied(String)
     case contactAccessFailed(String)
+    case vcfLoadFailed(String)
     case invalidGatewayResponse
     case gatewayHttpError(Int, String)
     
@@ -699,6 +977,8 @@ enum ContactsError: Error, LocalizedError {
             return "Contacts access denied: \(message)"
         case .contactAccessFailed(let message):
             return "Failed to access contacts: \(message)"
+        case .vcfLoadFailed(let message):
+            return "Failed to load VCF contacts: \(message)"
         case .invalidGatewayResponse:
             return "Invalid gateway response"
         case .gatewayHttpError(let code, let body):

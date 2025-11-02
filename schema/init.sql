@@ -257,6 +257,7 @@ CREATE TABLE people (
     source TEXT NOT NULL,
     version INTEGER NOT NULL DEFAULT 1,
     deleted BOOLEAN NOT NULL DEFAULT false,
+    merged_into UUID REFERENCES people(person_id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -312,6 +313,60 @@ CREATE TABLE people_conflict_log (
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Contacts merge audit log (contact merge history and audit trail)
+CREATE TABLE contacts_merge_audit (
+    merge_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    target_person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE RESTRICT,
+    source_person_ids UUID[] NOT NULL,
+    actor TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    merge_metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Identifier owner (atomic ownership tracking for canonical identifiers during ingestion)
+CREATE TABLE identifier_owner (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    kind TEXT NOT NULL,
+    value_canonical TEXT NOT NULL,
+    owner_person_id UUID REFERENCES people(person_id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT identifier_owner_unique UNIQUE (kind, value_canonical)
+);
+
+-- Append audit (audit trail for append operations, separate from merge audit)
+CREATE TABLE append_audit (
+    append_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    target_person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE RESTRICT,
+    incoming_person_id UUID NOT NULL REFERENCES people(person_id) ON DELETE RESTRICT,
+    identifiers_appended JSONB DEFAULT '[]'::jsonb,
+    justification TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Comments for identifier_owner table
+COMMENT ON TABLE identifier_owner IS 'Atomic ownership tracking for canonical identifiers during ingestion. Ensures only one person can own a canonical identifier at a time.';
+COMMENT ON COLUMN identifier_owner.id IS 'UUID primary key for the identifier ownership record.';
+COMMENT ON COLUMN identifier_owner.kind IS 'Type of identifier (phone, email, etc.). Matches identifier_kind enum or TEXT.';
+COMMENT ON COLUMN identifier_owner.value_canonical IS 'Canonical (normalized) value of the identifier. Combined with kind forms unique identifier.';
+COMMENT ON COLUMN identifier_owner.owner_person_id IS 'UUID reference to people table. NULL if identifier is unclaimed. ON DELETE SET NULL allows person deletion to clear ownership.';
+COMMENT ON COLUMN identifier_owner.created_at IS 'TIMESTAMPTZ when the identifier ownership record was created.';
+COMMENT ON COLUMN identifier_owner.updated_at IS 'TIMESTAMPTZ of the last update to this ownership record.';
+
+-- Comments for append_audit table
+COMMENT ON TABLE append_audit IS 'Audit trail for append operations (separate from contacts_merge_audit which tracks merges). Records when person data is appended to an existing person during ingestion.';
+COMMENT ON COLUMN append_audit.append_id IS 'UUID primary key for the append audit record.';
+COMMENT ON COLUMN append_audit.source IS 'Source system that triggered the append (e.g., "contacts", "email", "imessage").';
+COMMENT ON COLUMN append_audit.external_id IS 'External ID from the source system that triggered the append.';
+COMMENT ON COLUMN append_audit.target_person_id IS 'UUID reference to people table: the person that received the appended data.';
+COMMENT ON COLUMN append_audit.incoming_person_id IS 'UUID reference to people table: the incoming person that was appended to the target.';
+COMMENT ON COLUMN append_audit.identifiers_appended IS 'JSONB array of identifiers that were appended (e.g., [{"kind": "phone", "value_canonical": "+1234567890"}]).';
+COMMENT ON COLUMN append_audit.justification IS 'Text explanation of why the append happened (e.g., "identifier match on phone +1234567890").';
+COMMENT ON COLUMN append_audit.created_at IS 'TIMESTAMPTZ when the append operation occurred.';
 
 -- Document ↔ People junction table (links documents to normalized person entities)
 CREATE TABLE document_people (
@@ -424,6 +479,7 @@ CREATE INDEX IF NOT EXISTS idx_source_change_tokens_updated ON source_change_tok
 CREATE INDEX IF NOT EXISTS idx_people_display_name ON people(display_name);
 CREATE INDEX IF NOT EXISTS idx_people_deleted ON people(deleted) WHERE deleted = false;
 CREATE INDEX IF NOT EXISTS idx_people_source ON people(source);
+CREATE INDEX IF NOT EXISTS idx_people_merged_into ON people(merged_into) WHERE merged_into IS NOT NULL;
 
 -- Person identifiers
 CREATE INDEX IF NOT EXISTS idx_person_identifiers_lookup ON person_identifiers(kind, value_canonical);
@@ -443,6 +499,19 @@ CREATE INDEX IF NOT EXISTS idx_person_urls_person_id ON person_urls(person_id);
 CREATE INDEX IF NOT EXISTS idx_people_conflict_log_source ON people_conflict_log(source, external_id);
 CREATE INDEX IF NOT EXISTS idx_people_conflict_log_created_at ON people_conflict_log(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_people_conflict_log_identifier ON people_conflict_log(kind, value_canonical);
+
+-- Contacts merge audit
+CREATE INDEX IF NOT EXISTS idx_contacts_merge_audit_target ON contacts_merge_audit(target_person_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_merge_audit_created ON contacts_merge_audit(created_at DESC);
+
+-- Identifier owner
+CREATE INDEX IF NOT EXISTS idx_identifier_owner_lookup ON identifier_owner(kind, value_canonical);
+CREATE INDEX IF NOT EXISTS idx_identifier_owner_person ON identifier_owner(owner_person_id) WHERE owner_person_id IS NOT NULL;
+
+-- Append audit
+CREATE INDEX IF NOT EXISTS idx_append_audit_target ON append_audit(target_person_id);
+CREATE INDEX IF NOT EXISTS idx_append_audit_created ON append_audit(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_append_audit_source ON append_audit(source, external_id);
 
 -- Document ↔ People junction
 CREATE INDEX IF NOT EXISTS idx_document_people_person ON document_people(person_id);
@@ -523,6 +592,12 @@ CREATE TRIGGER trg_people_set_updated
 DROP TRIGGER IF EXISTS trg_crm_relationships_set_updated ON crm_relationships;
 CREATE TRIGGER trg_crm_relationships_set_updated
     BEFORE UPDATE ON crm_relationships
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_identifier_owner_set_updated ON identifier_owner;
+CREATE TRIGGER trg_identifier_owner_set_updated
+    BEFORE UPDATE ON identifier_owner
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
 

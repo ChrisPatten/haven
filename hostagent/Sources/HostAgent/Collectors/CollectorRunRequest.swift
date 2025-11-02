@@ -43,6 +43,24 @@ public struct CollectorRunRequest: Codable {
         }
     }
 
+    public struct CollectorOptions: Codable {
+        public let vcf_directory: String?
+
+        enum CodingKeys: String, CodingKey {
+            case vcf_directory = "vcf_directory"
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.vcf_directory = try container.decodeIfPresent(String.self, forKey: .vcf_directory)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeIfPresent(vcf_directory, forKey: .vcf_directory)
+        }
+    }
+
     public let mode: Mode?
     public let limit: Int?
     public let order: Order?
@@ -52,6 +70,7 @@ public struct CollectorRunRequest: Codable {
     public let timeWindow: Int?
     public let batch: Bool?
     public let batchSize: Int?
+    public let collectorOptions: CollectorOptions?
 
     enum CodingKeys: String, CodingKey {
         case mode
@@ -62,6 +81,7 @@ public struct CollectorRunRequest: Codable {
         case timeWindow = "time_window"
         case batch
         case batchSize = "batch_size"
+        case collectorOptions = "collector_options"
     }
 
     // Helper dynamic key type to detect unknown fields at top level
@@ -136,6 +156,8 @@ public struct CollectorRunRequest: Codable {
         } else {
             self.batchSize = nil
         }
+
+        self.collectorOptions = try keyed.decodeIfPresent(CollectorOptions.self, forKey: .collectorOptions)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -148,6 +170,7 @@ public struct CollectorRunRequest: Codable {
         try container.encodeIfPresent(timeWindow, forKey: .timeWindow)
         try container.encodeIfPresent(batch, forKey: .batch)
         try container.encodeIfPresent(batchSize, forKey: .batchSize)
+        try container.encodeIfPresent(collectorOptions, forKey: .collectorOptions)
     }
 
     // ISO8601 parsing helper used by nested types

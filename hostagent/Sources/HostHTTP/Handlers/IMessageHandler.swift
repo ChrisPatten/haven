@@ -579,7 +579,7 @@ public actor IMessageHandler {
                 stats.attachmentsProcessed += message.attachments.count
             }
 
-            let document = try buildDocument(message: message, thread: thread, attachments: enrichedAttachments)
+            let document = try buildDocument(message: message, thread: thread, attachments: enrichedAttachments, db: db)
             currentBatch.append(document)
             currentBatchTimestamps.append(messageDate)
             allDocuments.append(document)
@@ -869,6 +869,7 @@ public actor IMessageHandler {
         let isRead: Bool
         let chatId: Int64
         let service: String?
+        let account: String?
         let attachments: [AttachmentData]
     }
     
@@ -909,7 +910,7 @@ public actor IMessageHandler {
 
      var query = """
          SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.handle_id, m.date, m.date_read,
-             m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service
+             m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service, m.account
          FROM message m
          JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
 
@@ -976,6 +977,13 @@ public actor IMessageHandler {
                 service = nil
             }
             
+            let account: String?
+            if let accountPtr = sqlite3_column_text(stmt, 12) {
+                account = String(cString: accountPtr)
+            } else {
+                account = nil
+            }
+            
             // Fetch attachments for this message
             let attachments = try fetchAttachments(db: db, messageRowId: rowId)
             
@@ -992,6 +1000,7 @@ public actor IMessageHandler {
                 isRead: isRead,
                 chatId: chatId,
                 service: service,
+                account: account,
                 attachments: attachments
             ))
         }
@@ -1072,7 +1081,7 @@ public actor IMessageHandler {
     private func fetchMessageByRowId(db: OpaquePointer, rowId: Int64) throws -> MessageData? {
         let query = """
             SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.handle_id, m.date, m.date_read,
-                   m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service
+                   m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service, m.account
             FROM message m
             JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
             WHERE m.ROWID = ?
@@ -1128,6 +1137,13 @@ public actor IMessageHandler {
                 service = nil
             }
 
+            let account: String?
+            if let accountPtr = sqlite3_column_text(stmt, 12) {
+                account = String(cString: accountPtr)
+            } else {
+                account = nil
+            }
+
             let attachments = try fetchAttachments(db: db, messageRowId: rowId)
 
             return MessageData(
@@ -1143,6 +1159,7 @@ public actor IMessageHandler {
                 isRead: isRead,
                 chatId: chatId,
                 service: service,
+                account: account,
                 attachments: attachments
             )
         }
@@ -1371,6 +1388,7 @@ public actor IMessageHandler {
         return participants
     }
     
+    
     private func fetchAttachments(db: OpaquePointer, messageRowId: Int64) throws -> [AttachmentData] {
         var attachments: [AttachmentData] = []
         
@@ -1451,7 +1469,7 @@ public actor IMessageHandler {
         return !hasText && !hasAttributedBody && !hasAttachments
     }
     
-    private func buildDocument(message: MessageData, thread: ThreadData, attachments: [[String: Any]]) throws -> [String: Any] {
+    private func buildDocument(message: MessageData, thread: ThreadData, attachments: [[String: Any]], db: OpaquePointer?) throws -> [String: Any] {
         // Extract message text
         var messageText = message.text ?? ""
         if messageText.isEmpty, let attrBody = message.attributedBody {
@@ -1476,8 +1494,14 @@ public actor IMessageHandler {
         let ingestionTimestamp = ISO8601DateFormatter().string(from: Date())
         
         // Build people array
-        let sender = message.isFromMe ? "me" : (thread.participants.first ?? "unknown")
-        let people = buildPeople(sender: sender, participants: thread.participants, isFromMe: message.isFromMe)
+        // When isFromMe, use the message account (your iMessage account) as the sender
+        var senderIdentifier: String = "me"
+        if message.isFromMe {
+            senderIdentifier = message.account ?? "me"
+        } else {
+            senderIdentifier = thread.participants.first ?? "unknown"
+        }
+        let people = buildPeople(sender: senderIdentifier, participants: thread.participants, isFromMe: message.isFromMe)
         
         // Build thread payload
         let threadExternalId = "imessage:\(thread.guid)"
@@ -1547,14 +1571,34 @@ public actor IMessageHandler {
     private func buildPeople(sender: String, participants: [String], isFromMe: Bool) -> [[String: Any]] {
         var people: [[String: Any]] = []
         
-        if !sender.isEmpty && sender != "me" {
+        // When isFromMe is true, sender will be the account email (e.g., "E:mrwhistler@gmail.com")
+        // When isFromMe is false, sender is the first participant
+        if isFromMe {
+            // For messages we sent, add the account as the sender
+            if !sender.isEmpty && sender != "me" {
+                people.append([
+                    "identifier": sender,
+                    "identifier_type": inferIdentifierType(sender),
+                    "role": "sender"
+                ])
+            } else {
+                // Fallback to "me" if account not available
+                people.append([
+                    "identifier": "me",
+                    "identifier_type": "imessage",
+                    "role": "sender"
+                ])
+            }
+        } else if !sender.isEmpty && sender != "unknown" {
+            // For messages we received, add the sender (first participant) as the sender
             people.append([
                 "identifier": sender,
                 "identifier_type": inferIdentifierType(sender),
-                "role": isFromMe ? "recipient" : "sender"
+                "role": "sender"
             ])
         }
         
+        // Add all participants as recipients (excluding the sender)
         for participant in participants where participant != sender {
             people.append([
                 "identifier": participant,

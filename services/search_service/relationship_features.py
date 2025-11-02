@@ -31,6 +31,7 @@ class RelationshipEvent:
     thread_id: Optional[UUID]
     direction: str  # "inbound" | "outbound"
     attachment_count: int
+    thread_participant_count: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +84,65 @@ def _attachments_within(events: Iterable[RelationshipEvent], since: datetime) ->
     return total
 
 
+def _reciprocal_counts_within(
+    events: List[RelationshipEvent], since: datetime, reciprocal_window: timedelta
+) -> tuple[int, int]:
+    """Count messages and attachments within a window but only when the other party
+    also posts in the same thread within +/- reciprocal_window of a message.
+
+    This reduces inflation from broadcast/group messages where the two people
+    are not interacting directly.
+    Returns (message_count, attachment_count).
+    """
+    # Group events by thread_id (None-treated separately)
+    thread_map: dict[Optional[UUID], List[RelationshipEvent]] = {}
+    for evt in events:
+        thread_map.setdefault(evt.thread_id, []).append(evt)
+
+    msg_count = 0
+    att_count = 0
+
+    for thread_id, t_events in thread_map.items():
+        # Sort events for the thread
+        sorted_evts = sorted(t_events, key=lambda e: e.timestamp)
+
+        # Determine participant count for the thread (all events in the thread share this)
+        pcount = sorted_evts[0].thread_participant_count if sorted_evts else 0
+
+        # If thread_id is None or only two people in the thread, treat as direct messages and count normally
+        if thread_id is None or pcount <= 2:
+            for e in sorted_evts:
+                if e.timestamp >= since:
+                    msg_count += 1
+                    att_count += max(e.attachment_count, 0)
+            continue
+
+        # For threads with an id (possibly group chats), count an event only if
+        # there exists at least one event from the opposite direction within
+        # reciprocal_window of the event timestamp.
+        for i, e in enumerate(sorted_evts):
+            if e.timestamp < since:
+                continue
+            # look for any event in the thread with opposite direction within window
+            lo = e.timestamp - reciprocal_window
+            hi = e.timestamp + reciprocal_window
+            reciprocal_found = False
+            # Scan nearby events (small lists; scanning full thread acceptable)
+            for other in sorted_evts:
+                if other is e:
+                    continue
+                if other.direction == e.direction:
+                    continue
+                if lo <= other.timestamp <= hi:
+                    reciprocal_found = True
+                    break
+            if reciprocal_found:
+                msg_count += 1
+                att_count += max(e.attachment_count, 0)
+
+    return msg_count, att_count
+
+
 def _messages_within(events: Iterable[RelationshipEvent], since: datetime) -> int:
     return sum(1 for event in events if event.timestamp >= since)
 
@@ -90,6 +150,77 @@ def _messages_within(events: Iterable[RelationshipEvent], since: datetime) -> in
 def _distinct_threads_within(events: Iterable[RelationshipEvent], since: datetime) -> int:
     threads = {evt.thread_id for evt in events if evt.thread_id and evt.timestamp >= since}
     return len(threads)
+
+
+def _compute_relationship_score(summary: RelationshipFeatureSummary) -> float:
+    """
+    Compute relationship strength score from feature summary.
+    
+    Score is based on:
+    - Recency: contacts with recent messages score higher
+    - Frequency: more messages in 30d boost score
+    - Depth: more distinct threads in 90d boost score
+    - Engagement: attachments indicate richer communication
+    
+    Returns a score roughly 0.0-100.0 where higher = stronger relationship.
+    """
+    score = 0.0
+    
+    # Recency boost: strong weight on how recently we've communicated
+    # If last contact was today: +50, this week: +40, this month: +20, etc.
+    if summary.days_since_last_message < 1:
+        score += 50.0
+    elif summary.days_since_last_message < 3:
+        score += 45.0
+    elif summary.days_since_last_message < 7:
+        score += 40.0
+    elif summary.days_since_last_message < 14:
+        score += 30.0
+    elif summary.days_since_last_message < 30:
+        score += 20.0
+    elif summary.days_since_last_message < 90:
+        score += 10.0
+    else:
+        score += 2.0  # minimal score for old contacts
+    
+    # Frequency boost: messages in last 30 days
+    # 1+ msg = +5, 5+ msgs = +10, 20+ msgs = +15, 50+ msgs = +20
+    if summary.messages_30d >= 50:
+        score += 20.0
+    elif summary.messages_30d >= 20:
+        score += 15.0
+    elif summary.messages_30d >= 5:
+        score += 10.0
+    elif summary.messages_30d >= 1:
+        score += 5.0
+    
+    # Depth boost: distinct threads (indicates ongoing relationship across topics)
+    # Each thread beyond first adds a small amount
+    if summary.distinct_threads_90d >= 3:
+        score += 15.0
+    elif summary.distinct_threads_90d >= 2:
+        score += 8.0
+    elif summary.distinct_threads_90d >= 1:
+        score += 3.0
+    
+    # Engagement boost: attachments indicate richer communication
+    if summary.attachments_30d >= 5:
+        score += 10.0
+    elif summary.attachments_30d >= 2:
+        score += 5.0
+    elif summary.attachments_30d >= 1:
+        score += 2.0
+    
+    # Reply latency penalty: slower replies indicate less engaged relationship
+    if summary.avg_reply_latency_seconds is not None:
+        hours_to_reply = summary.avg_reply_latency_seconds / 3600.0
+        if hours_to_reply > 48:
+            score *= 0.8  # slow responder
+        elif hours_to_reply > 24:
+            score *= 0.9  # somewhat slow
+        # fast responders get no penalty
+    
+    return min(score, 100.0)  # cap at 100
 
 
 def summarize_events(events: List[RelationshipEvent], *, now: Optional[datetime] = None) -> RelationshipFeatureSummary:
@@ -105,9 +236,9 @@ def summarize_events(events: List[RelationshipEvent], *, now: Optional[datetime]
 
     thirty_days_ago = effective_now - timedelta(days=30)
     ninety_days_ago = effective_now - timedelta(days=90)
-
-    messages_30d = _messages_within(ordered, thirty_days_ago)
-    attachments_30d = _attachments_within(ordered, thirty_days_ago)
+    # Reciprocal window: consider replies/interaction within 48 hours in group threads
+    reciprocal_window = timedelta(hours=48)
+    messages_30d, attachments_30d = _reciprocal_counts_within(ordered, thirty_days_ago, reciprocal_window)
     distinct_threads_90d = _distinct_threads_within(ordered, ninety_days_ago)
 
     latencies: List[float] = []
@@ -139,9 +270,17 @@ WITH base AS (
         d.content_timestamp,
         d.has_attachments,
         COALESCE(d.attachment_count, 0) AS attachment_count,
+        COALESCE(t.participant_count, 1) AS thread_participant_count,
         sender.person_id AS sender_person_id,
         recipient.person_id AS recipient_person_id
     FROM documents d
+    LEFT JOIN (
+        SELECT d2.thread_id, COUNT(DISTINCT dp.person_id) AS participant_count
+        FROM documents d2
+        JOIN document_people dp ON dp.doc_id = d2.doc_id
+        WHERE d2.thread_id IS NOT NULL
+        GROUP BY d2.thread_id
+    ) t ON t.thread_id = d.thread_id
     JOIN document_people sender
       ON sender.doc_id = d.doc_id
      AND sender.role = 'sender'
@@ -161,7 +300,8 @@ events AS (
         'outbound'::text AS direction,
         b.content_timestamp,
         b.thread_id,
-        CASE WHEN b.has_attachments THEN b.attachment_count ELSE 0 END AS attachment_count
+        CASE WHEN b.has_attachments THEN b.attachment_count ELSE 0 END AS attachment_count,
+        b.thread_participant_count
     FROM base b
     UNION ALL
     SELECT
@@ -170,7 +310,8 @@ events AS (
         'inbound'::text AS direction,
         b.content_timestamp,
         b.thread_id,
-        CASE WHEN b.has_attachments THEN b.attachment_count ELSE 0 END AS attachment_count
+        CASE WHEN b.has_attachments THEN b.attachment_count ELSE 0 END AS attachment_count,
+        b.thread_participant_count
     FROM base b
 )
 SELECT
@@ -180,6 +321,7 @@ SELECT
     content_timestamp,
     thread_id,
     attachment_count
+    , thread_participant_count
 FROM events
 WHERE self_person_id <> person_id
 ORDER BY self_person_id, person_id, content_timestamp
@@ -189,7 +331,7 @@ ORDER BY self_person_id, person_id, content_timestamp
 class RelationshipFeatureAggregator:
     """Loads message interactions from Postgres and persists aggregated relationship features."""
 
-    def __init__(self, conn: "psycopg.Connection[Any]") -> None:
+    def __init__(self, conn: Any) -> None:
         if psycopg is None:  # pragma: no cover - guard when psycopg missing
             raise RuntimeError("psycopg is required to use RelationshipFeatureAggregator")
         self.conn = conn
@@ -211,6 +353,7 @@ class RelationshipFeatureAggregator:
                     thread_id=row.get("thread_id"),
                     direction=str(row["direction"]),
                     attachment_count=int(row.get("attachment_count") or 0),
+                    thread_participant_count=int(row.get("thread_participant_count") or 1),
                 )
 
     def compute(self, *, now: Optional[datetime] = None) -> Dict[Tuple[UUID, UUID], RelationshipFeatureSummary]:
@@ -243,7 +386,7 @@ class RelationshipFeatureAggregator:
                 {
                     "self_person_id": self_id,
                     "person_id": person_id,
-                    "score": 0.0,
+                    "score": _compute_relationship_score(summary),
                     "last_contact_at": summary.last_contact_at,
                     "decay_bucket": summary.decay_bucket,
                     "edge_features": Json(summary.as_edge_features()),
@@ -255,9 +398,11 @@ class RelationshipFeatureAggregator:
             VALUES (%(self_person_id)s, %(person_id)s, %(score)s, %(last_contact_at)s, %(decay_bucket)s, %(edge_features)s)
             ON CONFLICT (self_person_id, person_id)
             DO UPDATE SET
+                score = EXCLUDED.score,
                 last_contact_at = EXCLUDED.last_contact_at,
                 decay_bucket = EXCLUDED.decay_bucket,
-                edge_features = EXCLUDED.edge_features
+                edge_features = EXCLUDED.edge_features,
+                updated_at = NOW()
         """
         with self.conn.cursor() as cur:
             cur.executemany(sql, payloads)

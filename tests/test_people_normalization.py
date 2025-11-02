@@ -121,3 +121,48 @@ def test_normalize_phone_contact_matching_scenario():
     # Both should normalize to the same canonical form
     assert normalize_phone(stored_number, default_region="US") == normalize_phone(incoming_number, default_region="US")
     assert normalize_phone(stored_number, default_region="US") == "+15084109572"
+
+
+# Tests for iMessage prefix stripping (hv-60)
+def test_normalize_email_with_e_prefix():
+    """Email identifiers from iMessage database have E: prefix that should be stripped"""
+    assert normalize_email("E:mrwhistler@gmail.com") == "mrwhistler@gmail.com"
+
+
+def test_normalize_email_with_s_prefix():
+    """Email identifiers from iMessage database may have S: prefix (SMS) that should be stripped"""
+    assert normalize_email("S:test@example.com") == "test@example.com"
+
+
+def test_normalize_phone_with_p_prefix():
+    """Phone identifiers from iMessage database have P: prefix that should be stripped"""
+    assert normalize_phone("P:+17175805345") == "+17175805345"
+
+
+def test_normalize_phone_p_prefix_with_formatting():
+    """Phone identifiers from iMessage with P: prefix and formatting should be normalized"""
+    assert normalize_phone("P:(717) 580-5345", default_region="US") == "+17175805345"
+
+
+def test_normalize_email_without_prefix_unchanged():
+    """Emails without prefix should work as before"""
+    assert normalize_email("test@example.com") == "test@example.com"
+
+
+def test_normalize_phone_without_prefix_unchanged():
+    """Phones without prefix should work as before"""
+    assert normalize_phone("+15085551234") == "+15085551234"
+
+
+def test_normalize_identifier_with_email_prefix():
+    """normalize_identifier should handle email with E: prefix"""
+    ident = normalize_identifier(IdentifierKind.EMAIL, "E:mrwhistler@gmail.com")
+    assert ident.value_canonical == "mrwhistler@gmail.com"
+    assert ident.kind == IdentifierKind.EMAIL
+
+
+def test_normalize_identifier_with_phone_prefix():
+    """normalize_identifier should handle phone with P: prefix"""
+    ident = normalize_identifier(IdentifierKind.PHONE, "P:+17175805345")
+    assert ident.value_canonical == "+17175805345"
+    assert ident.kind == IdentifierKind.PHONE

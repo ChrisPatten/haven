@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional guard for tests
 from .models_v2 import Document, DocumentFile
 
 
-DEFAULT_CONN_STR = "postgresql://postgres:postgres@localhost:5432/haven_v2"
+DEFAULT_CONN_STR = "postgresql://postgres:postgres@localhost:5432/haven"
 
 
 def get_conn_str() -> str:

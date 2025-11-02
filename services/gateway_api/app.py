@@ -9,7 +9,7 @@ import os
 import tempfile
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Union, Literal
 
@@ -502,6 +502,63 @@ class PeopleSearchResponse(BaseModel):
     limit: int
     offset: int
     results: List[PeopleSearchHit]
+
+
+class RelationshipTop(BaseModel):
+    """Single relationship in top relationships response."""
+    person_id: str
+    score: float
+    last_contact_at: datetime
+    display_name: Optional[str] = None
+    emails: List[str] = Field(default_factory=list)
+    phones: List[str] = Field(default_factory=list)
+    organization: Optional[str] = None
+
+
+class TopRelationshipsResponse(BaseModel):
+    """Response for GET /v1/crm/relationships/top."""
+    window: str
+    window_start: datetime
+    window_end: datetime
+    limit: int
+    offset: int
+    total_count: int
+    relationships: List[RelationshipTop]
+
+
+class AdminContactMergeRequest(BaseModel):
+    """Request to merge duplicate contacts."""
+    target_person_id: str
+    source_person_ids: List[str]
+    strategy: str = "prefer_target"
+    dry_run: bool = True
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class AdminContactMergeResult(BaseModel):
+    """Result of a contact merge operation."""
+    merge_id: str
+    target_id: str
+    source_ids: List[str]
+    strategy: str
+    actor: str
+    updated_identifiers: int
+    updated_source_maps: int
+    updated_addresses: int
+    updated_urls: int
+    updated_document_people: int
+    updated_crm_relationships: int
+    status: str = "merged"
+    dry_run: bool = False
+
+
+class AdminContactMergeResponse(BaseModel):
+    """Response for contact merge endpoint."""
+    success: bool
+    merge_id: Optional[str] = None
+    result: Optional[AdminContactMergeResult] = None
+    error: Optional[str] = None
+    correlation_id: Optional[str] = None
 
 
 @dataclass
@@ -1200,6 +1257,95 @@ def require_catalog_token(request: Request) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Invalid catalog token"
         )
+
+
+# ============================================================================
+# CRM Relationship Helpers
+# ============================================================================
+
+
+def _parse_window_parameter(window_param: Optional[str]) -> tuple[str, int]:
+    """
+    Parse window parameter like "90d", "30d", "365d" into days.
+
+    Args:
+        window_param: String like "90d", "30d", etc. or None for default.
+
+    Returns:
+        Tuple of (window_str, days_int)
+
+    Raises:
+        HTTPException: If window format is invalid.
+    """
+    if not window_param:
+        # Default to 90 days
+        return "90d", 90
+
+    # Parse format: <number>d
+    import re
+
+    match = re.match(r"^(\d+)d$", window_param.strip().lower())
+    if not match:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid window parameter; expected format: '<number>d' (e.g., '90d', '30d')",
+        )
+
+    days = int(match.group(1))
+    if days <= 0 or days > 3650:  # Allow up to ~10 years
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Window must be between 1 and 3650 days",
+        )
+
+    return window_param, days
+
+
+def _build_top_relationships_query(
+    window_days: int,
+    limit: int,
+    offset: int,
+    self_person_id: Optional[str] = None,
+) -> tuple[str, List[Any]]:
+    """
+    Build query for top relationships with person metadata join.
+
+    Returns tuple of (sql_query, params)
+    """
+    where_clause = "cr.last_contact_at >= NOW() - INTERVAL '%s days'"
+    params: List[Any] = [window_days]
+    if self_person_id:
+        where_clause += " AND cr.self_person_id = %s"
+        params.append(self_person_id)
+
+    sql = f"""
+        /* Pick the best relationship edge per person (highest score),
+           then order the resulting persons by score desc. */
+        SELECT
+            t.person_id,
+            t.score,
+            t.last_contact_at,
+            p.display_name,
+            p.organization,
+            p.photo_hash
+        FROM (
+            SELECT DISTINCT ON (cr.person_id)
+                cr.person_id,
+                cr.score,
+                cr.last_contact_at,
+                cr.self_person_id,
+                cr.edge_features
+            FROM crm_relationships cr
+            WHERE {where_clause}
+            ORDER BY cr.person_id, cr.score DESC, cr.last_contact_at DESC
+        ) AS t
+        JOIN people p ON t.person_id = p.person_id
+        ORDER BY t.score DESC
+        LIMIT %s OFFSET %s
+    """
+
+    params.extend([limit, offset])
+    return sql, params
 
 
 @app.get("/catalog/contacts/export")
@@ -2567,6 +2713,268 @@ async def context_general(_: None = Depends(require_token)) -> Dict[str, Any]:
         raise HTTPException(status_code=response.status_code, detail=detail)
 
     return response.json()
+
+
+@app.get("/v1/crm/relationships/top", response_model=TopRelationshipsResponse)
+def get_top_relationships(
+    request: Request,
+    window: Optional[str] = Query(
+        default=None, description="Time window (e.g., '90d', '30d')"
+    ),
+    limit: int = Query(
+        50, ge=1, le=500, description="Max results to return"
+    ),
+    offset: int = Query(0, ge=0, description="Result offset"),
+    self_person_id: Optional[str] = Query(default=None, description="Optional UUID of the requesting person to filter results to that user's relationships"),
+    _: None = Depends(require_token),
+) -> TopRelationshipsResponse | JSONResponse:
+    """
+    Fetch top relationships (contacts) ranked by strength score.
+
+    Query Parameters:
+    - window: Time window filter (e.g., "90d", "30d"). Default: "90d"
+    - limit: Max results (1-500, default 50)
+    - offset: Pagination offset (default 0)
+
+    Returns:
+    - Relationships ranked by score (highest first)
+    - Includes person metadata (name, emails, phones, org)
+    - Window filtering applied
+    """
+    correlation_id = _make_correlation_id("gw_relationships")
+
+    # Parse and validate window parameter
+    try:
+        window_str, window_days = _parse_window_parameter(window)
+    except HTTPException:
+        raise
+
+    # Query database
+    sql, params = _build_top_relationships_query(window_days, limit, offset, self_person_id)
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+                # Get total count (for pagination)
+                count_sql = """
+                    SELECT COUNT(*) as cnt
+                    FROM crm_relationships
+                    WHERE last_contact_at >= NOW() - INTERVAL '%s days'
+                """
+                cur.execute(count_sql, [window_days])
+                count_row = cur.fetchone()
+                total_count = count_row["cnt"] if count_row else 0
+    except Exception as exc:
+        logger.error(
+            "relationship_query_failed",
+            correlation_id=correlation_id,
+            error=str(exc),
+        )
+        return _error_response(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "RELATIONSHIPS.QUERY_ERROR",
+            "Failed to query relationships",
+            correlation_id,
+            details={"error": str(exc)},
+        )
+
+    # Parse results and enrich with metadata
+    relationships: List[RelationshipTop] = []
+    for row in rows:
+        rel = RelationshipTop(
+            person_id=str(row["person_id"]),
+            score=float(row["score"]),
+            last_contact_at=row["last_contact_at"],
+            display_name=row.get("display_name"),
+            emails=[],  # Will be queried separately if needed
+            phones=[],  # Will be queried separately if needed
+            organization=row.get("organization"),
+        )
+        relationships.append(rel)
+
+    # Calculate window boundaries for response
+    now = datetime.now(tz=UTC)
+    window_delta = timedelta(days=window_days)
+    window_start = now - window_delta
+
+    return TopRelationshipsResponse(
+        window=window_str,
+        window_start=window_start,
+        window_end=now,
+        limit=limit,
+        offset=offset,
+        total_count=total_count,
+        relationships=relationships,
+    )
+
+
+@app.post("/admin/contacts/merge", response_model=AdminContactMergeResponse)
+def admin_merge_contacts(
+    request: AdminContactMergeRequest,
+    _: None = Depends(require_token),
+) -> AdminContactMergeResponse:
+    """
+    Admin endpoint to merge duplicate contacts.
+    
+    This endpoint allows merging multiple contact records into a single surviving record.
+    Useful for deduplicating contacts that share phone or email identifiers.
+    
+    Request:
+    - target_person_id: UUID of the surviving contact
+    - source_person_ids: List of UUIDs to merge into target
+    - strategy: "prefer_target" (default), "prefer_source", or "merge_non_null"
+    - dry_run: If true (default), report what would happen without making changes
+    - metadata: Optional additional context for audit logging
+    
+    Returns:
+    - success: Whether the operation succeeded
+    - merge_id: UUID of the merge operation for audit trail
+    - result: Detailed merge statistics
+    - error: Error message if operation failed
+    """
+    correlation_id = _make_correlation_id("admin_merge")
+    
+    try:
+        # Validate input
+        if not request.target_person_id or not request.source_person_ids:
+            return AdminContactMergeResponse(
+                success=False,
+                error="target_person_id and source_person_ids are required",
+                correlation_id=correlation_id,
+            )
+        
+        # Parse UUIDs
+        try:
+            target_id = UUID(request.target_person_id)
+            source_ids = [UUID(sid) for sid in request.source_person_ids]
+        except ValueError as e:
+            return AdminContactMergeResponse(
+                success=False,
+                error=f"Invalid UUID format: {str(e)}",
+                correlation_id=correlation_id,
+            )
+        
+        # Validate strategy
+        if request.strategy not in ("prefer_target", "prefer_source", "merge_non_null"):
+            return AdminContactMergeResponse(
+                success=False,
+                error=f"Invalid strategy: {request.strategy}",
+                correlation_id=correlation_id,
+            )
+        
+        # If dry_run, just return what would happen
+        if request.dry_run:
+            logger.info(
+                "admin_merge_dry_run",
+                target_id=str(target_id),
+                source_count=len(source_ids),
+                strategy=request.strategy,
+                correlation_id=correlation_id,
+            )
+            return AdminContactMergeResponse(
+                success=True,
+                merge_id=None,
+                result=AdminContactMergeResult(
+                    merge_id="<would-be-generated>",
+                    target_id=str(target_id),
+                    source_ids=[str(sid) for sid in source_ids],
+                    strategy=request.strategy,
+                    actor="admin_api",
+                    updated_identifiers=0,
+                    updated_source_maps=0,
+                    updated_addresses=0,
+                    updated_urls=0,
+                    updated_document_people=0,
+                    updated_crm_relationships=0,
+                    status="would_merge",
+                    dry_run=True,
+                ),
+                correlation_id=correlation_id,
+            )
+        
+        # Perform the actual merge
+        with get_connection() as conn:
+            repo = PeopleRepository(conn, default_region=settings.contacts_default_region)
+            
+            merge_result = repo.merge_people(
+                target_id=target_id,
+                source_ids=source_ids,
+                strategy=request.strategy,
+                actor="admin_api",
+                metadata=request.metadata or {},
+            )
+        
+        logger.info(
+            "admin_merge_success",
+            merge_id=merge_result.get("merge_id"),
+            target_id=str(target_id),
+            source_count=len(source_ids),
+            strategy=request.strategy,
+            correlation_id=correlation_id,
+        )
+        
+        # Build result
+        result = AdminContactMergeResult(
+            merge_id=merge_result["merge_id"],
+            target_id=merge_result["target_id"],
+            source_ids=merge_result["source_ids"],
+            strategy=merge_result["strategy"],
+            actor=merge_result["actor"],
+            updated_identifiers=merge_result["updated_identifiers"],
+            updated_source_maps=merge_result["updated_source_maps"],
+            updated_addresses=merge_result["updated_addresses"],
+            updated_urls=merge_result["updated_urls"],
+            updated_document_people=merge_result["updated_document_people"],
+            updated_crm_relationships=merge_result["updated_crm_relationships"],
+            status="merged",
+            dry_run=False,
+        )
+        
+        return AdminContactMergeResponse(
+            success=True,
+            merge_id=result.merge_id,
+            result=result,
+            correlation_id=correlation_id,
+        )
+    
+    except ValueError as e:
+        logger.warning(
+            "admin_merge_validation_error",
+            error=str(e),
+            correlation_id=correlation_id,
+        )
+        return AdminContactMergeResponse(
+            success=False,
+            error=f"Validation error: {str(e)}",
+            correlation_id=correlation_id,
+        )
+    
+    except RuntimeError as e:
+        logger.error(
+            "admin_merge_runtime_error",
+            error=str(e),
+            correlation_id=correlation_id,
+        )
+        return AdminContactMergeResponse(
+            success=False,
+            error=f"Merge failed: {str(e)}",
+            correlation_id=correlation_id,
+        )
+    
+    except Exception as e:
+        logger.exception(
+            "admin_merge_unexpected_error",
+            error=str(e),
+            correlation_id=correlation_id,
+        )
+        return AdminContactMergeResponse(
+            success=False,
+            error=f"Unexpected error: {str(e)}",
+            correlation_id=correlation_id,
+        )
 
 
 @app.get("/v1/healthz")
