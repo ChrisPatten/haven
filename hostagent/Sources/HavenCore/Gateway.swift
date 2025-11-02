@@ -43,6 +43,43 @@ public actor GatewayClient {
         
         logger.info("Successfully posted \(events.count) events")
     }
+    
+    /// Post to an admin endpoint with JSON payload
+    public func postAdmin(path: String, payload: [String: Any]) async -> (statusCode: Int, body: String) {
+        let urlString = baseUrl + path
+        guard let url = URL(string: urlString) else {
+            logger.error("Invalid URL for admin endpoint", metadata: ["path": path])
+            return (statusCode: -1, body: "Invalid URL")
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = timeout
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            let httpResponse = response as? HTTPURLResponse
+            let statusCode = httpResponse?.statusCode ?? -1
+            let body = String(data: data, encoding: .utf8) ?? ""
+            
+            logger.info("Admin endpoint response", metadata: [
+                "path": path,
+                "status": String(statusCode)
+            ])
+            
+            return (statusCode: statusCode, body: body)
+        } catch {
+            logger.error("Admin endpoint request failed", metadata: [
+                "path": path,
+                "error": error.localizedDescription
+            ])
+            return (statusCode: -1, body: error.localizedDescription)
+        }
+    }
 }
 
 public enum GatewayError: Error, LocalizedError {

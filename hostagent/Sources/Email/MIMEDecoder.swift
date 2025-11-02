@@ -1,23 +1,26 @@
 import Foundation
 
-/// MIME content decoder for handling various transfer encodings
+/// MIME content decoder for handling various transfer encodings with proper charset support
 public struct MIMEDecoder {
     
-    /// Decode content based on transfer encoding
+    /// Decode content based on transfer encoding and charset
     /// - Parameters:
     ///   - content: The encoded content string
     ///   - encoding: The transfer encoding type (e.g., "base64", "quoted-printable", "7bit", "8bit")
+    ///   - charset: The character encoding (e.g., "utf-8", "iso-8859-1", "windows-1252"). Defaults to "utf-8"
     /// - Returns: Decoded content string
-    public static func decodeContent(_ content: String, encoding: String?) -> String {
+    public static func decodeContent(_ content: String, encoding: String?, charset: String? = nil) -> String {
         guard let encoding = encoding?.lowercased() else {
             return content
         }
         
+        let charsetToUse = charset?.lowercased() ?? "utf-8"
+        
         switch encoding {
         case "base64":
-            return decodeBase64(content)
+            return decodeBase64(content, charset: charsetToUse)
         case "quoted-printable":
-            return decodeQuotedPrintable(content)
+            return decodeQuotedPrintable(content, charset: charsetToUse)
         case "7bit", "8bit", "binary":
             // These are already in their final form
             return content
@@ -27,8 +30,8 @@ public struct MIMEDecoder {
         }
     }
     
-    /// Decode base64 encoded content
-    public static func decodeBase64(_ content: String) -> String {
+    /// Decode base64 encoded content with proper charset handling
+    public static func decodeBase64(_ content: String, charset: String = "utf-8") -> String {
         // Remove whitespace and newlines
         let cleaned = content.replacingOccurrences(of: "\\s", with: "", options: .regularExpression)
         
@@ -36,12 +39,23 @@ public struct MIMEDecoder {
             return content
         }
         
-        return String(data: data, encoding: .utf8) ?? content
+        // Try to decode with the specified charset
+        if let result = decodeDataWithCharset(data, charset: charset) {
+            return result
+        }
+        
+        // Fallback to UTF-8
+        if let result = String(data: data, encoding: .utf8) {
+            return result
+        }
+        
+        // Last resort: return original content
+        return content
     }
     
-    /// Decode quoted-printable encoded content
-    public static func decodeQuotedPrintable(_ content: String) -> String {
-        var result = ""
+    /// Decode quoted-printable encoded content with proper charset handling
+    public static func decodeQuotedPrintable(_ content: String, charset: String = "utf-8") -> String {
+        var decodedBytes: [UInt8] = []
         var i = content.startIndex
         
         while i < content.endIndex {
@@ -82,8 +96,7 @@ public struct MIMEDecoder {
                         let hexString = String(content[hexStart..<hexEnd])
                         
                         if let byte = UInt8(hexString, radix: 16) {
-                            let scalar = UnicodeScalar(byte)
-                            result += String(Character(scalar))
+                            decodedBytes.append(byte)
                             i = hexEnd
                             continue
                         }
@@ -91,16 +104,69 @@ public struct MIMEDecoder {
                 }
                 
                 // If we get here, it's an invalid hex sequence, treat as literal
-                result += String(content[i])
+                if let asciiValue = content[i].asciiValue {
+                    decodedBytes.append(asciiValue)
+                }
                 i = content.index(after: i)
                 continue
             }
             
-            result += String(content[i])
+            // Regular character - append as ASCII/UTF-8 byte
+            if let asciiValue = content[i].asciiValue {
+                decodedBytes.append(asciiValue)
+            } else {
+                // Non-ASCII character in the quoted-printable string itself
+                // Encode it as UTF-8 bytes
+                for byte in content[i].utf8 {
+                    decodedBytes.append(byte)
+                }
+            }
             i = content.index(after: i)
         }
         
-        return result
+        // Convert decoded bytes to string using the specified charset
+        let data = Data(decodedBytes)
+        if let result = decodeDataWithCharset(data, charset: charset) {
+            return result
+        }
+        
+        // Fallback to UTF-8
+        if let result = String(data: data, encoding: .utf8) {
+            return result
+        }
+        
+        // Last resort: return original content
+        return content
+    }
+    
+    /// Helper function to decode Data with a specified charset
+    private static func decodeDataWithCharset(_ data: Data, charset: String) -> String? {
+        let charsetLower = charset.lowercased()
+        
+        // Map common charset names to String.Encoding
+        switch charsetLower {
+        case "utf-8", "utf8", "utf_8":
+            return String(data: data, encoding: .utf8)
+        case "iso-8859-1", "iso8859-1", "latin1", "latin-1":
+            return String(data: data, encoding: .isoLatin1)
+        case "iso-8859-2", "iso8859-2", "latin2", "latin-2":
+            // Not directly supported by String.Encoding, fall through
+            return nil
+        case "windows-1252", "cp1252":
+            // Use ASCII as approximation (limited support)
+            return String(data: data, encoding: .ascii)
+        case "us-ascii", "ascii":
+            return String(data: data, encoding: .ascii)
+        case "utf-16", "utf16":
+            return String(data: data, encoding: .utf16)
+        case "utf-16be", "utf16be":
+            return String(data: data, encoding: .utf16BigEndian)
+        case "utf-16le", "utf16le":
+            return String(data: data, encoding: .utf16LittleEndian)
+        default:
+            // Try UTF-8 as default for unknown charsets
+            return String(data: data, encoding: .utf8)
+        }
     }
     
     /// Extract transfer encoding from Content-Type header

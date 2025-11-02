@@ -57,6 +57,32 @@ These buckets align with indexes defined in hv-61.
 4. Upsert results into `crm_relationships` with JSON edge metrics and updated
    `last_contact_at` / `decay_bucket`.
 
+## Gateway Endpoint: Top Relationships
+
+`GET /v1/crm/relationships/top` exposes the computed data through the Gateway.
+Clients supply an optional `self_person_id` (UUID) and `window` (`"<days>d"`,
+defaults to `90d`). If `self_person_id` is omitted, Gateway falls back to the
+stored value in `system_settings` when available. Pagination uses `limit`
+(1–500, default 50) and `offset` (default 0).
+
+The response includes:
+- `relationships[*].person_id`: Contact UUID.
+- `relationships[*].score`: Latest computed score for the `(self, person)` pair.
+- `relationships[*].last_contact_at`: ISO8601 timestamp of the most recent interaction.
+- `relationships[*].display_name` / `organization`: Metadata from `people`.
+- `relationships[*].emails` / `phones`: Canonical identifiers sourced from `person_identifiers`.
+- `window_start` / `window_end`: Temporal bounds applied to the query.
+
+Example request:
+
+```bash
+curl -H "Authorization: Bearer $HAVEN_API_TOKEN" \
+     "http://localhost:8085/v1/crm/relationships/top?window=30d&limit=10"
+```
+
+Use the response `total_count` to drive pagination UI and follow the provided
+`window_start`/`window_end` timestamps when presenting the data to users.
+
 ## Testing
 
 Unit coverage in `tests/test_relationship_features.py` verifies:

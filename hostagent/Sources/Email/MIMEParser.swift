@@ -34,9 +34,11 @@ public struct MIMEParser {
         } else {
             // Single part message
             let encoding = headers["content-transfer-encoding"]
-            let decodedContent = MIMEDecoder.decodeContent(bodyContent, encoding: encoding).trimmingCharacters(in: .whitespacesAndNewlines)
-            let contentType = extractBaseContentType(from: headers["content-type"] ?? "text/plain")
-            message.parts = [MIMEPart(content: decodedContent, contentType: contentType)]
+            let contentType = headers["content-type"] ?? "text/plain"
+            let charset = MIMEDecoder.extractCharset(from: contentType)
+            let decodedContent = MIMEDecoder.decodeContent(bodyContent, encoding: encoding, charset: charset).trimmingCharacters(in: .whitespacesAndNewlines)
+            let baseContentType = extractBaseContentType(from: contentType)
+            message.parts = [MIMEPart(content: decodedContent, contentType: baseContentType)]
         }
         
         return message
@@ -114,13 +116,15 @@ public struct MIMEParser {
             let partHeaders = partHeaderEndIndex > 0 ? parseHeaders(Array(partLines[0..<partHeaderEndIndex])) : [:]
             let partContent = partHeaderEndIndex < partLines.count ? Array(partLines[partHeaderEndIndex..<partLines.count]).joined(separator: "\n") : ""
             
-            // Decode content based on transfer encoding
+            // Decode content based on transfer encoding and charset
             let encoding = partHeaders["content-transfer-encoding"]
-            let decodedContent = MIMEDecoder.decodeContent(partContent, encoding: encoding).trimmingCharacters(in: .whitespacesAndNewlines)
+            let contentType = partHeaders["content-type"] ?? "text/plain"
+            let charset = MIMEDecoder.extractCharset(from: contentType)
+            let decodedContent = MIMEDecoder.decodeContent(partContent, encoding: encoding, charset: charset).trimmingCharacters(in: .whitespacesAndNewlines)
             
             let mimePart = MIMEPart(
                 content: decodedContent,
-                contentType: partHeaders["content-type"] ?? "text/plain",
+                contentType: contentType,
                 headers: partHeaders
             )
             

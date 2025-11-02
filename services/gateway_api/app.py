@@ -60,6 +60,8 @@ from shared.people_repository import (
     ContactValue,
     PersonIngestRecord,
     PeopleRepository,
+    get_self_person_id_from_settings,
+    store_self_person_id_if_needed,
 )
 
 
@@ -559,6 +561,31 @@ class AdminContactMergeResponse(BaseModel):
     result: Optional[AdminContactMergeResult] = None
     error: Optional[str] = None
     correlation_id: Optional[str] = None
+
+
+class SelfPersonIdResponse(BaseModel):
+    """Response for GET /v1/admin/self-person-id."""
+    self_person_id: Optional[str] = None
+    source: Optional[str] = None
+    detected_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    warning: Optional[str] = None
+
+
+class SetSelfPersonIdRequest(BaseModel):
+    """Request for POST /v1/admin/self-person-id."""
+    person_id: str
+    source: Optional[str] = "manual"
+
+
+class SetSelfPersonIdResponse(BaseModel):
+    """Response for POST /v1/admin/self-person-id."""
+    success: bool
+    self_person_id: Optional[str] = None
+    source: Optional[str] = None
+    detected_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    error: Optional[str] = None
 
 
 @dataclass
@@ -1301,51 +1328,90 @@ def _parse_window_parameter(window_param: Optional[str]) -> tuple[str, int]:
     return window_param, days
 
 
+def _build_relationships_filter(
+    window_days: int,
+    self_person_id: Optional[str] = None,
+) -> tuple[str, List[Any]]:
+    """
+    Build WHERE clause and parameters for relationship queries.
+
+    Args:
+        window_days: Number of days for recency filter.
+        self_person_id: Optional UUID for filtering to the requesting user.
+
+    Returns:
+        Tuple of (where_sql, params)
+    """
+    where_clauses = ["cr.last_contact_at >= NOW() - INTERVAL '%s days'"]
+    params: List[Any] = [window_days]
+
+    if self_person_id:
+        where_clauses.append("cr.self_person_id = %s")
+        params.append(self_person_id)
+
+    return " AND ".join(where_clauses), params
+
+
 def _build_top_relationships_query(
     window_days: int,
     limit: int,
     offset: int,
     self_person_id: Optional[str] = None,
-) -> tuple[str, List[Any]]:
+) -> tuple[str, List[Any], str, List[Any]]:
     """
     Build query for top relationships with person metadata join.
 
-    Returns tuple of (sql_query, params)
+    Returns tuple of (sql_query, query_params, count_where_sql, count_params)
     """
-    where_clause = "cr.last_contact_at >= NOW() - INTERVAL '%s days'"
-    params: List[Any] = [window_days]
-    if self_person_id:
-        where_clause += " AND cr.self_person_id = %s"
-        params.append(self_person_id)
+    where_clause, filter_params = _build_relationships_filter(
+        window_days, self_person_id
+    )
 
     sql = f"""
-        /* Pick the best relationship edge per person (highest score),
-           then order the resulting persons by score desc. */
-        SELECT
-            t.person_id,
-            t.score,
-            t.last_contact_at,
-            p.display_name,
-            p.organization,
-            p.photo_hash
-        FROM (
-            SELECT DISTINCT ON (cr.person_id)
+        WITH ranked_relationships AS (
+            SELECT DISTINCT ON (cr.self_person_id, cr.person_id)
                 cr.person_id,
-                cr.score,
-                cr.last_contact_at,
                 cr.self_person_id,
-                cr.edge_features
+                cr.score,
+                cr.last_contact_at
             FROM crm_relationships cr
             WHERE {where_clause}
-            ORDER BY cr.person_id, cr.score DESC, cr.last_contact_at DESC
-        ) AS t
-        JOIN people p ON t.person_id = p.person_id
-        ORDER BY t.score DESC
+            ORDER BY cr.self_person_id, cr.person_id, cr.score DESC, cr.last_contact_at DESC
+        )
+        SELECT
+            rr.person_id,
+            rr.score,
+            rr.last_contact_at,
+            p.display_name,
+            p.organization,
+            p.photo_hash,
+            COALESCE(emails.emails, ARRAY[]::text[]) AS emails,
+            COALESCE(phones.phones, ARRAY[]::text[]) AS phones
+        FROM ranked_relationships rr
+        JOIN people p ON rr.person_id = p.person_id
+        LEFT JOIN (
+            SELECT
+                person_id,
+                ARRAY_AGG(DISTINCT value_canonical ORDER BY value_canonical) AS emails
+            FROM person_identifiers
+            WHERE kind = 'email'
+            GROUP BY person_id
+        ) AS emails ON emails.person_id = rr.person_id
+        LEFT JOIN (
+            SELECT
+                person_id,
+                ARRAY_AGG(DISTINCT value_canonical ORDER BY value_canonical) AS phones
+            FROM person_identifiers
+            WHERE kind = 'phone'
+            GROUP BY person_id
+        ) AS phones ON phones.person_id = rr.person_id
+        ORDER BY rr.score DESC, rr.last_contact_at DESC
         LIMIT %s OFFSET %s
     """
 
-    params.extend([limit, offset])
-    return sql, params
+    query_params: List[Any] = [*filter_params, limit, offset]
+
+    return sql, query_params, where_clause, filter_params
 
 
 @app.get("/catalog/contacts/export")
@@ -2749,8 +2815,27 @@ def get_top_relationships(
     except HTTPException:
         raise
 
+    # Auto-populate self_person_id from settings if not provided
+    if not self_person_id:
+        try:
+            with get_connection() as conn:
+                stored_id = get_self_person_id_from_settings(conn)
+                if stored_id:
+                    self_person_id = str(stored_id)
+        except Exception as e:
+            logger.warning(
+                "failed_to_fetch_self_person_id",
+                correlation_id=correlation_id,
+                error=str(e),
+            )
+
     # Query database
-    sql, params = _build_top_relationships_query(window_days, limit, offset, self_person_id)
+    (
+        sql,
+        params,
+        where_clause,
+        filter_params,
+    ) = _build_top_relationships_query(window_days, limit, offset, self_person_id)
 
     try:
         with get_connection() as conn:
@@ -2759,12 +2844,16 @@ def get_top_relationships(
                 rows = cur.fetchall()
 
                 # Get total count (for pagination)
-                count_sql = """
-                    SELECT COUNT(*) as cnt
-                    FROM crm_relationships
-                    WHERE last_contact_at >= NOW() - INTERVAL '%s days'
+                count_sql = f"""
+                    SELECT COUNT(*) AS cnt
+                    FROM (
+                        SELECT 1
+                        FROM crm_relationships cr
+                        WHERE {where_clause}
+                        GROUP BY cr.self_person_id, cr.person_id
+                    ) counted
                 """
-                cur.execute(count_sql, [window_days])
+                cur.execute(count_sql, filter_params)
                 count_row = cur.fetchone()
                 total_count = count_row["cnt"] if count_row else 0
     except Exception as exc:
@@ -2789,8 +2878,8 @@ def get_top_relationships(
             score=float(row["score"]),
             last_contact_at=row["last_contact_at"],
             display_name=row.get("display_name"),
-            emails=[],  # Will be queried separately if needed
-            phones=[],  # Will be queried separately if needed
+            emails=list(row.get("emails") or []),
+            phones=list(row.get("phones") or []),
             organization=row.get("organization"),
         )
         relationships.append(rel)
@@ -2975,6 +3064,251 @@ def admin_merge_contacts(
             error=f"Unexpected error: {str(e)}",
             correlation_id=correlation_id,
         )
+
+
+@app.get("/v1/admin/self-person-id", response_model=SelfPersonIdResponse)
+def get_self_person_id(
+    _: None = Depends(require_token),
+) -> SelfPersonIdResponse:
+    """
+    Get the current self_person_id setting.
+    
+    Returns:
+    - self_person_id: UUID of the current self person (null if not set)
+    - source: How it was detected/set (e.g., "imessage", "manual")
+    - detected_at: When it was detected
+    - updated_at: When it was last updated
+    - warning: Warning message if not set
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT value
+                    FROM system_settings
+                    WHERE key = 'self_person_id'
+                    """,
+                )
+                row = cur.fetchone()
+                
+                if row:
+                    value = row["value"]
+                    return SelfPersonIdResponse(
+                        self_person_id=value.get("self_person_id"),
+                        source=value.get("source"),
+                        detected_at=value.get("detected_at"),
+                        updated_at=value.get("updated_at"),
+                    )
+                else:
+                    return SelfPersonIdResponse(
+                        warning="self_person_id not yet set",
+                    )
+    except Exception as e:
+        logger.error("get_self_person_id_failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve self_person_id setting",
+        )
+
+
+@app.post("/v1/admin/self-person-id", response_model=SetSelfPersonIdResponse)
+def set_self_person_id(
+    request: SetSelfPersonIdRequest,
+    _: None = Depends(require_token),
+) -> SetSelfPersonIdResponse:
+    """
+    Set or override the self_person_id.
+    
+    This is an admin endpoint to manually set the self_person_id after detection or
+    to override the auto-detected value.
+    
+    Request:
+    - person_id: UUID of the person record to set as self
+    - source: Optional source label (default: "manual")
+    
+    Returns:
+    - success: Whether the operation succeeded
+    - self_person_id: The newly set person_id
+    - source: The source label
+    - detected_at: Timestamp when set
+    - updated_at: Timestamp of update
+    - error: Error message if failed
+    """
+    correlation_id = _make_correlation_id("admin_self_person")
+    
+    try:
+        # Validate UUID format
+        try:
+            person_id = UUID(request.person_id)
+        except ValueError:
+            return SetSelfPersonIdResponse(
+                success=False,
+                error=f"Invalid UUID format: {request.person_id}",
+            )
+        
+        # Check that person exists
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT person_id FROM people
+                    WHERE person_id = %s AND deleted = FALSE
+                    """,
+                    (person_id,),
+                )
+                if not cur.fetchone():
+                    return SetSelfPersonIdResponse(
+                        success=False,
+                        error=f"Person not found or deleted: {person_id}",
+                    )
+        
+        # Store the setting
+        from datetime import datetime, UTC
+        now = datetime.now(tz=UTC)
+        
+        with get_connection() as conn:
+            store_self_person_id_if_needed(
+                conn,
+                person_id,
+                source=request.source or "manual",
+                detected_at=now.isoformat(),
+            )
+            
+            # Fetch back the stored value to confirm
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT value
+                    FROM system_settings
+                    WHERE key = 'self_person_id'
+                    """,
+                )
+                row = cur.fetchone()
+                if row:
+                    value = row["value"]
+                    return SetSelfPersonIdResponse(
+                        success=True,
+                        self_person_id=value.get("self_person_id"),
+                        source=value.get("source"),
+                        detected_at=value.get("detected_at"),
+                        updated_at=value.get("updated_at"),
+                    )
+        
+        return SetSelfPersonIdResponse(
+            success=False,
+            error="Failed to store setting",
+        )
+    
+    except Exception as e:
+        logger.error(
+            "set_self_person_id_failed",
+            correlation_id=correlation_id,
+            error=str(e),
+        )
+        return SetSelfPersonIdResponse(
+            success=False,
+            error=f"Internal error: {str(e)}",
+        )
+
+
+@app.post("/v1/admin/self-person-id/identify")
+def identify_self_person_from_account(
+    request: Dict[str, Any],
+    _: None = Depends(require_token),
+) -> Dict[str, Any]:
+    """
+    Identify and set self_person_id from an account identifier (e.g., email, phone).
+    
+    Used by HostAgent to submit a detected iMessage account and have it resolved to a person_id.
+    
+    Request:
+    - account: Normalized account identifier (email or phone)
+    - source: Optional source label (e.g., "imessage", "contacts")
+    
+    Returns:
+    - success: Whether resolution succeeded
+    - person_id: The resolved person_id (if successful)
+    - display_name: The resolved person's display name (if successful)
+    - error: Error message if failed
+    """
+    correlation_id = _make_correlation_id("identify_self")
+    account = request.get("account")
+    source = request.get("source", "imessage")
+    
+    if not account:
+        return {
+            "success": False,
+            "error": "account parameter required",
+            "correlation_id": correlation_id,
+        }
+    
+    try:
+        from shared.people_normalization import IdentifierKind
+        from shared.people_repository import PeopleResolver
+        
+        with get_connection() as conn:
+            resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
+            
+            # Try to resolve as email first
+            email_result = resolver.resolve(IdentifierKind.EMAIL, account)
+            if email_result:
+                person_id = UUID(email_result["person_id"])
+                store_self_person_id_if_needed(
+                    conn,
+                    person_id,
+                    source=source,
+                    detected_at=datetime.now(tz=UTC).isoformat(),
+                )
+                return {
+                    "success": True,
+                    "person_id": email_result["person_id"],
+                    "display_name": email_result["display_name"],
+                    "source": source,
+                    "correlation_id": correlation_id,
+                }
+            
+            # Try to resolve as phone
+            phone_result = resolver.resolve(IdentifierKind.PHONE, account)
+            if phone_result:
+                person_id = UUID(phone_result["person_id"])
+                store_self_person_id_if_needed(
+                    conn,
+                    person_id,
+                    source=source,
+                    detected_at=datetime.now(tz=UTC).isoformat(),
+                )
+                return {
+                    "success": True,
+                    "person_id": phone_result["person_id"],
+                    "display_name": phone_result["display_name"],
+                    "source": source,
+                    "correlation_id": correlation_id,
+                }
+        
+        logger.info(
+            "self_person_identification_no_match",
+            account=account,
+            source=source,
+            correlation_id=correlation_id,
+        )
+        return {
+            "success": False,
+            "error": f"No person found with identifier: {account}",
+            "correlation_id": correlation_id,
+        }
+    
+    except Exception as e:
+        logger.error(
+            "self_person_identification_failed",
+            error=str(e),
+            correlation_id=correlation_id,
+        )
+        return {
+            "success": False,
+            "error": f"Identification failed: {str(e)}",
+            "correlation_id": correlation_id,
+        }
 
 
 @app.get("/v1/healthz")

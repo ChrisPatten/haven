@@ -1091,3 +1091,92 @@ class PeopleResolver:
                     "display_name": row["display_name"],
                 }
         return results
+
+
+def get_self_person_id_from_settings(conn: Connection) -> Optional[UUID]:
+    """
+    Retrieve the self_person_id from system_settings.
+    
+    Args:
+        conn: Database connection
+        
+    Returns:
+        UUID of the self person, or None if not set
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT value->>'self_person_id' AS self_person_id
+            FROM system_settings
+            WHERE key = 'self_person_id'
+            """,
+        )
+        row = cur.fetchone()
+        if row and row.get("self_person_id"):
+            return UUID(row["self_person_id"])
+    return None
+
+
+def store_self_person_id_if_needed(
+    conn: Connection, 
+    person_id: UUID, 
+    *,
+    source: str,
+    detected_at: str,
+) -> bool:
+    """
+    Store self_person_id in system_settings using atomic UPSERT.
+    
+    Only writes if self_person_id is not already set. Uses INSERT ... ON CONFLICT
+    to ensure atomicity when multiple processes attempt to set simultaneously.
+    
+    Args:
+        conn: Database connection
+        person_id: UUID of the self person
+        source: Source of detection (e.g., "imessage")
+        detected_at: ISO8601 timestamp when detection occurred
+        
+    Returns:
+        True if self_person_id was written (was unset before), False if already set
+    """
+    import json
+    from datetime import datetime
+    
+    # Normalize detected_at to ISO8601 if it's a datetime object
+    if isinstance(detected_at, datetime):
+        detected_at = detected_at.isoformat()
+    
+    setting_value = {
+        "self_person_id": str(person_id),
+        "source": source,
+        "detected_at": detected_at,
+    }
+    
+    with conn.cursor() as cur:
+        # Check if already set
+        cur.execute(
+            """
+            SELECT value->>'self_person_id' AS self_person_id
+            FROM system_settings
+            WHERE key = 'self_person_id'
+            """,
+        )
+        existing = cur.fetchone()
+        
+        if existing and existing[0]:
+            # Already set, no update needed
+            return False
+        
+        # Write using UPSERT with condition: only update if currently NULL/unset
+        cur.execute(
+            """
+            INSERT INTO system_settings (key, value)
+            VALUES ('self_person_id', %s)
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value
+            WHERE system_settings.value->>'self_person_id' IS NULL
+            """,
+            (Json(setting_value),),
+        )
+        conn.commit()
+        return True

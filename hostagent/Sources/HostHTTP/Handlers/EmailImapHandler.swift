@@ -55,8 +55,8 @@ public actor EmailImapHandler {
         }
         
         // Extract parameters
-        var accountId: String?
-        var folder: String?
+        var accountId: String? = nil
+        var folder: String? = nil
         var limit: Int?
         var maxLimit: Int?
         var order: String?
@@ -86,21 +86,23 @@ public actor EmailImapHandler {
             // Mode -> dryRun
             dryRun = ((req.mode ?? .real) == .simulate)
             
-            // Handle collector-specific options
-            if case let .ImapCollectorOptions(options) = req.collectorOptions {
-                reset = options.reset
-                dryRun = options.dryRun ?? dryRun
-                folder = options.folder ?? options.mailbox
-                accountId = options.accountId
-                maxLimit = options.maxLimit
-                
-                // Handle credentials
-                if let creds = options.credentials {
-                    credentials = ImapCredentials(
-                        kind: creds.kind.rawValue,
-                        secret: creds.secret,
-                        secretRef: creds.secretRef
-                    )
+            // Handle collector-specific options from OpenAPI-generated payload
+            if let collectorOptions = req.collectorOptions {
+                if case let .ImapCollectorOptions(options) = collectorOptions {
+                    reset = options.reset
+                    dryRun = options.dryRun ?? dryRun
+                    folder = options.folder ?? options.mailbox
+                    accountId = options.accountId
+                    maxLimit = options.maxLimit
+
+                    // Handle credentials
+                    if let creds = options.credentials {
+                        credentials = ImapCredentials(
+                            kind: creds.kind.rawValue,
+                            secret: creds.secret,
+                            secretRef: creds.secretRef
+                        )
+                    }
                 }
             }
         }
@@ -561,7 +563,7 @@ public actor EmailImapHandler {
     }
     
     private struct ImapCredentials {
-        var kind: String?
+        var kind: String
         var secret: String?
         var secretRef: String?
     }

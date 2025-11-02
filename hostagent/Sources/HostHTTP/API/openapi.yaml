@@ -150,7 +150,7 @@ components:
     # ---------------- Collector options ----------------
     IMessageCollectorOptions:
       type: object
-      additionalProperties: true
+      additionalProperties: false
       properties:
         limit:      { type: integer, minimum: 1, description: "Overrides top-level limit for message count." }
         order:      { $ref: '#/components/schemas/RunOrder' }
@@ -159,7 +159,7 @@ components:
         chat_db_path: { type: string }
     ImapCollectorOptions:
       type: object
-      additionalProperties: true
+      additionalProperties: false
       properties:
         reset: { type: boolean, default: false }
         dry_run: { type: boolean, description: "Overrides top-level mode for dry-run behavior (simulate)." }

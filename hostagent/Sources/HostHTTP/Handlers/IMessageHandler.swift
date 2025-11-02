@@ -162,15 +162,17 @@ public actor IMessageHandler {
                     params.since = dateRange.since
                     params.until = dateRange.until
                 }
-                // Handle collector-specific options
-                if case let .IMessageCollectorOptions(options) = runRequest!.collectorOptions {
-                    params.limit = options.limit ?? params.limit
-                    if let order = options.order {
-                        params.order = order.rawValue
+                // Handle collector-specific options from OpenAPI-generated payload
+                if let collectorOptions = runRequest?.collectorOptions {
+                    if case let .IMessageCollectorOptions(options) = collectorOptions {
+                        params.limit = options.limit ?? params.limit
+                        if let order = options.order {
+                            params.order = order.rawValue
+                        }
+                        params.threadLookbackDays = options.threadLookbackDays ?? params.threadLookbackDays
+                        params.messageLookbackDays = options.messageLookbackDays ?? params.messageLookbackDays
+                        params.chatDbPath = options.chatDbPath ?? params.chatDbPath
                     }
-                    params.threadLookbackDays = options.threadLookbackDays ?? params.threadLookbackDays
-                    params.messageLookbackDays = options.messageLookbackDays ?? params.messageLookbackDays
-                    params.chatDbPath = options.chatDbPath ?? params.chatDbPath
                 }
             } catch {
                 logger.error("Failed to decode RunRequest", metadata: ["error": error.localizedDescription])
@@ -741,6 +743,14 @@ public actor IMessageHandler {
                         stats.latestMessageTimestamp = appleTs
                     }
                 }
+            }
+        }
+
+        // After collection completes, attempt to detect and store self_person_id
+        if let detectedAccount = detectSelfPersonFromIMessage(db: db!) {
+            // Notify Gateway asynchronously (don't block collection on this)
+            Task {
+                await notifyGatewayOfSelfPerson(account: detectedAccount)
             }
         }
 
@@ -2512,6 +2522,69 @@ public actor IMessageHandler {
             _ = CC_SHA256($0.baseAddress, CC_LONG(data.count), &hash)
         }
         return hash.map { String(format: "%02x", $0) }.joined()
+    }
+    
+    // MARK: - Collection Logic
+    
+    /// Detect the most common sender account from iMessage messages where is_from_me=true.
+    /// This identifies the current user's iMessage account.
+    /// Returns the normalized identifier (with E: prefix stripped).
+    private func detectSelfPersonFromIMessage(db: OpaquePointer) -> String? {
+        let query = """
+        SELECT m.account, COUNT(*) as count
+        FROM message m
+        WHERE m.is_from_me = 1 AND m.account IS NOT NULL
+        GROUP BY m.account
+        ORDER BY count DESC
+        LIMIT 1
+        """
+        
+        var stmt: OpaquePointer? = nil
+        defer { if stmt != nil { sqlite3_finalize(stmt) } }
+        
+        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else {
+            logger.warning("Failed to prepare self-detection query")
+            return nil
+        }
+        
+        if sqlite3_step(stmt) == SQLITE_ROW,
+           let accountPtr = sqlite3_column_text(stmt, 0) {
+            let account = String(cString: accountPtr)
+            
+            // Normalize the account: strip E: prefix if present
+            let normalized: String
+            if account.hasPrefix("E:") {
+                normalized = String(account.dropFirst(2))
+            } else {
+                normalized = account
+            }
+            
+            logger.info("Detected self person account", metadata: [
+                "raw_account": account,
+                "normalized": normalized
+            ])
+            return normalized
+        }
+        
+        logger.warning("No iMessage account found for self-detection")
+        return nil
+    }
+    
+    /// Call Gateway to store the detected self_person_id if not already set.
+    /// This is idempotent; if already set, Gateway returns success without change.
+    private func notifyGatewayOfSelfPerson(account: String) async {
+        logger.info("Notifying Gateway of detected self person", metadata: ["account": account])
+        
+        let payload = ["account": account, "source": "imessage"] as [String: Any]
+        let (statusCode, _) = await gatewayClient.postAdmin(path: "/v1/admin/self-person-id/identify", payload: payload)
+        
+        if (200...299).contains(statusCode) {
+            logger.info("Successfully notified Gateway of self person")
+        } else {
+            logger.warning("Gateway returned unexpected status when setting self person", metadata: [
+                "status": String(statusCode)
+            ])
+        }
     }
 }
 
