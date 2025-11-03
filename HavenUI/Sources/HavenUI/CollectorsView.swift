@@ -206,6 +206,7 @@ struct CollectorsView: View {
                     // Check if enabled in modules
                     if let moduleInfo = modulesResponse.modules[moduleName] {
                         info.enabled = moduleInfo.enabled
+                        print("DEBUG: Found module \(moduleName) for collector \(collectorId), enabled: \(moduleInfo.enabled)")
                     } else if collectorId == "localfs" {
                         // localfs might not be in modules response, check if fswatch is enabled as fallback
                         // or default to enabled if we can't determine
@@ -215,6 +216,10 @@ struct CollectorsView: View {
                             // Default to enabled if we can't determine (localfs might be standalone)
                             info.enabled = true
                         }
+                    } else {
+                        // Module not found in response - log for debugging
+                        print("DEBUG: Module \(moduleName) not found in modules response for collector \(collectorId)")
+                        print("DEBUG: Available modules: \(modulesResponse.modules.keys.sorted())")
                     }
                     
                     // Fetch state if available
