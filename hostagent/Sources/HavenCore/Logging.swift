@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import Darwin
 
 /// Structured JSON logger for Haven Host Agent
 public struct HavenLogger {
@@ -23,7 +24,7 @@ public struct HavenLogger {
     }()
 
     /// Enable direct file logging for LaunchAgent environments
-    /// This bypasses stdout/stderr buffering issues
+    /// This bypasses stdout/stderr buffering issues by using unbuffered file descriptors
     public static func enableDirectFileLogging() {
         directFileLoggingEnabled = true
 
@@ -39,7 +40,7 @@ public struct HavenLogger {
         let stdoutPath = logsDir.appendingPathComponent("hostagent.log")
         let stderrPath = logsDir.appendingPathComponent("hostagent-error.log")
 
-        // Open file handles for direct writing
+        // Open file handles for direct writing with unbuffered I/O
         do {
             if !FileManager.default.fileExists(atPath: stdoutPath.path) {
                 FileManager.default.createFile(atPath: stdoutPath.path, contents: nil)
@@ -151,9 +152,16 @@ public struct HavenLogger {
             if let data = outputWithNewline.data(using: .utf8) {
                 // For error levels, write to stderr log, otherwise stdout log
                 let isError = level == "error" || level == "fatal" || level == "critical"
-                let fileHandle = isError ? HavenLogger.stderrLogFileHandle : HavenLogger.stdoutLogFileHandle
-                try? fileHandle?.write(contentsOf: data)
-                try? fileHandle?.synchronize()
+                if let fileHandle = isError ? HavenLogger.stderrLogFileHandle : HavenLogger.stdoutLogFileHandle {
+                    // Write using low-level file descriptor for immediate disk flush
+                    data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+                        if let baseAddress = ptr.baseAddress {
+                            Darwin.write(fileHandle.fileDescriptor, baseAddress, data.count)
+                            // Force immediate flush to disk
+                            fsync(fileHandle.fileDescriptor)
+                        }
+                    }
+                }
             }
         } else {
             // Traditional stdout/stderr output (may be buffered)
