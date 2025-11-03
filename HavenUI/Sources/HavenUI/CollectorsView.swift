@@ -390,7 +390,7 @@ struct CollectorsView: View {
     // Map collector IDs to their corresponding module names
     private func mapCollectorToModule(_ collectorId: String) -> String {
         switch collectorId {
-        case "email_local", "email_imap":
+        case "email_imap":
             return "mail"
         case "localfs":
             // Check if localfs module exists, otherwise check fswatch

@@ -262,14 +262,6 @@ struct CollectorInfo: Identifiable {
             enabled: false,
             payload: #"{"limit": 1000}"#
         ),
-        "email_local": CollectorInfo(
-            id: "email_local",
-            displayName: "Mail.app",
-            description: "Emails from Mail.app",
-            category: "email",
-            enabled: false,
-            payload: #"{"limit": 500}"#
-        ),
         "email_imap": CollectorInfo(
             id: "email_imap",
             displayName: "IMAP",
@@ -466,21 +458,6 @@ extension CollectorSchema {
         ]
     )
     
-    static let email_local = CollectorSchema(
-        id: "email_local",
-        displayName: "Mail.app",
-        fields: globalFields + [
-            SchemaField(
-                id: "dry_run",
-                label: "Dry Run",
-                description: "Process without submitting to server",
-                fieldType: .boolean,
-                required: false,
-                defaultValue: .bool(false)
-            )
-        ]
-    )
-    
     static let email_imap = CollectorSchema(
         id: "email_imap",
         displayName: "IMAP",
@@ -609,7 +586,6 @@ extension CollectorSchema {
     static func schema(for collectorId: String) -> CollectorSchema? {
         let schemas: [String: CollectorSchema] = [
             "imessage": .imessage,
-            "email_local": .email_local,
             "email_imap": .email_imap,
             "localfs": .localfs,
             "contacts": .contacts
