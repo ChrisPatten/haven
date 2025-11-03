@@ -293,7 +293,9 @@ struct CollectorsView: View {
             defer { appState.setCollectorRunning(collector.id, running: false) }
             
             do {
+                print("DEBUG: About to send request to /v1/collectors/\(collector.id):run with payload: \(customPayload)")
                 let response = try await client.runCollectorWithPayload(collector.id, jsonPayload: customPayload)
+                print("DEBUG: Response received: \(response)")
                 
                 // Create activity record
                 let activity = CollectorActivity(
@@ -324,6 +326,9 @@ struct CollectorsView: View {
                     message: "Processed \(response.stats.submitted) items"
                 )
             } catch {
+                print("DEBUG: Error running collector: \(error)")
+                print("DEBUG: Error description: \(error.localizedDescription)")
+                
                 // Create error activity
                 let activity = CollectorActivity(
                     id: UUID().uuidString,

@@ -112,13 +112,21 @@ actor HostAgentClient {
         // Use the provided JSON payload directly
         urlRequest.httpBody = jsonPayload.data(using: .utf8)
         
+        print("DEBUG HostAgentClient: Sending POST to \(url)")
+        print("DEBUG HostAgentClient: Payload: \(jsonPayload)")
+        print("DEBUG HostAgentClient: Headers: Content-Type=application/json, \(authHeader)=\(authSecret)")
+        
         let (data, response) = try await session.data(for: urlRequest)
+        
+        print("DEBUG HostAgentClient: Response status: \((response as? HTTPURLResponse)?.statusCode ?? -1)")
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ClientError.invalidResponse
         }
         
         guard (200...299).contains(httpResponse.statusCode) else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            print("DEBUG HostAgentClient: HTTP error \(httpResponse.statusCode): \(errorBody)")
             throw ClientError.httpError(statusCode: httpResponse.statusCode)
         }
         
