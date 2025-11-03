@@ -75,7 +75,7 @@ struct HavenUIApp: App {
             }
         }
 
-        Window("Haven Dashboard", id: "dashboard") {
+        WindowGroup("Haven Dashboard", id: "dashboard") {
             if let client = appDelegate.client {
                 DashboardView(
                     appState: appState,
@@ -84,9 +84,15 @@ struct HavenUIApp: App {
                     stopAction: stopHostAgent,
                     runAllAction: runAllCollectors
                 )
+            } else {
+                // Fallback when client isn't available yet
+                Text("Loading...")
+                    .frame(minWidth: 500, minHeight: 400)
             }
         }
         .keyboardShortcut("1", modifiers: [.command])
+        .windowStyle(.automatic)
+        .windowToolbarStyle(.unified(showsTitle: true))
     }
 
     private var statusColor: Color {
