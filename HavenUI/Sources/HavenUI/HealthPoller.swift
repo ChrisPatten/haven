@@ -40,7 +40,7 @@ final class HealthPoller {
     }
     
     // MARK: - Health Check
-    
+
     private func performHealthCheck() async {
         do {
             let health = try await client.getHealth()

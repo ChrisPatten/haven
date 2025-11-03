@@ -3,25 +3,29 @@ import AppKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState?
-    var client: HostAgentClient?
-    var poller: HealthPoller?
+    private var client: HostAgentClient?
+    private var poller: HealthPoller?
     var launchAgentManager: LaunchAgentManager?
-    
+    private var initialized = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard let appState = appState else { return }
-        
+        guard let appState = appState, !initialized else {
+            return
+        }
+
+        initialized = true
         let newClient = HostAgentClient()
         let newPoller = HealthPoller(client: newClient, appState: appState)
         let newLaunchAgentManager = LaunchAgentManager()
-        
+
         self.client = newClient
         self.poller = newPoller
         self.launchAgentManager = newLaunchAgentManager
-        
+
         Task {
             ensureLogsDirectory()
             newPoller.startPolling()
-            
+
             let state = await newLaunchAgentManager.getProcessState()
             appState.updateProcessState(state)
         }
@@ -44,26 +48,40 @@ struct HavenUIApp: App {
     @State private var appState = AppState()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var launchAgentManager: LaunchAgentManager?
-    
+
+    init() {
+        // Pass appState to delegate
+        appDelegate.appState = appState
+    }
+
     var body: some Scene {
-        MenuBarExtra("Haven", systemImage: "circle.fill") {
+        MenuBarExtra {
             MenuContent(
                 appState: appState,
                 startAction: startHostAgent,
                 stopAction: stopHostAgent
             )
+        } label: {
+            // Custom colored icon instead of systemImage
+            Image(systemName: "circle.fill")
+                .foregroundStyle(statusColor)
+                .symbolRenderingMode(.palette)
         }
         .commands {
             CommandGroup(replacing: .appSettings) {
                 // Placeholder for custom menu if needed
             }
         }
-        .onChange(of: appState.status) { _, _ in
-            // Ensure delegate has access to app state
-            appDelegate.appState = appState
-            if launchAgentManager == nil {
-                launchAgentManager = appDelegate.launchAgentManager
-            }
+    }
+
+    private var statusColor: Color {
+        switch appState.status {
+        case .green:
+            return .green
+        case .yellow:
+            return .yellow
+        case .red:
+            return .red
         }
     }
     

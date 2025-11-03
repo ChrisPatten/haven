@@ -37,6 +37,24 @@
             "name": "Release BuildInfoTool (hostagent)",
             "program": "${workspaceFolder:haven}/hostagent/.build/release/BuildInfoTool",
             "preLaunchTask": "swift: Build Release BuildInfoTool (hostagent)"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/HavenUI",
+            "name": "Debug HavenUI (HavenUI)",
+            "program": "${workspaceFolder:haven}/HavenUI/.build/debug/HavenUI",
+            "preLaunchTask": "swift: Build Debug HavenUI (HavenUI)"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/HavenUI",
+            "name": "Release HavenUI (HavenUI)",
+            "program": "${workspaceFolder:haven}/HavenUI/.build/release/HavenUI",
+            "preLaunchTask": "swift: Build Release HavenUI (HavenUI)"
         }
     ]
 }

@@ -3,33 +3,40 @@ import Foundation
 actor HostAgentClient {
     private let baseURL = URL(string: "http://localhost:7090")!
     private let session: URLSession
-    
+
     private let healthEndpoint = "/v1/health"
     private let timeoutInterval: TimeInterval = 5.0
-    
+
+    // Add auth header configuration
+    private let authHeader = "x-auth"
+    private let authSecret = "changeme"  // Match your hostagent config
+
     init(session: URLSession = URLSession.shared) {
         self.session = session
     }
     
     // MARK: - Health Check
-    
+
     func getHealth() async throws -> HealthResponse {
         let url = baseURL.appendingPathComponent(healthEndpoint)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = timeoutInterval
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        
+
+        // Add authentication header
+        request.setValue(authSecret, forHTTPHeaderField: authHeader)
+
         let (data, response) = try await session.data(for: request)
-        
+
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ClientError.invalidResponse
         }
-        
+
         guard httpResponse.statusCode == 200 else {
             throw ClientError.httpError(statusCode: httpResponse.statusCode)
         }
-        
+
         let decoder = JSONDecoder()
         let healthResponse = try decoder.decode(HealthResponse.self, from: data)
         return healthResponse
