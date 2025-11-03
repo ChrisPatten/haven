@@ -463,36 +463,20 @@ extension CollectorSchema {
         displayName: "IMAP",
         fields: globalFields + [
             SchemaField(
-                id: "reset",
-                label: "Reset State",
-                description: "Reset collector state before running",
-                fieldType: .boolean,
+                id: "account_id",
+                label: "Account ID",
+                description: "IMAP account identifier (matches source ID from config, e.g., personal-icloud, personal-gmail). If omitted, uses first enabled account.",
+                fieldType: .string(placeholder: "personal-icloud"),
                 required: false,
-                defaultValue: .bool(false)
-            ),
-            SchemaField(
-                id: "dry_run",
-                label: "Dry Run",
-                description: "Test run without processing",
-                fieldType: .boolean,
-                required: false,
-                defaultValue: .bool(false)
+                defaultValue: nil
             ),
             SchemaField(
                 id: "folder",
                 label: "Folder/Mailbox",
-                description: "IMAP folder to process (e.g., INBOX)",
+                description: "IMAP folder to process (e.g., INBOX, Sent Messages). If omitted, processes all folders configured for the account.",
                 fieldType: .string(placeholder: "INBOX"),
                 required: false,
                 defaultValue: .string("INBOX")
-            ),
-            SchemaField(
-                id: "account_id",
-                label: "Account ID",
-                description: "Account identifier for multi-account setups",
-                fieldType: .string(placeholder: "personal-gmail"),
-                required: false,
-                defaultValue: nil
             ),
             SchemaField(
                 id: "max_limit",
@@ -501,6 +485,22 @@ extension CollectorSchema {
                 fieldType: .integer(min: 1),
                 required: false,
                 defaultValue: nil
+            ),
+            SchemaField(
+                id: "reset",
+                label: "Reset State",
+                description: "Reset collector state before running (clears coverage tracking)",
+                fieldType: .boolean,
+                required: false,
+                defaultValue: .bool(false)
+            ),
+            SchemaField(
+                id: "dry_run",
+                label: "Dry Run",
+                description: "Test run without processing or submitting to server",
+                fieldType: .boolean,
+                required: false,
+                defaultValue: .bool(false)
             )
         ]
     )

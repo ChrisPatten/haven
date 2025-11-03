@@ -113,4 +113,5 @@ bd automatically syncs with git. No user intervention is necessary:
 
 ## Miscellaneous
 
-There is a symlink file .tmp/hostagent.yaml that points to the life config file for hostagent.
+- There is a symlink file .tmp/hostagent.yaml that points to the life config file for hostagent.
+- Do not commit changes to git unless asked. If asked to commit, always create a clear, complete message that reflects all of the changes.
