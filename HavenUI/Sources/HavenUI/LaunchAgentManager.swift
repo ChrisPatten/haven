@@ -159,6 +159,8 @@ actor LaunchAgentManager {
             <dict>
                 <key>HAVEN_LOG_LEVEL</key>
                 <string>info</string>
+                <key>NSUnbufferedIO</key>
+                <string>YES</string>
             </dict>
             
             <key>ProcessType</key>
