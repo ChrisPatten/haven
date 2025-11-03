@@ -639,20 +639,42 @@ struct LogViewerView: View {
                 .help("Refresh log content")
             }
 
-            ScrollView {
-                Text(logModel.logContent)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(logModel.logContent)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .id("logContent")
+
+                    // Invisible anchor at the bottom for scrolling
+                    Color.clear
+                        .frame(height: 1)
+                        .id("bottom")
+                }
+                .frame(height: 200)
+                .background(Color(.textBackgroundColor).opacity(0.5))
+                .cornerRadius(4)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color(.separatorColor), lineWidth: 1)
+                )
+                .onChange(of: logModel.logContent) {
+                    // Scroll to bottom when content changes
+                    withAnimation(.easeOut(duration: 0.1)) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                }
+                .onAppear {
+                    // Initial scroll to bottom
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        withAnimation(.easeOut(duration: 0.1)) {
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
+                    }
+                }
             }
-            .frame(height: 200)
-            .background(Color(.textBackgroundColor).opacity(0.5))
-            .cornerRadius(4)
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(Color(.separatorColor), lineWidth: 1)
-            )
         }
     }
 }
