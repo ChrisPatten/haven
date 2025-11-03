@@ -375,46 +375,74 @@ struct CollectorSchema: Identifiable {
 // MARK: - Collector Schema Definitions
 
 extension CollectorSchema {
+    // Global/top-level fields that apply to all requests
+    static let globalFields: [SchemaField] = [
+        SchemaField(
+            id: "order",
+            label: "Order",
+            description: "Sort order for results (asc=oldest first, desc=newest first)",
+            fieldType: .enumeration(values: ["asc", "desc"]),
+            required: true,
+            defaultValue: .string("desc")
+        ),
+        SchemaField(
+            id: "mode",
+            label: "Mode",
+            description: "Execution mode (real=process, simulate=dry-run)",
+            fieldType: .enumeration(values: ["real", "simulate"]),
+            required: false,
+            defaultValue: .string("real")
+        ),
+        SchemaField(
+            id: "limit",
+            label: "Limit",
+            description: "Maximum number of records to process",
+            fieldType: .integer(min: 1),
+            required: false,
+            defaultValue: nil
+        ),
+        SchemaField(
+            id: "since",
+            label: "Since (Start Date)",
+            description: "Only collect items from this date onwards",
+            fieldType: .string(placeholder: "2024-01-15T10:30:00Z"),
+            required: false,
+            defaultValue: nil
+        ),
+        SchemaField(
+            id: "until",
+            label: "Until (End Date)",
+            description: "Only collect items up to this date",
+            fieldType: .string(placeholder: "2024-01-15T10:30:00Z"),
+            required: false,
+            defaultValue: nil
+        ),
+        SchemaField(
+            id: "batch",
+            label: "Batch Mode",
+            description: "Submit documents via batch ingest endpoint",
+            fieldType: .boolean,
+            required: false,
+            defaultValue: .bool(false)
+        ),
+        SchemaField(
+            id: "batch_size",
+            label: "Batch Size",
+            description: "Number of documents per submission when batching",
+            fieldType: .integer(min: 1),
+            required: false,
+            defaultValue: nil
+        )
+    ]
+    
     static let imessage = CollectorSchema(
         id: "imessage",
         displayName: "iMessage",
-        fields: [
-            SchemaField(
-                id: "since",
-                label: "Since (Start Date)",
-                description: "Only collect messages from this date onwards",
-                fieldType: .dateTime,
-                required: false,
-                defaultValue: nil
-            ),
-            SchemaField(
-                id: "until",
-                label: "Until (End Date)",
-                description: "Only collect messages up to this date",
-                fieldType: .dateTime,
-                required: false,
-                defaultValue: nil
-            ),
-            SchemaField(
-                id: "limit",
-                label: "Limit",
-                description: "Maximum number of messages to process",
-                fieldType: .integer(min: 1),
-                required: false,
-                defaultValue: .int(1000)
-            ),
-            SchemaField(
-                id: "order",
-                label: "Order",
-                description: "Sort order for messages",
-                fieldType: .enumeration(values: ["asc", "desc"]),
-                required: false,
-                defaultValue: .string("asc")
-            ),
+        fields: globalFields + [
             SchemaField(
                 id: "thread_lookback_days",
                 label: "Thread Lookback Days",
-                description: "Number of days to look back for thread context",
+                description: "Days to look back for thread context",
                 fieldType: .integer(min: 0),
                 required: false,
                 defaultValue: nil
@@ -422,7 +450,7 @@ extension CollectorSchema {
             SchemaField(
                 id: "message_lookback_days",
                 label: "Message Lookback Days",
-                description: "Number of days to look back for messages",
+                description: "Days to look back for messages",
                 fieldType: .integer(min: 0),
                 required: false,
                 defaultValue: nil
@@ -441,31 +469,7 @@ extension CollectorSchema {
     static let email_local = CollectorSchema(
         id: "email_local",
         displayName: "Mail.app",
-        fields: [
-            SchemaField(
-                id: "since",
-                label: "Since (Start Date)",
-                description: "Only collect emails from this date onwards",
-                fieldType: .dateTime,
-                required: false,
-                defaultValue: nil
-            ),
-            SchemaField(
-                id: "until",
-                label: "Until (End Date)",
-                description: "Only collect emails up to this date",
-                fieldType: .dateTime,
-                required: false,
-                defaultValue: nil
-            ),
-            SchemaField(
-                id: "limit",
-                label: "Limit",
-                description: "Maximum number of emails to process",
-                fieldType: .integer(min: 1),
-                required: false,
-                defaultValue: .int(500)
-            ),
+        fields: globalFields + [
             SchemaField(
                 id: "dry_run",
                 label: "Dry Run",
@@ -480,31 +484,7 @@ extension CollectorSchema {
     static let email_imap = CollectorSchema(
         id: "email_imap",
         displayName: "IMAP",
-        fields: [
-            SchemaField(
-                id: "since",
-                label: "Since (Start Date)",
-                description: "Only collect emails from this date onwards",
-                fieldType: .dateTime,
-                required: false,
-                defaultValue: nil
-            ),
-            SchemaField(
-                id: "until",
-                label: "Until (End Date)",
-                description: "Only collect emails up to this date",
-                fieldType: .dateTime,
-                required: false,
-                defaultValue: nil
-            ),
-            SchemaField(
-                id: "limit",
-                label: "Limit",
-                description: "Maximum number of emails to process",
-                fieldType: .integer(min: 1),
-                required: false,
-                defaultValue: .int(100)
-            ),
+        fields: globalFields + [
             SchemaField(
                 id: "reset",
                 label: "Reset State",
@@ -530,6 +510,14 @@ extension CollectorSchema {
                 defaultValue: .string("INBOX")
             ),
             SchemaField(
+                id: "account_id",
+                label: "Account ID",
+                description: "Account identifier for multi-account setups",
+                fieldType: .string(placeholder: "personal-gmail"),
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
                 id: "max_limit",
                 label: "Max Limit",
                 description: "Maximum records to process",
@@ -543,23 +531,7 @@ extension CollectorSchema {
     static let localfs = CollectorSchema(
         id: "localfs",
         displayName: "Local Files",
-        fields: [
-            SchemaField(
-                id: "since",
-                label: "Since (Start Date)",
-                description: "Only collect files modified from this date onwards",
-                fieldType: .dateTime,
-                required: false,
-                defaultValue: nil
-            ),
-            SchemaField(
-                id: "until",
-                label: "Until (End Date)",
-                description: "Only collect files modified up to this date",
-                fieldType: .dateTime,
-                required: false,
-                defaultValue: nil
-            ),
+        fields: globalFields + [
             SchemaField(
                 id: "watch_dir",
                 label: "Watch Directory",
@@ -622,23 +594,7 @@ extension CollectorSchema {
     static let contacts = CollectorSchema(
         id: "contacts",
         displayName: "Contacts",
-        fields: [
-            SchemaField(
-                id: "since",
-                label: "Since (Start Date)",
-                description: "Only collect contacts modified from this date onwards",
-                fieldType: .dateTime,
-                required: false,
-                defaultValue: nil
-            ),
-            SchemaField(
-                id: "until",
-                label: "Until (End Date)",
-                description: "Only collect contacts modified up to this date",
-                fieldType: .dateTime,
-                required: false,
-                defaultValue: nil
-            ),
+        fields: globalFields + [
             SchemaField(
                 id: "mode",
                 label: "Mode",

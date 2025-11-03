@@ -7,6 +7,7 @@ actor HostAgentClient {
     private let healthEndpoint = "/v1/health"
     private let modulesEndpoint = "/v1/modules"
     private let timeoutInterval: TimeInterval = 5.0
+    private let collectorRunTimeout: TimeInterval = 3600.0  // 1 hour for collector runs (effectively no timeout)
 
     // Add auth header configuration
     private let authHeader = "x-auth"
@@ -74,7 +75,7 @@ actor HostAgentClient {
         let url = baseURL.appendingPathComponent("/v1/collectors/\(collector):run")
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
-        urlRequest.timeoutInterval = timeoutInterval
+        urlRequest.timeoutInterval = collectorRunTimeout
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
         urlRequest.setValue(authSecret, forHTTPHeaderField: authHeader)
@@ -104,7 +105,7 @@ actor HostAgentClient {
         let url = baseURL.appendingPathComponent("/v1/collectors/\(collector):run")
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
-        urlRequest.timeoutInterval = timeoutInterval
+        urlRequest.timeoutInterval = collectorRunTimeout
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
         urlRequest.setValue(authSecret, forHTTPHeaderField: authHeader)

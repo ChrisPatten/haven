@@ -140,9 +140,17 @@ struct CollectorsView: View {
                             schema: schema,
                             fieldValues: Binding(
                                 get: { collectorFieldValues[collectorId] ?? [:] },
-                                set: { collectorFieldValues[collectorId] = $0 }
+                                set: { newValues in
+                                    collectorFieldValues[collectorId] = newValues
+                                    // Persist settings when they change
+                                    savePersistedSettings(for: collectorId, values: newValues)
+                                }
                             ),
                             onSave: {
+                                // Save settings one more time before running
+                                if let fieldValues = collectorFieldValues[collectorId] {
+                                    savePersistedSettings(for: collectorId, values: fieldValues)
+                                }
                                 saveAndRunCollector(collector)
                                 editingCollector = nil
                             },
@@ -359,9 +367,56 @@ struct CollectorsView: View {
     private func editPayload(_ collector: CollectorInfo) {
         editingCollector = collector.id
         editingPayload = collector.payload
-        // Initialize field values for this collector if not already done
+        // Load persisted field values for this collector
         if collectorFieldValues[collector.id] == nil {
-            collectorFieldValues[collector.id] = [:]
+            collectorFieldValues[collector.id] = loadPersistedSettings(for: collector.id)
+        }
+    }
+    
+    // MARK: - Persistence Helpers
+    
+    private func loadPersistedSettings(for collectorId: String) -> [String: AnyCodable] {
+        let key = "collector_settings_\(collectorId)"
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        
+        var result: [String: AnyCodable] = [:]
+        for (key, value) in json {
+            if let str = value as? String {
+                result[key] = .string(str)
+            } else if let int = value as? Int {
+                result[key] = .int(int)
+            } else if let double = value as? Double {
+                result[key] = .double(double)
+            } else if let bool = value as? Bool {
+                result[key] = .bool(bool)
+            }
+        }
+        return result
+    }
+    
+    private func savePersistedSettings(for collectorId: String, values: [String: AnyCodable]) {
+        var dict: [String: Any] = [:]
+        for (key, value) in values {
+            switch value {
+            case .string(let s):
+                dict[key] = s
+            case .int(let i):
+                dict[key] = i
+            case .double(let d):
+                dict[key] = d
+            case .bool(let b):
+                dict[key] = b
+            case .null:
+                break
+            }
+        }
+        
+        if let data = try? JSONSerialization.data(withJSONObject: dict) {
+            let key = "collector_settings_\(collectorId)"
+            UserDefaults.standard.set(data, forKey: key)
         }
     }
     
@@ -390,29 +445,39 @@ struct CollectorsView: View {
         var dict: [String: Any] = [:]
         var dateRangeValues: [String: Any] = [:]
         
+        // List of top-level fields from the OpenAPI spec
+        let topLevelFields = Set(["mode", "limit", "order", "concurrency", "batch", "batch_size", "time_window", "cursor", "state_strategy", "dedupe_policy"])
+        let dateRangeFields = Set(["since", "until"])
+        let collectorOptionFields = Set(["thread_lookback_days", "message_lookback_days", "chat_db_path", "reset", "dry_run", "folder", "account_id", "max_limit", "watch_dir", "include", "exclude", "tags", "delete_after", "follow_symlinks"])
+        
+        var collectorOptions: [String: Any] = [:]
+        
         for (key, value) in fieldValues {
-            // Handle date_range fields specially
-            if key == "since" || key == "until" {
-                switch value {
-                case .string(let s):
-                    dateRangeValues[key] = s
-                default:
-                    break
-                }
-            } else {
-                // Handle regular fields
-                switch value {
-                case .string(let s):
-                    dict[key] = s
-                case .int(let i):
-                    dict[key] = i
-                case .double(let d):
-                    dict[key] = d
-                case .bool(let b):
-                    dict[key] = b
-                case .null:
-                    dict[key] = NSNull()
-                }
+            let anyValue: Any?
+            
+            // Convert AnyCodable to appropriate type
+            switch value {
+            case .string(let s):
+                anyValue = s
+            case .int(let i):
+                anyValue = i
+            case .double(let d):
+                anyValue = d
+            case .bool(let b):
+                anyValue = b
+            case .null:
+                anyValue = NSNull()
+            }
+            
+            guard let anyValue = anyValue else { continue }
+            
+            // Route to appropriate section
+            if dateRangeFields.contains(key) {
+                dateRangeValues[key] = anyValue
+            } else if topLevelFields.contains(key) {
+                dict[key] = anyValue
+            } else if collectorOptionFields.contains(key) {
+                collectorOptions[key] = anyValue
             }
         }
         
@@ -421,7 +486,16 @@ struct CollectorsView: View {
             dict["date_range"] = dateRangeValues
         }
         
-        // Use compact formatting instead of pretty-printed
+        // Add collector_options if it has values
+        if !collectorOptions.isEmpty {
+            dict["collector_options"] = collectorOptions
+        }
+        
+        // Ensure order is present (required by API)
+        if dict["order"] == nil {
+            dict["order"] = "desc"
+        }
+        
         let jsonData = try JSONSerialization.data(withJSONObject: dict, options: [])
         guard let jsonString = String(data: jsonData, encoding: .utf8) else {
             throw NSError(domain: "JSON", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON"])
