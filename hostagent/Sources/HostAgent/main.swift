@@ -34,6 +34,10 @@ struct HavenHostAgent: AsyncParsableCommand {
     HavenLogger.setMinimumLevel(config.logging.level)
     // Apply configured output format from file (overrides env)
     HavenLogger.setOutputFormat(config.logging.format)
+
+    // Enable direct file logging for LaunchAgent (bypasses stdout buffering)
+    // This ensures logs appear immediately in the UI instead of only on shutdown
+    HavenLogger.enableDirectFileLogging()
         let logger = HavenLogger(category: "main")
 
         logger.info("Configuration loaded", metadata: [

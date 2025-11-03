@@ -11,12 +11,51 @@ public struct HavenLogger {
     private static var minimumLevelPriority: Int = HavenLogger.priority(for: "info")
     // Logging output format: "json", "text", or "logfmt"
     private static var outputFormat: String = "json"
+    // Direct file logging for LaunchAgent (bypasses stdout buffering)
+    private static var directFileLoggingEnabled = false
+    private static var stdoutLogFileHandle: FileHandle?
+    private static var stderrLogFileHandle: FileHandle?
     // Shared ISO8601 formatter with fractional seconds for stable timestamps
     private static let iso8601Formatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
+
+    /// Enable direct file logging for LaunchAgent environments
+    /// This bypasses stdout/stderr buffering issues
+    public static func enableDirectFileLogging() {
+        directFileLoggingEnabled = true
+
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+        let logsDir = homeDir.appendingPathComponent("Library/Logs/Haven")
+
+        // Create logs directory if it doesn't exist
+        try? FileManager.default.createDirectory(
+            at: logsDir,
+            withIntermediateDirectories: true
+        )
+
+        let stdoutPath = logsDir.appendingPathComponent("hostagent.log")
+        let stderrPath = logsDir.appendingPathComponent("hostagent-error.log")
+
+        // Open file handles for direct writing
+        do {
+            if !FileManager.default.fileExists(atPath: stdoutPath.path) {
+                FileManager.default.createFile(atPath: stdoutPath.path, contents: nil)
+            }
+            stdoutLogFileHandle = try FileHandle(forWritingTo: stdoutPath)
+            stdoutLogFileHandle?.seekToEndOfFile()
+
+            if !FileManager.default.fileExists(atPath: stderrPath.path) {
+                FileManager.default.createFile(atPath: stderrPath.path, contents: nil)
+            }
+            stderrLogFileHandle = try FileHandle(forWritingTo: stderrPath)
+            stderrLogFileHandle?.seekToEndOfFile()
+        } catch {
+            print("Failed to enable direct file logging: \(error)")
+        }
+    }
     
     public init(category: String) {
         self.category = category
@@ -66,6 +105,8 @@ public struct HavenLogger {
         }
 
         let fmt = HavenLogger.outputFormat.lowercased()
+        var logOutput: String
+
         switch fmt {
         case "text":
             // Human readable text: [lvl] category: message key=val ...
@@ -74,9 +115,8 @@ public struct HavenLogger {
                 let meta = Self.formatMetadataSpaced(metadata)
                 parts.append(meta)
             }
-            let out = parts.joined(separator: " ")
-            os_log("%{public}@", log: osLog, type: osLogType, out)
-            print(out)
+            logOutput = parts.joined(separator: " ")
+            os_log("%{public}@", log: osLog, type: osLogType, logOutput)
 
         case "logfmt":
             // key=value format for log collectors
@@ -89,21 +129,35 @@ public struct HavenLogger {
             for (k, v) in metadata.sorted(by: { $0.key < $1.key }) {
                 pairs.append("\(k)=\"\(v)\"")
             }
-            let out = pairs.joined(separator: " ")
-            os_log("%{public}@", log: osLog, type: osLogType, out)
-            print(out)
+            logOutput = pairs.joined(separator: " ")
+            os_log("%{public}@", log: osLog, type: osLogType, logOutput)
 
         default:
             // Default: JSON structured output
             if let jsonData = try? JSONSerialization.data(withJSONObject: logData, options: [.sortedKeys]),
                let jsonString = String(data: jsonData, encoding: .utf8) {
+                logOutput = jsonString
                 os_log("%{public}@", log: osLog, type: osLogType, jsonString)
-                print(jsonString)
             } else {
                 // Fallback to text (include timestamp)
+                logOutput = "\(ts) [\(level)] \(category): \(message)"
                 os_log("%{public}@ [%{public}@] %{public}@: %{public}@", log: osLog, type: osLogType, ts, level, category, message)
-                print("\(ts) [\(level)] \(category): \(message)")
             }
+        }
+
+        // Write to files directly if enabled (bypasses stdout buffering)
+        if HavenLogger.directFileLoggingEnabled {
+            let outputWithNewline = logOutput + "\n"
+            if let data = outputWithNewline.data(using: .utf8) {
+                // For error levels, write to stderr log, otherwise stdout log
+                let isError = level == "error" || level == "fatal" || level == "critical"
+                let fileHandle = isError ? HavenLogger.stderrLogFileHandle : HavenLogger.stdoutLogFileHandle
+                try? fileHandle?.write(contentsOf: data)
+                try? fileHandle?.synchronize()
+            }
+        } else {
+            // Traditional stdout/stderr output (may be buffered)
+            print(logOutput)
         }
     }
 
