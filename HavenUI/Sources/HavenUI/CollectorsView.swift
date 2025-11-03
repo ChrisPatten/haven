@@ -200,9 +200,21 @@ struct CollectorsView: View {
                 for (collectorId, baseInfo) in CollectorInfo.supportedCollectors {
                     var info = baseInfo
                     
+                    // Map collector IDs to module names (some collectors share modules)
+                    let moduleName = mapCollectorToModule(collectorId)
+                    
                     // Check if enabled in modules
-                    if let moduleInfo = modulesResponse.modules[collectorId] {
+                    if let moduleInfo = modulesResponse.modules[moduleName] {
                         info.enabled = moduleInfo.enabled
+                    } else if collectorId == "localfs" {
+                        // localfs might not be in modules response, check if fswatch is enabled as fallback
+                        // or default to enabled if we can't determine
+                        if let fswatchInfo = modulesResponse.modules["fswatch"] {
+                            info.enabled = fswatchInfo.enabled
+                        } else {
+                            // Default to enabled if we can't determine (localfs might be standalone)
+                            info.enabled = true
+                        }
                     }
                     
                     // Fetch state if available
@@ -374,6 +386,19 @@ struct CollectorsView: View {
     }
     
     // MARK: - Persistence Helpers
+    
+    // Map collector IDs to their corresponding module names
+    private func mapCollectorToModule(_ collectorId: String) -> String {
+        switch collectorId {
+        case "email_local", "email_imap":
+            return "mail"
+        case "localfs":
+            // Check if localfs module exists, otherwise check fswatch
+            return "localfs"  // Will check if it exists in modules
+        default:
+            return collectorId
+        }
+    }
     
     private func loadPersistedSettings(for collectorId: String) -> [String: AnyCodable] {
         let key = "collector_settings_\(collectorId)"

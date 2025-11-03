@@ -110,3 +110,7 @@ bd automatically syncs with git. No user intervention is necessary:
 - ❌ Do NOT use external issue trackers
 - ❌ Do NOT duplicate tracking systems
 - ❌ Do NOT read from or modify ANYTHING in the .beads directory
+
+## Miscellaneous
+
+There is a symlink file .tmp/hostagent.yaml that points to the life config file for hostagent.
