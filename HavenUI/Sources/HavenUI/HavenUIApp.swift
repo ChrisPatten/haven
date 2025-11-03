@@ -15,6 +15,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         initialized = true
+        
+        // Set activation policy to regular so app appears in dock
+        NSApplication.shared.setActivationPolicy(.regular)
+        
         let newClient = HostAgentClient()
         let newPoller = HealthPoller(client: newClient, appState: appState)
         let newLaunchAgentManager = LaunchAgentManager()
