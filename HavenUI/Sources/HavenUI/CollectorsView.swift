@@ -14,6 +14,7 @@ struct CollectorsView: View {
     @State private var selectedCollector: String?
     @State private var editingCollector: String?
     @State private var editingPayload: String = ""
+    @State private var collectorFieldValues: [String: [String: AnyCodable]] = [:]
     
     var body: some View {
         VStack(spacing: 12) {
@@ -134,17 +135,34 @@ struct CollectorsView: View {
         .sheet(isPresented: .constant(editingCollector != nil)) {
             if let collectorId = editingCollector {
                 if let collector = collectors.first(where: { $0.id == collectorId }) {
-                    PayloadEditorView(
-                        collectorName: collector.displayName,
-                        payload: $editingPayload,
-                        onSave: { payload in
-                            runCollectorWithPayload(collector, customPayload: payload)
-                            editingCollector = nil
-                        },
-                        onCancel: {
-                            editingCollector = nil
-                        }
-                    )
+                    if let schema = CollectorSchema.schema(for: collectorId) {
+                        ConfiguratorView(
+                            schema: schema,
+                            fieldValues: Binding(
+                                get: { collectorFieldValues[collectorId] ?? [:] },
+                                set: { collectorFieldValues[collectorId] = $0 }
+                            ),
+                            onSave: {
+                                saveAndRunCollector(collector)
+                                editingCollector = nil
+                            },
+                            onCancel: {
+                                editingCollector = nil
+                            }
+                        )
+                    } else {
+                        PayloadEditorView(
+                            collectorName: collector.displayName,
+                            payload: $editingPayload,
+                            onSave: { payload in
+                                runCollectorWithPayload(collector, customPayload: payload)
+                                editingCollector = nil
+                            },
+                            onCancel: {
+                                editingCollector = nil
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -336,6 +354,46 @@ struct CollectorsView: View {
     private func editPayload(_ collector: CollectorInfo) {
         editingCollector = collector.id
         editingPayload = collector.payload
+    }
+    
+    private func saveAndRunCollector(_ collector: CollectorInfo) {
+        // Convert field values to JSON payload
+        if let fieldValues = collectorFieldValues[collector.id], !fieldValues.isEmpty {
+            do {
+                let jsonPayload = try fieldValuesToJSON(fieldValues)
+                runCollectorWithPayload(collector, customPayload: jsonPayload)
+            } catch {
+                errorMessage = "Failed to serialize configuration: \(error.localizedDescription)"
+            }
+        } else {
+            // Run with empty options
+            runCollectorWithPayload(collector, customPayload: "{}")
+        }
+    }
+    
+    private func fieldValuesToJSON(_ fieldValues: [String: AnyCodable]) throws -> String {
+        var dict: [String: Any] = [:]
+        
+        for (key, value) in fieldValues {
+            switch value {
+            case .string(let s):
+                dict[key] = s
+            case .int(let i):
+                dict[key] = i
+            case .double(let d):
+                dict[key] = d
+            case .bool(let b):
+                dict[key] = b
+            case .null:
+                dict[key] = NSNull()
+            }
+        }
+        
+        let jsonData = try JSONSerialization.data(withJSONObject: dict, options: .prettyPrinted)
+        guard let jsonString = String(data: jsonData, encoding: .utf8) else {
+            throw NSError(domain: "JSON", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON"])
+        }
+        return jsonString
     }
     
     private func startRefreshTimer() {

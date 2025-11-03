@@ -335,3 +335,249 @@ struct CollectorInfo: Identifiable {
         return formatter.string(from: lastRunTime)
     }
 }
+
+// MARK: - Schema Models for Dynamic Form Generation
+
+enum FieldType {
+    case string(placeholder: String? = nil)
+    case integer(min: Int? = nil, max: Int? = nil)
+    case double(min: Double? = nil, max: Double? = nil)
+    case boolean
+    case stringArray(placeholder: String? = nil)
+    case enumeration(values: [String])
+    case dateTime
+}
+
+struct SchemaField: Identifiable {
+    let id: String
+    let label: String
+    let description: String?
+    let fieldType: FieldType
+    let required: Bool
+    let defaultValue: AnyCodable?
+    
+    var jsonKey: String {
+        // Convert camelCase or snake_case to consistent form
+        id
+    }
+}
+
+struct CollectorSchema: Identifiable {
+    let id: String
+    let displayName: String
+    let fields: [SchemaField]
+    
+    func field(for key: String) -> SchemaField? {
+        fields.first { $0.id == key }
+    }
+}
+
+// MARK: - Collector Schema Definitions
+
+extension CollectorSchema {
+    static let imessage = CollectorSchema(
+        id: "imessage",
+        displayName: "iMessage",
+        fields: [
+            SchemaField(
+                id: "limit",
+                label: "Limit",
+                description: "Maximum number of messages to process",
+                fieldType: .integer(min: 1),
+                required: false,
+                defaultValue: .int(1000)
+            ),
+            SchemaField(
+                id: "order",
+                label: "Order",
+                description: "Sort order for messages",
+                fieldType: .enumeration(values: ["asc", "desc"]),
+                required: false,
+                defaultValue: .string("asc")
+            ),
+            SchemaField(
+                id: "thread_lookback_days",
+                label: "Thread Lookback Days",
+                description: "Number of days to look back for thread context",
+                fieldType: .integer(min: 0),
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "message_lookback_days",
+                label: "Message Lookback Days",
+                description: "Number of days to look back for messages",
+                fieldType: .integer(min: 0),
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "chat_db_path",
+                label: "Chat DB Path",
+                description: "Path to chat.db (leave empty for default)",
+                fieldType: .string(placeholder: "~/.haven/chat.db"),
+                required: false,
+                defaultValue: nil
+            )
+        ]
+    )
+    
+    static let email_local = CollectorSchema(
+        id: "email_local",
+        displayName: "Mail.app",
+        fields: [
+            SchemaField(
+                id: "limit",
+                label: "Limit",
+                description: "Maximum number of emails to process",
+                fieldType: .integer(min: 1),
+                required: false,
+                defaultValue: .int(500)
+            ),
+            SchemaField(
+                id: "dry_run",
+                label: "Dry Run",
+                description: "Process without submitting to server",
+                fieldType: .boolean,
+                required: false,
+                defaultValue: .bool(false)
+            )
+        ]
+    )
+    
+    static let email_imap = CollectorSchema(
+        id: "email_imap",
+        displayName: "IMAP",
+        fields: [
+            SchemaField(
+                id: "limit",
+                label: "Limit",
+                description: "Maximum number of emails to process",
+                fieldType: .integer(min: 1),
+                required: false,
+                defaultValue: .int(100)
+            ),
+            SchemaField(
+                id: "reset",
+                label: "Reset State",
+                description: "Reset collector state before running",
+                fieldType: .boolean,
+                required: false,
+                defaultValue: .bool(false)
+            ),
+            SchemaField(
+                id: "dry_run",
+                label: "Dry Run",
+                description: "Test run without processing",
+                fieldType: .boolean,
+                required: false,
+                defaultValue: .bool(false)
+            ),
+            SchemaField(
+                id: "folder",
+                label: "Folder/Mailbox",
+                description: "IMAP folder to process (e.g., INBOX)",
+                fieldType: .string(placeholder: "INBOX"),
+                required: false,
+                defaultValue: .string("INBOX")
+            ),
+            SchemaField(
+                id: "max_limit",
+                label: "Max Limit",
+                description: "Maximum records to process",
+                fieldType: .integer(min: 1),
+                required: false,
+                defaultValue: nil
+            )
+        ]
+    )
+    
+    static let localfs = CollectorSchema(
+        id: "localfs",
+        displayName: "Local Files",
+        fields: [
+            SchemaField(
+                id: "watch_dir",
+                label: "Watch Directory",
+                description: "Directory to scan for files",
+                fieldType: .string(placeholder: "~/HavenInbox"),
+                required: true,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "include",
+                label: "Include Patterns",
+                description: "Glob patterns to include (e.g., *.txt, *.pdf)",
+                fieldType: .stringArray(placeholder: "*.txt"),
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "exclude",
+                label: "Exclude Patterns",
+                description: "Glob patterns to exclude",
+                fieldType: .stringArray(placeholder: "*.tmp"),
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "tags",
+                label: "Tags",
+                description: "Tags to apply to collected files",
+                fieldType: .stringArray(placeholder: "inbox"),
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "delete_after",
+                label: "Delete After Processing",
+                description: "Remove files after successful upload",
+                fieldType: .boolean,
+                required: false,
+                defaultValue: .bool(false)
+            ),
+            SchemaField(
+                id: "dry_run",
+                label: "Dry Run",
+                description: "Identify matches without uploading",
+                fieldType: .boolean,
+                required: false,
+                defaultValue: .bool(false)
+            ),
+            SchemaField(
+                id: "follow_symlinks",
+                label: "Follow Symlinks",
+                description: "Follow symbolic links when scanning",
+                fieldType: .boolean,
+                required: false,
+                defaultValue: .bool(false)
+            )
+        ]
+    )
+    
+    static let contacts = CollectorSchema(
+        id: "contacts",
+        displayName: "Contacts",
+        fields: [
+            SchemaField(
+                id: "mode",
+                label: "Mode",
+                description: "Import mode (real or simulate)",
+                fieldType: .enumeration(values: ["real", "simulate"]),
+                required: false,
+                defaultValue: .string("real")
+            )
+        ]
+    )
+    
+    static func schema(for collectorId: String) -> CollectorSchema? {
+        let schemas: [String: CollectorSchema] = [
+            "imessage": .imessage,
+            "email_local": .email_local,
+            "email_imap": .email_imap,
+            "localfs": .localfs,
+            "contacts": .contacts
+        ]
+        return schemas[collectorId]
+    }
+}
