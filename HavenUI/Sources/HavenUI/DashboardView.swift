@@ -463,6 +463,8 @@ final class LogViewerModel: ObservableObject {
     private var logFileURL: URL
     private var fileHandle: FileHandle?
     private var source: DispatchSourceFileSystemObject?
+    private var pollingTimer: Timer?
+    private var lastFileSize: UInt64 = 0
 
     init(logFileName: String) {
         let logsDir = FileManager.default.homeDirectoryForCurrentUser
@@ -470,26 +472,38 @@ final class LogViewerModel: ObservableObject {
         logFileURL = logsDir.appendingPathComponent(logFileName)
 
         loadInitialContent()
-        startTailing()
+        startTailingOrPolling()
     }
 
     private func loadInitialContent() {
         do {
             let content = try String(contentsOf: logFileURL, encoding: .utf8)
             logContent = content.isEmpty ? "No logs yet..." : content
+            lastFileSize = UInt64((try? logFileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         } catch {
             logContent = "Log file not found or empty"
+            lastFileSize = 0
+        }
+    }
+
+    private func startTailingOrPolling() {
+        if FileManager.default.fileExists(atPath: logFileURL.path) {
+            startTailing()
+        } else {
+            startPolling()
         }
     }
 
     private func startTailing() {
         guard FileManager.default.fileExists(atPath: logFileURL.path) else {
+            startPolling()
             return
         }
 
         do {
             fileHandle = try FileHandle(forReadingFrom: logFileURL)
             fileHandle?.seekToEndOfFile()
+            lastFileSize = UInt64((try? logFileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
 
             source = DispatchSource.makeFileSystemObjectSource(
                 fileDescriptor: fileHandle!.fileDescriptor,
@@ -504,8 +518,52 @@ final class LogViewerModel: ObservableObject {
 
             source?.resume()
             isTailing = true
+            pollingTimer?.invalidate()
+            pollingTimer = nil
         } catch {
             print("Failed to start log tailing: \(error)")
+            startPolling()
+        }
+    }
+
+    private func startPolling() {
+        pollingTimer?.invalidate()
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+
+            Task { @MainActor in
+                do {
+                    let currentSize = try self.logFileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+
+                    if currentSize > Int(self.lastFileSize) {
+                        // File has grown, read the new content
+                        if let fileHandle = try? FileHandle(forReadingFrom: self.logFileURL) {
+                            fileHandle.seek(toFileOffset: self.lastFileSize)
+                            let data = fileHandle.readDataToEndOfFile()
+                            try? fileHandle.close()
+
+                            if let newContent = String(data: data, encoding: .utf8), !newContent.isEmpty {
+                                if self.logContent == "No logs yet..." || self.logContent == "Log file not found or empty" {
+                                    self.logContent = newContent
+                                } else {
+                                    self.logContent += newContent
+                                }
+                            }
+                            self.lastFileSize = UInt64(currentSize)
+                        }
+                    }
+
+                    // If file now exists and we're not tailing, try to start tailing
+                    if !self.isTailing && FileManager.default.fileExists(atPath: self.logFileURL.path) {
+                        self.startTailing()
+                    }
+                } catch {
+                    // File might not exist yet, continue polling
+                }
+            }
         }
     }
 
@@ -522,8 +580,18 @@ final class LogViewerModel: ObservableObject {
         }
     }
 
+    @MainActor
+    func refreshContent() {
+        loadInitialContent()
+        if isTailing {
+            source?.cancel()
+            startTailingOrPolling()
+        }
+    }
+
     deinit {
         source?.cancel()
+        pollingTimer?.invalidate()
         try? fileHandle?.close()
     }
 }
@@ -553,7 +621,22 @@ struct LogViewerView: View {
                     Text("Live")
                         .font(.caption2)
                         .foregroundStyle(.green)
+                } else {
+                    Circle()
+                        .fill(.orange)
+                        .frame(width: 8, height: 8)
+                    Text("Waiting")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
                 }
+
+                Button(action: {
+                    logModel.refreshContent()
+                }) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .help("Refresh log content")
             }
 
             ScrollView {
