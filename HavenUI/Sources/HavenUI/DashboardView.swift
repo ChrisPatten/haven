@@ -512,17 +512,13 @@ final class LogViewerModel: ObservableObject {
     private func readNewContent() {
         guard let fileHandle = fileHandle else { return }
 
-        do {
-            let data = fileHandle.readDataToEndOfFile()
-            if let newContent = String(data: data, encoding: .utf8), !newContent.isEmpty {
-                if logContent == "No logs yet..." || logContent == "Log file not found or empty" {
-                    logContent = newContent
-                } else {
-                    logContent += newContent
-                }
+        let data = fileHandle.readDataToEndOfFile()
+        if let newContent = String(data: data, encoding: .utf8), !newContent.isEmpty {
+            if logContent == "No logs yet..." || logContent == "Log file not found or empty" {
+                logContent = newContent
+            } else {
+                logContent += newContent
             }
-        } catch {
-            print("Failed to read new log content: \(error)")
         }
     }
 
