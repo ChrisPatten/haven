@@ -93,6 +93,7 @@ struct HavenUIApp: App {
         .keyboardShortcut("1", modifiers: [.command])
         .windowStyle(.automatic)
         .windowToolbarStyle(.unified(showsTitle: true))
+        .defaultLaunchBehavior(.presented)
     }
 
     private var statusColor: Color {
