@@ -30,6 +30,112 @@ struct ModuleSummary: Codable {
     }
 }
 
+// MARK: - Modules Response
+
+struct ModulesResponse: Codable {
+    let modules: [String: ModuleConfig]
+    
+    struct ModuleConfig: Codable {
+        let enabled: Bool
+        let config: [String: AnyCodable]?
+    }
+}
+
+// MARK: - Collector Run Models
+
+struct CollectorRunRequest: Codable {
+    let limit: Int?
+    let dateRange: DateRange?
+    let collectorOptions: [String: AnyCodable]?
+    
+    enum CodingKeys: String, CodingKey {
+        case limit
+        case dateRange = "date_range"
+        case collectorOptions = "collector_options"
+    }
+    
+    init(limit: Int? = nil, dateRange: DateRange? = nil, collectorOptions: [String: AnyCodable]? = nil) {
+        self.limit = limit
+        self.dateRange = dateRange
+        self.collectorOptions = collectorOptions
+    }
+}
+
+struct DateRange: Codable {
+    let since: String?
+    let until: String?
+}
+
+struct RunResponse: Codable {
+    let status: String  // ok, error, partial
+    let collector: String
+    let runId: String
+    let startedAt: String
+    let finishedAt: String?
+    let stats: RunStats
+    let warnings: [String]
+    let errors: [String]
+    
+    enum CodingKeys: String, CodingKey {
+        case status
+        case collector
+        case runId = "run_id"
+        case startedAt = "started_at"
+        case finishedAt = "finished_at"
+        case stats
+        case warnings
+        case errors
+    }
+}
+
+struct RunStats: Codable {
+    let scanned: Int
+    let matched: Int
+    let submitted: Int
+    let skipped: Int
+    let earliestTouched: String?
+    let latestTouched: String?
+    let batches: Int
+    
+    enum CodingKeys: String, CodingKey {
+        case scanned
+        case matched
+        case submitted
+        case skipped
+        case earliestTouched = "earliest_touched"
+        case latestTouched = "latest_touched"
+        case batches
+    }
+}
+
+struct CollectorStateResponse: Codable {
+    let isRunning: Bool?
+    let lastRunStatus: String?
+    let lastRunTime: String?
+    let lastRunStats: [String: AnyCodable]?
+    let lastRunError: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case isRunning = "is_running"
+        case lastRunStatus = "last_run_status"
+        case lastRunTime = "last_run_time"
+        case lastRunStats = "last_run_stats"
+        case lastRunError = "last_run_error"
+    }
+}
+
+// MARK: - Local Activity Model
+
+struct CollectorActivity: Identifiable, Codable {
+    let id: String
+    let collector: String
+    let timestamp: Date
+    let status: String  // ok, error, partial
+    let scanned: Int
+    let submitted: Int
+    let errors: [String]
+}
+
 // MARK: - App Status Enum
 
 enum AppStatus: Equatable {
@@ -66,4 +172,47 @@ enum ProcessState: Equatable {
     case running
     case stopped
     case unknown
+}
+
+// MARK: - AnyCodable Helper
+
+enum AnyCodable: Codable {
+    case string(String)
+    case int(Int)
+    case double(Double)
+    case bool(Bool)
+    case null
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode(Int.self) {
+            self = .int(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .double(value)
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else {
+            self = .null
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let value):
+            try container.encode(value)
+        case .int(let value):
+            try container.encode(value)
+        case .double(let value):
+            try container.encode(value)
+        case .bool(let value):
+            try container.encode(value)
+        case .null:
+            try container.encodeNil()
+        }
+    }
 }

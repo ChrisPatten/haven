@@ -3,7 +3,7 @@ import AppKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState?
-    private var client: HostAgentClient?
+    var client: HostAgentClient?
     private var poller: HealthPoller?
     var launchAgentManager: LaunchAgentManager?
     private var initialized = false
@@ -47,7 +47,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct HavenUIApp: App {
     @State private var appState = AppState()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var launchAgentManager: LaunchAgentManager?
+    @State private var dashboardOpen = false
 
     init() {
         // Pass appState to delegate
@@ -58,8 +58,10 @@ struct HavenUIApp: App {
         MenuBarExtra {
             MenuContent(
                 appState: appState,
+                dashboardOpen: $dashboardOpen,
                 startAction: startHostAgent,
-                stopAction: stopHostAgent
+                stopAction: stopHostAgent,
+                runAllAction: runAllCollectors
             )
         } label: {
             // Custom colored icon instead of systemImage
@@ -72,6 +74,19 @@ struct HavenUIApp: App {
                 // Placeholder for custom menu if needed
             }
         }
+        
+        Window("Haven Dashboard", id: "dashboard") {
+            if let client = appDelegate.client {
+                DashboardView(
+                    appState: appState,
+                    client: client,
+                    startAction: startHostAgent,
+                    stopAction: stopHostAgent,
+                    runAllAction: runAllCollectors
+                )
+            }
+        }
+        .keyboardShortcut("1", modifiers: [.command])
     }
 
     private var statusColor: Color {
@@ -116,13 +131,91 @@ struct HavenUIApp: App {
             appState.updateProcessState(.unknown)
         }
     }
+    
+    private func runAllCollectors() async {
+        guard let client = appDelegate.client else { return }
+        
+        appState.setRunningAllCollectors(true)
+        defer { appState.setRunningAllCollectors(false) }
+        
+        do {
+            // Get list of modules
+            let modulesResponse = try await client.getModules()
+            
+            // Filter to enabled collectors (we'll try common collector names)
+            let commonCollectors = ["imessage", "email_imap", "localfs", "contacts"]
+            let enabledCollectors = commonCollectors.filter { collector in
+                modulesResponse.modules[collector]?.enabled ?? false
+            }
+            
+            // Run each collector sequentially
+            for collector in enabledCollectors {
+                do {
+                    let response = try await client.runCollector(collector)
+                    
+                    // Create activity record
+                    let activity = CollectorActivity(
+                        id: response.runId,
+                        collector: collector,
+                        timestamp: Date(),
+                        status: response.status,
+                        scanned: response.stats.scanned,
+                        submitted: response.stats.submitted,
+                        errors: response.errors
+                    )
+                    appState.addActivity(activity)
+                    
+                    // Show notification
+                    showNotification(
+                        title: collector.capitalized,
+                        message: "Processed \(response.stats.submitted) items"
+                    )
+                } catch {
+                    // Log error but continue with next collector
+                    let activity = CollectorActivity(
+                        id: UUID().uuidString,
+                        collector: collector,
+                        timestamp: Date(),
+                        status: "error",
+                        scanned: 0,
+                        submitted: 0,
+                        errors: [error.localizedDescription]
+                    )
+                    appState.addActivity(activity)
+                    
+                    showNotification(
+                        title: collector.capitalized,
+                        message: "Failed: \(error.localizedDescription)"
+                    )
+                }
+            }
+            
+            appState.clearError()
+        } catch {
+            appState.setError("Failed to run collectors: \(error.localizedDescription)")
+            showNotification(
+                title: "Run All Failed",
+                message: error.localizedDescription
+            )
+        }
+    }
+    
+    private func showNotification(title: String, message: String) {
+        let notification = NSUserNotification()
+        notification.title = title
+        notification.informativeText = message
+        notification.soundName = nil
+        NSUserNotificationCenter.default.deliver(notification)
+    }
 }
 
 // Separate view for menu content
 struct MenuContent: View {
     var appState: AppState
+    @Binding var dashboardOpen: Bool
     let startAction: () async -> Void
     let stopAction: () async -> Void
+    let runAllAction: () async -> Void
     
     var body: some View {
         VStack(spacing: 8) {
@@ -136,6 +229,16 @@ struct MenuContent: View {
             .padding(8)
             .background(Color(.controlBackgroundColor))
             .cornerRadius(4)
+            
+            Divider()
+            
+            // Dashboard Button
+            Button(action: {
+                dashboardOpen = true
+                NSApp.activate(ignoringOtherApps: true)
+            }) {
+                Label("Dashboard", systemImage: "rectangle.grid.2x2")
+            }
             
             Divider()
             
@@ -160,6 +263,26 @@ struct MenuContent: View {
                 .disabled(appState.status == .red || appState.isLoading())
             }
             .padding(4)
+            
+            Divider()
+            
+            // Run All Button
+            Button(action: {
+                Task {
+                    await runAllAction()
+                }
+            }) {
+                if appState.isRunningAllCollectors {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .scaleEffect(0.7, anchor: .center)
+                        Label("Running...", systemImage: "play.circle.fill")
+                    }
+                } else {
+                    Label("Run All Collectors", systemImage: "play.circle.fill")
+                }
+            }
+            .disabled(appState.status != .green || appState.isLoading())
             
             Divider()
             

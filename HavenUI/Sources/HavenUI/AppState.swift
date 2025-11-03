@@ -11,6 +11,11 @@ final class AppState {
     var isStopping: Bool = false
     var errorMessage: String?
     
+    // Dashboard-related state
+    var recentActivity: [CollectorActivity] = []
+    var isRunningAllCollectors: Bool = false
+    var collectorStates: [String: CollectorStateResponse] = [:]
+    
     // MARK: - Initialization
     
     init() {
@@ -76,6 +81,28 @@ final class AppState {
     }
     
     func isLoading() -> Bool {
-        return isStarting || isStopping
+        return isStarting || isStopping || isRunningAllCollectors
+    }
+    
+    // MARK: - Activity Management
+    
+    func addActivity(_ activity: CollectorActivity) {
+        // Add to beginning and keep max 10 entries
+        recentActivity.insert(activity, at: 0)
+        if recentActivity.count > 10 {
+            recentActivity = Array(recentActivity.prefix(10))
+        }
+    }
+    
+    func updateCollectorState(_ collector: String, state: CollectorStateResponse?) {
+        if let state = state {
+            collectorStates[collector] = state
+        } else {
+            collectorStates.removeValue(forKey: collector)
+        }
+    }
+    
+    func setRunningAllCollectors(_ running: Bool) {
+        isRunningAllCollectors = running
     }
 }
