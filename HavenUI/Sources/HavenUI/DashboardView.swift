@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 struct DashboardView: View {
     var appState: AppState
@@ -63,10 +64,15 @@ struct DashboardView: View {
                     )
                     
                     Divider()
-                    
+
                     // Recent Activity Section
                     RecentActivitySection(activity: appState.recentActivity)
-                    
+
+                    Divider()
+
+                    // Live Logs Section
+                    LiveLogsSection()
+
                     // Error Banner
                     if let error = appState.errorMessage {
                         ErrorBannerView(message: error)
@@ -88,6 +94,31 @@ struct DashboardView: View {
             return .yellow
         case .red:
             return .red
+        }
+    }
+}
+
+// MARK: - Live Logs Section
+
+struct LiveLogsSection: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Live Logs")
+                .font(.subheadline)
+                .fontWeight(.semibold)
+
+            TabView {
+                LogViewerView(logFileName: "hostagent.log", title: "HostAgent Output")
+                    .tabItem {
+                        Label("Output", systemImage: "terminal")
+                    }
+
+                LogViewerView(logFileName: "hostagent-error.log", title: "HostAgent Errors")
+                    .tabItem {
+                        Label("Errors", systemImage: "exclamationmark.triangle")
+                    }
+            }
+            .frame(height: 250)
         }
     }
 }
@@ -403,22 +434,147 @@ struct ActivityItemView: View {
 
 struct ErrorBannerView: View {
     var message: String
-    
+
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundStyle(.orange)
-            
+
             Text(message)
                 .font(.caption)
                 .lineLimit(2)
-            
+
             Spacer()
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
         .background(Color.orange.opacity(0.1))
         .cornerRadius(4)
+    }
+}
+
+// MARK: - Log Viewer
+
+@MainActor
+final class LogViewerModel: ObservableObject {
+    @Published var logContent: String = "Loading logs..."
+    @Published var isTailing: Bool = false
+
+    private var logFileURL: URL
+    private var fileHandle: FileHandle?
+    private var source: DispatchSourceFileSystemObject?
+
+    init(logFileName: String) {
+        let logsDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Haven")
+        logFileURL = logsDir.appendingPathComponent(logFileName)
+
+        loadInitialContent()
+        startTailing()
+    }
+
+    private func loadInitialContent() {
+        do {
+            let content = try String(contentsOf: logFileURL, encoding: .utf8)
+            logContent = content.isEmpty ? "No logs yet..." : content
+        } catch {
+            logContent = "Log file not found or empty"
+        }
+    }
+
+    private func startTailing() {
+        guard FileManager.default.fileExists(atPath: logFileURL.path) else {
+            return
+        }
+
+        do {
+            fileHandle = try FileHandle(forReadingFrom: logFileURL)
+            fileHandle?.seekToEndOfFile()
+
+            source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fileHandle!.fileDescriptor,
+                eventMask: .extend,
+                queue: DispatchQueue.main
+            )
+
+            source?.setEventHandler { [weak self] in
+                guard let self = self else { return }
+                self.readNewContent()
+            }
+
+            source?.resume()
+            isTailing = true
+        } catch {
+            print("Failed to start log tailing: \(error)")
+        }
+    }
+
+    private func readNewContent() {
+        guard let fileHandle = fileHandle else { return }
+
+        do {
+            let data = fileHandle.readDataToEndOfFile()
+            if let newContent = String(data: data, encoding: .utf8), !newContent.isEmpty {
+                if logContent == "No logs yet..." || logContent == "Log file not found or empty" {
+                    logContent = newContent
+                } else {
+                    logContent += newContent
+                }
+            }
+        } catch {
+            print("Failed to read new log content: \(error)")
+        }
+    }
+
+    deinit {
+        source?.cancel()
+        try? fileHandle?.close()
+    }
+}
+
+struct LogViewerView: View {
+    @StateObject private var logModel: LogViewerModel
+    let title: String
+
+    init(logFileName: String, title: String) {
+        _logModel = StateObject(wrappedValue: LogViewerModel(logFileName: logFileName))
+        self.title = title
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+
+                Spacer()
+
+                if logModel.isTailing {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 8, height: 8)
+                    Text("Live")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                }
+            }
+
+            ScrollView {
+                Text(logModel.logContent)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+            }
+            .frame(height: 200)
+            .background(Color(.textBackgroundColor).opacity(0.5))
+            .cornerRadius(4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color(.separatorColor), lineWidth: 1)
+            )
+        }
     }
 }
 
