@@ -351,16 +351,33 @@ struct StringArrayFieldView: View {
 
 struct DateTimeFieldView: View {
     @Binding var value: AnyCodable?
-    @State private var selectedDate = Date()
+    
+    var stringValue: String {
+        if case .string(let s) = value {
+            return s
+        }
+        return ""
+    }
     
     var body: some View {
-        DatePicker("", selection: $selectedDate, displayedComponents: [.date, .hourAndMinute])
-            .datePickerStyle(.graphical)
-            .onChange(of: selectedDate) { newDate in
-                let formatter = ISO8601DateFormatter()
-                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                value = .string(formatter.string(from: newDate))
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("", text: Binding(
+                get: { stringValue },
+                set: { newValue in
+                    value = newValue.isEmpty ? nil : .string(newValue)
+                }
+            ))
+            .textFieldStyle(.roundedBorder)
+            .placeholder(when: stringValue.isEmpty) {
+                Text("2024-01-15T10:30:00Z")
+                    .foregroundStyle(.secondary)
             }
+            
+            Text("Example: 2024-01-15T10:30:00Z")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+        }
     }
 }
 
