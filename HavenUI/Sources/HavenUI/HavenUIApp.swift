@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UserNotifications
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState?
@@ -93,7 +94,6 @@ struct HavenUIApp: App {
         .keyboardShortcut("1", modifiers: [.command])
         .windowStyle(.automatic)
         .windowToolbarStyle(.unified(showsTitle: true))
-        .defaultLaunchBehavior(.presented)
     }
 
     private var statusColor: Color {
@@ -208,11 +208,29 @@ struct HavenUIApp: App {
     }
     
     private func showNotification(title: String, message: String) {
-        let notification = NSUserNotification()
-        notification.title = title
-        notification.informativeText = message
-        notification.soundName = nil
-        NSUserNotificationCenter.default.deliver(notification)
+        let center = UNUserNotificationCenter.current()
+        
+        // Request permission if not already granted
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if granted {
+                let content = UNMutableNotificationContent()
+                content.title = title
+                content.body = message
+                content.sound = nil
+                
+                let request = UNNotificationRequest(
+                    identifier: UUID().uuidString,
+                    content: content,
+                    trigger: nil
+                )
+                
+                center.add(request) { error in
+                    if let error = error {
+                        print("Failed to deliver notification: \(error)")
+                    }
+                }
+            }
+        }
     }
 }
 
