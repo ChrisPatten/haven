@@ -16,6 +16,10 @@ final class AppState {
     var isRunningAllCollectors: Bool = false
     var collectorStates: [String: CollectorStateResponse] = [:]
     
+    // Collectors panel state
+    var collectorsList: [CollectorInfo] = []
+    var runningCollectors: Set<String> = []
+    
     // MARK: - Initialization
     
     init() {
@@ -104,5 +108,40 @@ final class AppState {
     
     func setRunningAllCollectors(_ running: Bool) {
         isRunningAllCollectors = running
+    }
+    
+    // MARK: - Collector Management
+    
+    func updateCollectorsList(_ collectors: [CollectorInfo]) {
+        collectorsList = collectors
+    }
+    
+    func setCollectorRunning(_ collectorId: String, running: Bool) {
+        if running {
+            runningCollectors.insert(collectorId)
+        } else {
+            runningCollectors.remove(collectorId)
+        }
+    }
+    
+    func isCollectorRunning(_ collectorId: String) -> Bool {
+        return runningCollectors.contains(collectorId)
+    }
+    
+    func updateCollectorState(_ collectorId: String, with state: CollectorStateResponse) {
+        if var collector = collectorsList.first(where: { $0.id == collectorId }) {
+            // Parse last_run_time if available
+            if let lastRunTimeStr = state.lastRunTime {
+                let formatter = ISO8601DateFormatter()
+                collector.lastRunTime = formatter.date(from: lastRunTimeStr)
+            }
+            collector.lastRunStatus = state.lastRunStatus
+            collector.lastError = state.lastRunError
+            
+            // Update in list
+            if let index = collectorsList.firstIndex(where: { $0.id == collectorId }) {
+                collectorsList[index] = collector
+            }
+        }
     }
 }

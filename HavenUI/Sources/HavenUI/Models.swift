@@ -238,3 +238,100 @@ enum AnyCodable: Codable {
         }
     }
 }
+
+// MARK: - Collector Info Model
+
+struct CollectorInfo: Identifiable {
+    let id: String  // e.g., "imessage", "email_imap"
+    let displayName: String
+    let description: String
+    let category: String  // e.g., "messages", "email", "files", "contacts"
+    var enabled: Bool
+    var lastRunTime: Date?
+    var lastRunStatus: String?
+    var isRunning: Bool = false
+    var lastError: String?
+    var payload: String = ""
+    
+    static let supportedCollectors: [String: CollectorInfo] = [
+        "imessage": CollectorInfo(
+            id: "imessage",
+            displayName: "iMessage",
+            description: "Messages from Messages.app",
+            category: "messages",
+            enabled: false,
+            payload: #"{"limit": 1000}"#
+        ),
+        "email_local": CollectorInfo(
+            id: "email_local",
+            displayName: "Mail.app",
+            description: "Emails from Mail.app",
+            category: "email",
+            enabled: false,
+            payload: #"{"limit": 500}"#
+        ),
+        "email_imap": CollectorInfo(
+            id: "email_imap",
+            displayName: "IMAP",
+            description: "Remote email via IMAP",
+            category: "email",
+            enabled: false,
+            payload: #"{"limit": 100}"#
+        ),
+        "localfs": CollectorInfo(
+            id: "localfs",
+            displayName: "Local Files",
+            description: "Documents and files from disk",
+            category: "files",
+            enabled: false,
+            payload: #"{"collector_options": {"watch_dir": "~/HavenInbox"}}"#
+        ),
+        "contacts": CollectorInfo(
+            id: "contacts",
+            displayName: "Contacts",
+            description: "Contacts from Contacts.app",
+            category: "contacts",
+            enabled: false,
+            payload: #"{"collector_options": {"mode": "real"}}"#
+        )
+    ]
+    
+    // Collectors that have /state endpoints
+    static let stateAwareCollectors = Set(["imessage", "contacts", "localfs"])
+    
+    static func hasStateEndpoint(_ collectorId: String) -> Bool {
+        return stateAwareCollectors.contains(collectorId)
+    }
+    
+    func statusDescription() -> String {
+        if isRunning {
+            return "Running..."
+        }
+        if let lastError = lastError, !lastError.isEmpty {
+            return "Error"
+        }
+        if let status = lastRunStatus, !status.isEmpty {
+            switch status.lowercased() {
+            case "ok":
+                return "Idle"
+            case "error":
+                return "Error"
+            case "partial":
+                return "Partial"
+            default:
+                return status
+            }
+        }
+        return "Idle"
+    }
+    
+    func lastRunDescription() -> String {
+        guard let lastRunTime = lastRunTime else {
+            return "Never"
+        }
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .short
+        return formatter.string(from: lastRunTime)
+    }
+}

@@ -100,6 +100,34 @@ actor HostAgentClient {
         return runResponse
     }
     
+    func runCollectorWithPayload(_ collector: String, jsonPayload: String) async throws -> RunResponse {
+        let url = baseURL.appendingPathComponent("/v1/collectors/\(collector):run")
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = "POST"
+        urlRequest.timeoutInterval = timeoutInterval
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        urlRequest.setValue(authSecret, forHTTPHeaderField: authHeader)
+        
+        // Use the provided JSON payload directly
+        urlRequest.httpBody = jsonPayload.data(using: .utf8)
+        
+        let (data, response) = try await session.data(for: urlRequest)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ClientError.invalidResponse
+        }
+        
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw ClientError.httpError(statusCode: httpResponse.statusCode)
+        }
+        
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let runResponse = try decoder.decode(RunResponse.self, from: data)
+        return runResponse
+    }
+    
     // MARK: - Collector State
     
     func getCollectorState(_ collector: String) async throws -> CollectorStateResponse {

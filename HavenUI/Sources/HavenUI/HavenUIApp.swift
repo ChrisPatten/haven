@@ -85,6 +85,7 @@ struct HavenUIApp: App {
             MenuContent(
                 appState: appState,
                 openDashboard: { openOrFocusDashboard() },
+                openCollectors: { openOrFocusCollectors() },
                 startAction: startHostAgent,
                 stopAction: stopHostAgent,
                 runAllAction: runAllCollectors
@@ -119,6 +120,22 @@ struct HavenUIApp: App {
         .keyboardShortcut("1", modifiers: [.command])
         .windowStyle(.automatic)
         .windowToolbarStyle(.unified(showsTitle: true))
+        
+        WindowGroup("Haven Collectors", id: "collectors") {
+            if let client = appDelegate.client {
+                CollectorsView(
+                    appState: appState,
+                    client: client
+                )
+            } else {
+                // Fallback when client isn't available yet
+                Text("Loading...")
+                    .frame(minWidth: 700, minHeight: 400)
+            }
+        }
+        .keyboardShortcut("2", modifiers: [.command])
+        .windowStyle(.automatic)
+        .windowToolbarStyle(.unified(showsTitle: true))
     }
 
     private var statusColor: Color {
@@ -144,6 +161,21 @@ struct HavenUIApp: App {
         } else {
             // Open new dashboard window
             openWindow(id: "dashboard")
+        }
+    }
+    
+    private func openOrFocusCollectors() {
+        // Check if collectors window already exists
+        if let existingWindow = NSApplication.shared.windows.first(where: { window in
+            window.identifier?.rawValue == "collectors" ||
+            window.title == "Haven Collectors"
+        }) {
+            // Bring existing window to front
+            existingWindow.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        } else {
+            // Open new collectors window
+            openWindow(id: "collectors")
         }
     }
 
@@ -290,6 +322,7 @@ struct HavenUIApp: App {
 struct MenuContent: View {
     var appState: AppState
     let openDashboard: () -> Void
+    let openCollectors: () -> Void
     let startAction: () async -> Void
     let stopAction: () async -> Void
     let runAllAction: () async -> Void
@@ -312,6 +345,11 @@ struct MenuContent: View {
             // Dashboard Button
             Button(action: openDashboard) {
                 Label("Dashboard", systemImage: "rectangle.grid.2x2")
+            }
+            
+            // Collectors Button
+            Button(action: { openCollectors() }) {
+                Label("Collectors", systemImage: "list.bullet")
             }
             
             Divider()
