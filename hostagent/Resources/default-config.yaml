@@ -77,6 +77,30 @@ modules:
       #   target: gateway
       #   handoff: presigned
   
+  localfs:
+    enabled: false
+    # default_watch_dir: ~/HavenInbox
+    include:
+      - "*.txt"
+      - "*.md"
+      - "*.pdf"
+      - "*.png"
+      - "*.jpg"
+      - "*.jpeg"
+      - "*.heic"
+    exclude:
+      - "*.tmp"
+      - "~*"
+    tags: []
+    # move_to: ~/.haven/localfs/processed
+    delete_after: false
+    dry_run: false
+    one_shot: true
+    state_file: ~/.haven/localfs_collector_state.json
+    max_file_bytes: 10485760
+    request_timeout: 30
+    follow_symlinks: false
+  
   contacts:
     enabled: false
   

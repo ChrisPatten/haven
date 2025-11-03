@@ -65,7 +65,7 @@ struct HavenHostAgent: AsyncParsableCommand {
         }
         
         // Build router with handlers
-        let router = buildRouter(config: config, configLoader: configLoader, fsWatchService: fsWatchService)
+        let router = await buildRouter(config: config, configLoader: configLoader, fsWatchService: fsWatchService)
         
         // Create and start server
         let server = try HavenHTTPServer(config: config, router: router)
@@ -174,7 +174,7 @@ struct HavenHostAgent: AsyncParsableCommand {
         print("")
     }
     
-    private func buildRouter(config: HavenConfig, configLoader: ConfigLoader, fsWatchService: FSWatchService) -> Router {
+    private func buildRouter(config: HavenConfig, configLoader: ConfigLoader, fsWatchService: FSWatchService) async -> Router {
         let startTime = Date()
         
         let healthHandler = HealthHandler(config: config, startTime: startTime)
@@ -201,6 +201,15 @@ struct HavenHostAgent: AsyncParsableCommand {
         
     // Initialize contacts handler
     let contactsHandler = ContactsHandler(config: config, gatewayClient: gatewayClient)
+        
+        // Initialize LocalFS handler
+        let localFSHandler = LocalFSHandler(config: config)
+        
+        // If fswatch is enabled, wire it up to auto-ingest files
+        if config.modules.fswatch.enabled {
+            let bridge = FSWatchIngestionBridge(localFSHandler: localFSHandler)
+            await fsWatchService.setFileIngestionHandler(bridge.createIngestionHandler())
+        }
         
     // Initialize email handlers
     let emailHandler = EmailHandler(config: config)
@@ -271,7 +280,8 @@ struct HavenHostAgent: AsyncParsableCommand {
                 let dispatch: [String: (HTTPRequest, RequestContext) async -> HTTPResponse] = [
                     "imessage": { r, c in await iMessageHandler.handleRun(request: r, context: c) },
                     "email_imap": { r, c in await emailImapHandler.handleRun(request: r, context: c) },
-                    "contacts": { r, c in await contactsHandler.handleRun(request: r, context: c) }
+                    "contacts": { r, c in await contactsHandler.handleRun(request: r, context: c) },
+                    "localfs": { r, c in await localFSHandler.handleRun(request: r, context: c) }
                 ]
 
                 return await RunRouter.handle(request: req, context: ctx, dispatchMap: dispatch)
@@ -283,6 +293,9 @@ struct HavenHostAgent: AsyncParsableCommand {
             },
             PatternRouteHandler(method: "GET", pattern: "/v1/collectors/contacts/state") { req, ctx in
                 await contactsHandler.handleState(request: req, context: ctx)
+            },
+            PatternRouteHandler(method: "GET", pattern: "/v1/collectors/localfs/state") { req, ctx in
+                await localFSHandler.handleState(request: req, context: ctx)
             },
             
             // Email utility endpoints

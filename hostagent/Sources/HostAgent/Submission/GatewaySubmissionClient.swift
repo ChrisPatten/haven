@@ -152,6 +152,24 @@ actor GatewaySubmissionClient {
         idempotencyKey: String,
         mimeType: String
     ) async throws -> GatewayFileSubmissionResponse {
+        return try await submitFile(
+            fileURL: fileURL,
+            data: data,
+            metadata: metadata,
+            filename: metadata.filename ?? fileURL.lastPathComponent,
+            idempotencyKey: idempotencyKey,
+            mimeType: mimeType
+        )
+    }
+    
+    func submitFile<M: Encodable>(
+        fileURL: URL,
+        data: Data,
+        metadata: M,
+        filename: String,
+        idempotencyKey: String,
+        mimeType: String
+    ) async throws -> GatewayFileSubmissionResponse {
         let urlString = config.baseUrl + config.ingestFilePath
         guard let url = URL(string: urlString) else {
             throw EmailCollectorError.gatewayInvalidResponse
@@ -169,7 +187,6 @@ actor GatewaySubmissionClient {
         }
         body.append("\r\n")
         
-        let filename = metadata.filename ?? fileURL.lastPathComponent
         body.append("--\(boundary)\r\n")
         body.append("Content-Disposition: form-data; name=\"upload\"; filename=\"\(filename)\"\r\n")
         body.append("Content-Type: \(mimeType)\r\n\r\n")

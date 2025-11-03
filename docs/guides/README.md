@@ -69,20 +69,30 @@ python scripts/collectors/collector_imessage.py --no-images --once
 ```
 
 ### Local Files Collector
-Monitor a directory for supported documents (`.txt`, `.md`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.heic`) and ingest them through the gateway file endpoint.
+The HostAgent exposes `/v1/collectors/localfs:run` for native filesystem ingestion. Monitor a directory for supported documents (`.txt`, `.md`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.heic`) and upload through the gateway file endpoint without leaving macOS.
 
 ```bash
-export AUTH_TOKEN="changeme"
-python scripts/collectors/collector_localfs.py \
-  --watch ~/HavenInbox \
-  --move-to ~/.haven/localfs/processed \
-  --tag personal
+export HOSTAGENT_TOKEN="changeme"
+curl -X POST http://localhost:7090/v1/collectors/localfs:run \
+  -H "x-auth: ${HOSTAGENT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "collector_options": {
+          "watch_dir": "~/HavenInbox",
+          "move_to": "~/.haven/localfs/processed",
+          "tags": ["personal"],
+          "include": ["*.txt","*.md","*.pdf","*.png","*.jpg","*.jpeg","*.heic"]
+        },
+        "limit": 100
+      }'
 ```
 
-- Use `--include` / `--exclude` for additional glob filters.
-- `--delete-after` removes files after successful ingestion; `--move-to` relocates them.
-- `--dry-run` logs matches without uploading; `--one-shot` processes the current backlog and exits.
-- State is persisted at `~/.haven/localfs_collector_state.json` (override with `--state-file`).
+- `collector_options.include` / `collector_options.exclude` accept glob patterns.
+- Set `collector_options.delete_after` to remove files after successful ingestion; `move_to` relocates them instead.
+- `collector_options.dry_run` logs matches without uploading; `collector_options.one_shot` processes the current backlog and exits.
+- State is persisted at `collector_options.state_file` (defaults to `~/.haven/localfs_collector_state.json`).
+
+Legacy Python CLI (`scripts/collectors/collector_localfs.py`) remains available for environments where the HostAgent cannot run.
 
 ### Contacts Collector (macOS)
 ```bash

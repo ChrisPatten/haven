@@ -45,19 +45,67 @@ public struct CollectorRunRequest: Codable {
 
     public struct CollectorOptions: Codable {
         public let vcf_directory: String?
+        public let watchDir: String?
+        public let include: [String]?
+        public let exclude: [String]?
+        public let tags: [String]?
+        public let moveTo: String?
+        public let deleteAfter: Bool?
+        public let dryRun: Bool?
+        public let oneShot: Bool?
+        public let stateFile: String?
+        public let maxFileBytes: Int?
+        public let requestTimeout: Double?
+        public let followSymlinks: Bool?
 
         enum CodingKeys: String, CodingKey {
             case vcf_directory = "vcf_directory"
+            case watchDir = "watch_dir"
+            case include
+            case exclude
+            case tags
+            case moveTo = "move_to"
+            case deleteAfter = "delete_after"
+            case dryRun = "dry_run"
+            case oneShot = "one_shot"
+            case stateFile = "state_file"
+            case maxFileBytes = "max_file_bytes"
+            case requestTimeout = "request_timeout"
+            case followSymlinks = "follow_symlinks"
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.vcf_directory = try container.decodeIfPresent(String.self, forKey: .vcf_directory)
+            self.watchDir = try container.decodeIfPresent(String.self, forKey: .watchDir)
+            self.include = try container.decodeIfPresent([String].self, forKey: .include)
+            self.exclude = try container.decodeIfPresent([String].self, forKey: .exclude)
+            self.tags = try container.decodeIfPresent([String].self, forKey: .tags)
+            self.moveTo = try container.decodeIfPresent(String.self, forKey: .moveTo)
+            self.deleteAfter = try container.decodeIfPresent(Bool.self, forKey: .deleteAfter)
+            self.dryRun = try container.decodeIfPresent(Bool.self, forKey: .dryRun)
+            self.oneShot = try container.decodeIfPresent(Bool.self, forKey: .oneShot)
+            self.stateFile = try container.decodeIfPresent(String.self, forKey: .stateFile)
+            self.maxFileBytes = try container.decodeIfPresent(Int.self, forKey: .maxFileBytes)
+            self.requestTimeout = try container.decodeIfPresent(Double.self, forKey: .requestTimeout)
+            self.followSymlinks = try container.decodeIfPresent(Bool.self, forKey: .followSymlinks)
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encodeIfPresent(vcf_directory, forKey: .vcf_directory)
+            try container.encodeIfPresent(watchDir, forKey: .watchDir)
+            try container.encodeIfPresent(include, forKey: .include)
+            try container.encodeIfPresent(exclude, forKey: .exclude)
+            try container.encodeIfPresent(tags, forKey: .tags)
+            try container.encodeIfPresent(moveTo, forKey: .moveTo)
+            try container.encodeIfPresent(deleteAfter, forKey: .deleteAfter)
+            try container.encodeIfPresent(dryRun, forKey: .dryRun)
+            try container.encodeIfPresent(oneShot, forKey: .oneShot)
+            try container.encodeIfPresent(stateFile, forKey: .stateFile)
+            try container.encodeIfPresent(maxFileBytes, forKey: .maxFileBytes)
+            try container.encodeIfPresent(requestTimeout, forKey: .requestTimeout)
+            try container.encodeIfPresent(followSymlinks, forKey: .followSymlinks)
         }
     }
 

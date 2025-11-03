@@ -4,7 +4,7 @@ Haven is a personal data plane that turns iMessage history, files, and email int
 
 ## Components
 - **iMessage Collector (CLI / optional compose profile)** – `scripts/collectors/collector_imessage.py` copies `~/Library/Messages/chat.db`, normalizes new messages, enriches image attachments, and posts catalog events to the gateway.
-- **Local Files Collector** – `scripts/collectors/collector_localfs.py` watches a directory for supported documents, uploads binaries to the gateway file ingest endpoint, and lets the catalog pipeline handle extraction and embeddings.
+- **Local Files Collector** – Run natively via the HostAgent (`POST /v1/collectors/localfs:run`) to upload files through the gateway ingest endpoint. Legacy Python CLI remains for fallback environments.
 - **Catalog API** – internal FastAPI service that persists threads/messages/chunks, maintains FTS indexes, and tracks embedding status.
 - **Embedding Service** – background worker (`services/embedding_service/worker.py`) that polls pending chunks, calls the embedding provider, and upserts vectors into Qdrant.
 - **Gateway API (`:8085`)** – public FastAPI surface for hybrid search, summarization, document retrieval, and catalog proxying.
@@ -65,7 +65,29 @@ python scripts/collectors/collector_imessage.py --no-images --once
 ```
 
 ### Local Files Collector
-Monitor a directory for supported documents (`.txt`, `.md`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.heic`) and ingest them through the gateway file endpoint.
+Use the HostAgent endpoint to ingest files without relying on the legacy Python CLI:
+
+```bash
+export HOSTAGENT_TOKEN="changeme"
+curl -X POST http://localhost:7090/v1/collectors/localfs:run \
+  -H "x-auth: ${HOSTAGENT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "collector_options": {
+          "watch_dir": "~/HavenInbox",
+          "move_to": "~/.haven/localfs/processed",
+          "tags": ["personal"]
+        },
+        "limit": 100
+      }'
+```
+
+- `collector_options.include` / `collector_options.exclude` accept glob filters.
+- `collector_options.delete_after` removes files after successful ingestion; `move_to` relocates them.
+- `collector_options.dry_run` logs matches without uploading; `collector_options.one_shot` processes the current backlog and exits.
+- State is persisted at `collector_options.state_file` (defaults to `~/.haven/localfs_collector_state.json`).
+
+Legacy CLI usage is still available:
 
 ```bash
 export AUTH_TOKEN="changeme"
@@ -74,11 +96,6 @@ python scripts/collectors/collector_localfs.py \
   --move-to ~/.haven/localfs/processed \
   --tag personal
 ```
-
-- Use `--include` / `--exclude` for additional glob filters.
-- `--delete-after` removes files after successful ingestion; `--move-to` relocates them.
-- `--dry-run` logs matches without uploading; `--one-shot` processes the current backlog and exits.
-- State is persisted at `~/.haven/localfs_collector_state.json` (override with `--state-file`).
 
 ### Contacts Collector (macOS)
 ```bash

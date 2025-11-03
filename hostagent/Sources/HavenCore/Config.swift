@@ -81,6 +81,7 @@ public struct ModulesConfig: Codable {
     public var entity: EntityModuleConfig
     public var face: FaceModuleConfig
     public var fswatch: FSWatchModuleConfig
+    public var localfs: LocalFSModuleConfig
     public var contacts: StubModuleConfig
     public var calendar: StubModuleConfig
     public var reminders: StubModuleConfig
@@ -93,6 +94,7 @@ public struct ModulesConfig: Codable {
         case entity
         case face
         case fswatch
+        case localfs
         case contacts
         case calendar
         case reminders
@@ -105,6 +107,7 @@ public struct ModulesConfig: Codable {
                 entity: EntityModuleConfig = EntityModuleConfig(),
                 face: FaceModuleConfig = FaceModuleConfig(),
                 fswatch: FSWatchModuleConfig = FSWatchModuleConfig(),
+                localfs: LocalFSModuleConfig = LocalFSModuleConfig(),
                 contacts: StubModuleConfig = StubModuleConfig(),
                 calendar: StubModuleConfig = StubModuleConfig(),
                 reminders: StubModuleConfig = StubModuleConfig(),
@@ -115,6 +118,7 @@ public struct ModulesConfig: Codable {
         self.entity = entity
         self.face = face
         self.fswatch = fswatch
+        self.localfs = localfs
         self.contacts = contacts
         self.calendar = calendar
         self.reminders = reminders
@@ -133,6 +137,7 @@ public struct ModulesConfig: Codable {
         face = try container.decodeIfPresent(FaceModuleConfig.self, forKey: .face) ?? FaceModuleConfig()
         
         fswatch = try container.decode(FSWatchModuleConfig.self, forKey: .fswatch)
+        localfs = try container.decodeIfPresent(LocalFSModuleConfig.self, forKey: .localfs) ?? LocalFSModuleConfig()
         contacts = try container.decode(StubModuleConfig.self, forKey: .contacts)
         calendar = try container.decode(StubModuleConfig.self, forKey: .calendar)
         reminders = try container.decode(StubModuleConfig.self, forKey: .reminders)
@@ -297,6 +302,85 @@ public struct FSWatchModuleConfig: Codable {
         watches = try container.decodeIfPresent([FSWatchEntry].self, forKey: .watches) ?? []
         eventQueueSize = try container.decodeIfPresent(Int.self, forKey: .eventQueueSize) ?? 1000
         debounceMs = try container.decodeIfPresent(Int.self, forKey: .debounceMs) ?? 500
+    }
+}
+
+public struct LocalFSModuleConfig: Codable {
+    public var enabled: Bool
+    public var defaultWatchDir: String?
+    public var include: [String]
+    public var exclude: [String]
+    public var tags: [String]
+    public var moveTo: String?
+    public var deleteAfter: Bool
+    public var dryRun: Bool
+    public var oneShot: Bool
+    public var stateFile: String
+    public var maxFileBytes: Int
+    public var requestTimeout: Double
+    public var followSymlinks: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case defaultWatchDir = "default_watch_dir"
+        case include
+        case exclude
+        case tags
+        case moveTo = "move_to"
+        case deleteAfter = "delete_after"
+        case dryRun = "dry_run"
+        case oneShot = "one_shot"
+        case stateFile = "state_file"
+        case maxFileBytes = "max_file_bytes"
+        case requestTimeout = "request_timeout"
+        case followSymlinks = "follow_symlinks"
+    }
+
+    public init(
+        enabled: Bool = false,
+        defaultWatchDir: String? = nil,
+        include: [String] = ["*.txt", "*.md", "*.pdf", "*.png", "*.jpg", "*.jpeg", "*.heic"],
+        exclude: [String] = ["*.tmp", "~*"],
+        tags: [String] = [],
+        moveTo: String? = nil,
+        deleteAfter: Bool = false,
+        dryRun: Bool = false,
+        oneShot: Bool = true,
+        stateFile: String = "~/.haven/localfs_collector_state.json",
+        maxFileBytes: Int = 10 * 1024 * 1024,
+        requestTimeout: Double = 30.0,
+        followSymlinks: Bool = false
+    ) {
+        self.enabled = enabled
+        self.defaultWatchDir = defaultWatchDir
+        self.include = include
+        self.exclude = exclude
+        self.tags = tags
+        self.moveTo = moveTo
+        self.deleteAfter = deleteAfter
+        self.dryRun = dryRun
+        self.oneShot = oneShot
+        self.stateFile = stateFile
+        self.maxFileBytes = maxFileBytes
+        self.requestTimeout = requestTimeout
+        self.followSymlinks = followSymlinks
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        defaultWatchDir = try container.decodeIfPresent(String.self, forKey: .defaultWatchDir)
+        include = try container.decodeIfPresent([String].self, forKey: .include) ?? ["*.txt", "*.md", "*.pdf", "*.png", "*.jpg", "*.jpeg", "*.heic"]
+        exclude = try container.decodeIfPresent([String].self, forKey: .exclude) ?? ["*.tmp", "~*"]
+        tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
+        moveTo = try container.decodeIfPresent(String.self, forKey: .moveTo)
+        deleteAfter = try container.decodeIfPresent(Bool.self, forKey: .deleteAfter) ?? false
+        dryRun = try container.decodeIfPresent(Bool.self, forKey: .dryRun) ?? false
+        oneShot = try container.decodeIfPresent(Bool.self, forKey: .oneShot) ?? true
+        stateFile = try container.decodeIfPresent(String.self, forKey: .stateFile) ?? "~/.haven/localfs_collector_state.json"
+        maxFileBytes = try container.decodeIfPresent(Int.self, forKey: .maxFileBytes) ?? 10 * 1024 * 1024
+        requestTimeout = try container.decodeIfPresent(Double.self, forKey: .requestTimeout) ?? 30.0
+        followSymlinks = try container.decodeIfPresent(Bool.self, forKey: .followSymlinks) ?? false
     }
 }
 

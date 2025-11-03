@@ -133,6 +133,36 @@ ocr_requests_total 189
 ...
 ```
 
+### Local Files Collector
+
+Run an ingest cycle against a local directory. The collector applies include/exclude globs, deduplicates by file hash, and uploads matching files via the gateway file endpoint.
+
+```bash
+POST /v1/collectors/localfs:run
+Content-Type: application/json
+Headers: x-auth: changeme
+
+{
+  "collector_options": {
+    "watch_dir": "~/HavenInbox",
+    "move_to": "~/.haven/localfs/processed",
+    "tags": ["personal"],
+    "delete_after": false,
+    "dry_run": false
+  },
+  "limit": 100
+}
+```
+
+- `watch_dir` (required) — directory to scan; supports `~` expansion.
+- `include` / `exclude` — glob filters (default include: `*.txt`, `*.md`, `*.pdf`, image extensions).
+- `move_to` — destination directory for processed files (preserves relative structure).
+- `delete_after` — remove files after successful upload.
+- `dry_run` — identify matches without uploading; state is still updated so reruns skip duplicates.
+- `state_file` — override path to persisted dedupe state (default `~/.haven/localfs_collector_state.json`).
+
+The `GET /v1/collectors/localfs/state` endpoint returns the most recent run status alongside persisted state metadata.
+
 ### OCR Service (Vision Framework)
 
 **Replaces `imdesc` with native macOS Vision OCR**

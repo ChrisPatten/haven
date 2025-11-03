@@ -19,7 +19,7 @@ paths:
           description: Collector identifier
           schema:
             type: string
-            enum: [imessage, email_imap]
+            enum: [imessage, email_imap, localfs]
       requestBody:
         required: true
         content:

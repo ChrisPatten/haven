@@ -8,6 +8,7 @@ public final class APIHandler: APIProtocol {
     private let config: HavenConfig
     private let iMessageHandler: IMessageHandler
     private let emailImapHandler: EmailImapHandler
+    private let localFSHandler: LocalFSHandler
 
     public init(config: HavenConfig) {
         self.config = config
@@ -17,6 +18,7 @@ public final class APIHandler: APIProtocol {
 
         self.iMessageHandler = IMessageHandler(config: config, gatewayClient: gatewayClient)
         self.emailImapHandler = EmailImapHandler(config: config)
+        self.localFSHandler = LocalFSHandler(config: config)
     }
 
     /// Execute a collector run
@@ -41,6 +43,8 @@ public final class APIHandler: APIProtocol {
             response = await iMessageHandler.handleRun(request: mockRequest, context: mockContext)
         case .emailImap:
             response = await emailImapHandler.handleRun(request: mockRequest, context: mockContext)
+        case .localfs:
+            response = await localFSHandler.handleRun(request: mockRequest, context: mockContext)
         }
 
         // Convert the HTTPResponse back to the generated Output type

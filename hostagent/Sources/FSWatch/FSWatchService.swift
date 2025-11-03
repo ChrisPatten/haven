@@ -1,6 +1,9 @@
 import Foundation
 import HavenCore
 
+/// Callback type for handling new files detected by fswatch
+public typealias FileIngestionHandler = (String) async -> Void
+
 /// File system watch service for monitoring directories and emitting change events
 public actor FSWatchService {
     private let config: FSWatchModuleConfig
@@ -13,9 +16,17 @@ public actor FSWatchService {
     private var eventQueue: [FileSystemEvent] = []
     private let maxQueueSize: Int
     
+    // Optional callback for auto-ingesting files
+    private var fileIngestionHandler: FileIngestionHandler?
+    
     public init(config: FSWatchModuleConfig, maxQueueSize: Int = 1000) {
         self.config = config
         self.maxQueueSize = maxQueueSize
+    }
+    
+    /// Set a callback handler for auto-ingesting detected files
+    public func setFileIngestionHandler(_ handler: FileIngestionHandler?) {
+        self.fileIngestionHandler = handler
     }
     
     /// Start watching configured directories
@@ -159,6 +170,15 @@ public actor FSWatchService {
             "type": event.type.rawValue,
             "path": event.path
         ])
+        
+        // If a file ingestion handler is registered and this is a "created" event,
+        // call it to auto-ingest the file
+        if let handler = fileIngestionHandler, event.type == .created {
+            logger.info("Calling ingestion handler for file", metadata: ["path": event.path])
+            Task {
+                await handler(event.path)
+            }
+        }
     }
 }
 
@@ -172,6 +192,7 @@ private class FileSystemWatcher {
     let onEvent: (FileSystemEvent) -> Void
     
     private var source: DispatchSourceFileSystemObject?
+    private var pollTimer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "com.haven.fswatch", qos: .background)
     private let fileManager = FileManager.default
     private let logger = HavenLogger(category: "fswatch.watcher")
@@ -180,6 +201,7 @@ private class FileSystemWatcher {
     private var debounceTimer: DispatchSourceTimer?
     private var pendingEvents: [String: FileSystemEvent] = [:]
     private let debounceInterval: TimeInterval = 0.5
+    private var lastSeenFiles: Set<String> = []
     
     init(id: String, path: String, glob: String?, onEvent: @escaping (FileSystemEvent) -> Void) throws {
         self.id = id
@@ -212,12 +234,23 @@ private class FileSystemWatcher {
         source.resume()
         self.source = source
         
+        // Also start a periodic poll timer as a fallback to catch events more reliably
+        let pollTimer = DispatchSource.makeTimerSource(queue: queue)
+        pollTimer.schedule(deadline: .now() + 1.0, repeating: 1.0)
+        pollTimer.setEventHandler { [weak self] in
+            self?.handleFileSystemEvent()
+        }
+        pollTimer.resume()
+        self.pollTimer = pollTimer
+        
         logger.debug("Started watching", metadata: ["path": path])
     }
     
     func stop() {
         source?.cancel()
         source = nil
+        pollTimer?.cancel()
+        pollTimer = nil
         debounceTimer?.cancel()
         debounceTimer = nil
     }

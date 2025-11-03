@@ -11,12 +11,11 @@
 Haven turns personal data (iMessage, files, email) into searchable knowledge via hybrid search and LLM enrichment.
 
 **Components:**
-- **HostAgent (Swift, macOS)**: Native daemon collecting iMessage, email, contacts; provides OCR via Vision API. Runs on host, localhost-only.
+- **HostAgent (Swift, macOS)**: Native daemon collecting iMessage, local files, contacts, and email; provides OCR via Vision API. Runs on host, localhost-only. Primary entry point for `/v1/collectors/*`.
 - **Gateway API (FastAPI, :8085)**: Public entry point. Validates auth, orchestrates ingestion, proxies search. Only external-facing service.
 - **Catalog API (FastAPI)**: Persists documents/threads/chunks in Postgres. Tracks ingestion status.
 - **Search Service (FastAPI)**: Hybrid lexical/vector search over Qdrant + Postgres.
 - **Embedding Worker (Python)**: Background process vectorizing chunks via Ollama/BAAI models.
-- **Collectors (Python CLI)**: iMessage, LocalFS, Contacts scripts for data ingestion.
 
 **Data Flow:**
 1. Collectors/HostAgent → Gateway (validate, dedupe, queue)
@@ -39,7 +38,6 @@ Embedding Worker → Catalog → Qdrant
 **Codebase Map:**
 - `hostagent/`: Swift native daemon
 - `services/`: FastAPI microservices (gateway, catalog, search, embedding)
-- `scripts/collectors/`: Python data collectors. For reference only.
 - `shared/`: Cross-service utilities (DB, logging, image enrichment)
 - `schema/`: Postgres migrations
 - `src/haven/`: Reusable Python package
