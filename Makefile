@@ -167,3 +167,9 @@ hostagent-fresh:
 	@make purge
 	@make start
 	@make -C hostagent run
+
+upgrade-beads:
+	@echo "Updating Beads and beads-mcp"
+	@brew upgrade bd
+	@uv tool upgrade beads-mcp
+	@bd migrate
