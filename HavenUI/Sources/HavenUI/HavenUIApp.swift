@@ -36,6 +36,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    func applicationWillTerminate(_ notification: Notification) {
+        // Stop hostagent when the UI app exits
+        guard let manager = launchAgentManager else { return }
+        
+        // Use a semaphore to wait for async operation to complete
+        let semaphore = DispatchSemaphore(value: 0)
+        
+        Task {
+            do {
+                try await manager.stopHostAgent()
+                print("✓ Stopped hostagent on exit")
+            } catch {
+                print("⚠️ Failed to stop hostagent on exit: \(error.localizedDescription)")
+            }
+            semaphore.signal()
+        }
+        
+        // Wait up to 2 seconds for the stop command to complete
+        _ = semaphore.wait(timeout: .now() + 2.0)
+    }
+    
     private func ensureLogsDirectory() {
         let fileManager = FileManager.default
         let logsPath = fileManager.homeDirectoryForCurrentUser
@@ -63,7 +84,7 @@ struct HavenUIApp: App {
         MenuBarExtra {
             MenuContent(
                 appState: appState,
-                openDashboard: { openWindow(id: "dashboard") },
+                openDashboard: { openOrFocusDashboard() },
                 startAction: startHostAgent,
                 stopAction: stopHostAgent,
                 runAllAction: runAllCollectors
@@ -110,7 +131,22 @@ struct HavenUIApp: App {
             return .red
         }
     }
-    
+
+    private func openOrFocusDashboard() {
+        // Check if dashboard window already exists
+        if let existingWindow = NSApplication.shared.windows.first(where: { window in
+            window.identifier?.rawValue == "dashboard" ||
+            window.title == "Haven Dashboard"
+        }) {
+            // Bring existing window to front
+            existingWindow.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        } else {
+            // Open new dashboard window
+            openWindow(id: "dashboard")
+        }
+    }
+
     private func startHostAgent() async {
         guard let manager = appDelegate.launchAgentManager else { return }
         
@@ -212,6 +248,15 @@ struct HavenUIApp: App {
     }
     
     private func showNotification(title: String, message: String) {
+        // Check if we're running in a proper bundle context
+        // UNUserNotificationCenter requires a valid bundle to work
+        guard Bundle.main.bundleIdentifier != nil else {
+            // Running in debug/script mode without proper bundle
+            // Just log to console instead
+            print("📣 \(title): \(message)")
+            return
+        }
+        
         let center = UNUserNotificationCenter.current()
         
         // Request permission if not already granted
@@ -233,6 +278,9 @@ struct HavenUIApp: App {
                         print("Failed to deliver notification: \(error)")
                     }
                 }
+            } else {
+                // Permission denied or error, fallback to console
+                print("📣 \(title): \(message)")
             }
         }
     }

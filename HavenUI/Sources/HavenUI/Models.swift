@@ -33,12 +33,34 @@ struct ModuleSummary: Codable {
 // MARK: - Modules Response
 
 struct ModulesResponse: Codable {
-    let modules: [String: ModuleConfig]
+    let imessage: SimpleModuleInfo
+    let ocr: SimpleModuleInfo
+    let fswatch: SimpleModuleInfo
+    let contacts: SimpleModuleInfo
+    let calendar: SimpleModuleInfo
+    let reminders: SimpleModuleInfo
+    let mail: SimpleModuleInfo
+    let notes: SimpleModuleInfo
+    let face: SimpleModuleInfo
     
-    struct ModuleConfig: Codable {
-        let enabled: Bool
-        let config: [String: AnyCodable]?
+    // Computed property to provide dictionary-like access
+    var modules: [String: SimpleModuleInfo] {
+        [
+            "imessage": imessage,
+            "ocr": ocr,
+            "fswatch": fswatch,
+            "contacts": contacts,
+            "calendar": calendar,
+            "reminders": reminders,
+            "mail": mail,
+            "notes": notes,
+            "face": face
+        ]
     }
+}
+
+struct SimpleModuleInfo: Codable {
+    let enabled: Bool
 }
 
 // MARK: - Collector Run Models
