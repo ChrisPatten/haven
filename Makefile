@@ -1,6 +1,6 @@
 # Makefile for common development tasks
 
-.PHONY: help rebuild purge local_setup start restart stop collector backup restore list-backups export-openapi docs
+.PHONY: help rebuild purge local_setup start restart stop collector backup restore list-backups export-openapi docs build-ui run-ui
 
 LIMIT ?= 1
 
@@ -27,6 +27,8 @@ help:
 	@echo "  peek [TYPE=<type>] [LIMIT=<n>]  Show the last N records (default: 1)"
 	@echo "                           TYPE can be: email, imessage, contact (default: all documents)"
 	@echo "  logs					   Tail the docker compose logs"
+	@echo "  build-ui                  Build HavenUI.app for macOS"
+	@echo "  run-ui                    Run HavenUI menu bar app locally (requires hostagent running)"
 	@echo "  hostagent-fresh           Runs make purge, make start,and make -C hostagent run"
 	
 # Rebuild docker compose services from scratch, start detached, and follow logs
@@ -173,3 +175,11 @@ upgrade-beads:
 	@brew upgrade bd
 	@uv tool upgrade beads-mcp
 	@bd migrate
+
+build-ui:
+	@echo "Building HavenUI..."
+	@cd HavenUI && swift build -c release
+
+run-ui:
+	@echo "Running HavenUI menu bar app..."
+	@cd HavenUI && swift run -c debug HavenUI
