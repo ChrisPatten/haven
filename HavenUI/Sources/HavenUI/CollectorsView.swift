@@ -421,10 +421,12 @@ struct CollectorsView: View {
             dict["date_range"] = dateRangeValues
         }
         
-        let jsonData = try JSONSerialization.data(withJSONObject: dict, options: .prettyPrinted)
+        // Use compact formatting instead of pretty-printed
+        let jsonData = try JSONSerialization.data(withJSONObject: dict, options: [])
         guard let jsonString = String(data: jsonData, encoding: .utf8) else {
             throw NSError(domain: "JSON", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON"])
         }
+        print("DEBUG: Final serialized JSON: \(jsonString)")
         return jsonString
     }
     
