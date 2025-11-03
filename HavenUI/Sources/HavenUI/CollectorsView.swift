@@ -354,19 +354,29 @@ struct CollectorsView: View {
     private func editPayload(_ collector: CollectorInfo) {
         editingCollector = collector.id
         editingPayload = collector.payload
+        // Initialize field values for this collector if not already done
+        if collectorFieldValues[collector.id] == nil {
+            collectorFieldValues[collector.id] = [:]
+        }
     }
     
     private func saveAndRunCollector(_ collector: CollectorInfo) {
         // Convert field values to JSON payload
-        if let fieldValues = collectorFieldValues[collector.id], !fieldValues.isEmpty {
+        let fieldValues = collectorFieldValues[collector.id] ?? [:]
+        print("DEBUG: saveAndRunCollector for \(collector.id), fieldValues: \(fieldValues)")
+        
+        if !fieldValues.isEmpty {
             do {
                 let jsonPayload = try fieldValuesToJSON(fieldValues)
+                print("DEBUG: Generated JSON payload: \(jsonPayload)")
                 runCollectorWithPayload(collector, customPayload: jsonPayload)
             } catch {
                 errorMessage = "Failed to serialize configuration: \(error.localizedDescription)"
+                print("DEBUG: Serialization error: \(error)")
             }
         } else {
             // Run with empty options
+            print("DEBUG: No field values set, running with empty payload")
             runCollectorWithPayload(collector, customPayload: "{}")
         }
     }

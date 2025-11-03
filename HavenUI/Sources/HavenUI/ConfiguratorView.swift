@@ -55,11 +55,13 @@ struct ConfiguratorView: View {
         Binding(
             get: { fieldValues[fieldId] },
             set: { newValue in
+                print("DEBUG: Field \(fieldId) changed to \(String(describing: newValue))")
                 if let value = newValue {
                     fieldValues[fieldId] = value
                 } else {
                     fieldValues.removeValue(forKey: fieldId)
                 }
+                print("DEBUG: fieldValues now: \(fieldValues)")
             }
         )
     }
