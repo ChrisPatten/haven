@@ -373,20 +373,37 @@ struct CollectorsView: View {
     
     private func fieldValuesToJSON(_ fieldValues: [String: AnyCodable]) throws -> String {
         var dict: [String: Any] = [:]
+        var dateRangeValues: [String: Any] = [:]
         
         for (key, value) in fieldValues {
-            switch value {
-            case .string(let s):
-                dict[key] = s
-            case .int(let i):
-                dict[key] = i
-            case .double(let d):
-                dict[key] = d
-            case .bool(let b):
-                dict[key] = b
-            case .null:
-                dict[key] = NSNull()
+            // Handle date_range fields specially
+            if key == "since" || key == "until" {
+                switch value {
+                case .string(let s):
+                    dateRangeValues[key] = s
+                default:
+                    break
+                }
+            } else {
+                // Handle regular fields
+                switch value {
+                case .string(let s):
+                    dict[key] = s
+                case .int(let i):
+                    dict[key] = i
+                case .double(let d):
+                    dict[key] = d
+                case .bool(let b):
+                    dict[key] = b
+                case .null:
+                    dict[key] = NSNull()
+                }
             }
+        }
+        
+        // Add date_range if it has values
+        if !dateRangeValues.isEmpty {
+            dict["date_range"] = dateRangeValues
         }
         
         let jsonData = try JSONSerialization.data(withJSONObject: dict, options: .prettyPrinted)

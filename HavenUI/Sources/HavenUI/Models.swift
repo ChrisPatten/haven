@@ -380,6 +380,22 @@ extension CollectorSchema {
         displayName: "iMessage",
         fields: [
             SchemaField(
+                id: "since",
+                label: "Since (Start Date)",
+                description: "Only collect messages from this date onwards",
+                fieldType: .dateTime,
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "until",
+                label: "Until (End Date)",
+                description: "Only collect messages up to this date",
+                fieldType: .dateTime,
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
                 id: "limit",
                 label: "Limit",
                 description: "Maximum number of messages to process",
@@ -427,6 +443,22 @@ extension CollectorSchema {
         displayName: "Mail.app",
         fields: [
             SchemaField(
+                id: "since",
+                label: "Since (Start Date)",
+                description: "Only collect emails from this date onwards",
+                fieldType: .dateTime,
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "until",
+                label: "Until (End Date)",
+                description: "Only collect emails up to this date",
+                fieldType: .dateTime,
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
                 id: "limit",
                 label: "Limit",
                 description: "Maximum number of emails to process",
@@ -449,6 +481,22 @@ extension CollectorSchema {
         id: "email_imap",
         displayName: "IMAP",
         fields: [
+            SchemaField(
+                id: "since",
+                label: "Since (Start Date)",
+                description: "Only collect emails from this date onwards",
+                fieldType: .dateTime,
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "until",
+                label: "Until (End Date)",
+                description: "Only collect emails up to this date",
+                fieldType: .dateTime,
+                required: false,
+                defaultValue: nil
+            ),
             SchemaField(
                 id: "limit",
                 label: "Limit",
@@ -496,6 +544,22 @@ extension CollectorSchema {
         id: "localfs",
         displayName: "Local Files",
         fields: [
+            SchemaField(
+                id: "since",
+                label: "Since (Start Date)",
+                description: "Only collect files modified from this date onwards",
+                fieldType: .dateTime,
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "until",
+                label: "Until (End Date)",
+                description: "Only collect files modified up to this date",
+                fieldType: .dateTime,
+                required: false,
+                defaultValue: nil
+            ),
             SchemaField(
                 id: "watch_dir",
                 label: "Watch Directory",
@@ -559,6 +623,22 @@ extension CollectorSchema {
         id: "contacts",
         displayName: "Contacts",
         fields: [
+            SchemaField(
+                id: "since",
+                label: "Since (Start Date)",
+                description: "Only collect contacts modified from this date onwards",
+                fieldType: .dateTime,
+                required: false,
+                defaultValue: nil
+            ),
+            SchemaField(
+                id: "until",
+                label: "Until (End Date)",
+                description: "Only collect contacts modified up to this date",
+                fieldType: .dateTime,
+                required: false,
+                defaultValue: nil
+            ),
             SchemaField(
                 id: "mode",
                 label: "Mode",
