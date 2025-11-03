@@ -47,7 +47,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct HavenUIApp: App {
     @State private var appState = AppState()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var dashboardOpen = false
+    @Environment(\.openWindow) private var openWindow
 
     init() {
         // Pass appState to delegate
@@ -58,7 +58,7 @@ struct HavenUIApp: App {
         MenuBarExtra {
             MenuContent(
                 appState: appState,
-                dashboardOpen: $dashboardOpen,
+                openDashboard: { openWindow(id: "dashboard") },
                 startAction: startHostAgent,
                 stopAction: stopHostAgent,
                 runAllAction: runAllCollectors
@@ -74,7 +74,7 @@ struct HavenUIApp: App {
                 // Placeholder for custom menu if needed
             }
         }
-        
+
         Window("Haven Dashboard", id: "dashboard") {
             if let client = appDelegate.client {
                 DashboardView(
@@ -212,11 +212,11 @@ struct HavenUIApp: App {
 // Separate view for menu content
 struct MenuContent: View {
     var appState: AppState
-    @Binding var dashboardOpen: Bool
+    let openDashboard: () -> Void
     let startAction: () async -> Void
     let stopAction: () async -> Void
     let runAllAction: () async -> Void
-    
+
     var body: some View {
         VStack(spacing: 8) {
             // Status Section
@@ -229,14 +229,11 @@ struct MenuContent: View {
             .padding(8)
             .background(Color(.controlBackgroundColor))
             .cornerRadius(4)
-            
+
             Divider()
-            
+
             // Dashboard Button
-            Button(action: {
-                dashboardOpen = true
-                NSApp.activate(ignoringOtherApps: true)
-            }) {
+            Button(action: openDashboard) {
                 Label("Dashboard", systemImage: "rectangle.grid.2x2")
             }
             
