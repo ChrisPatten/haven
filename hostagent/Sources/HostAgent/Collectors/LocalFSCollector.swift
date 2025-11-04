@@ -191,7 +191,7 @@ public final class LocalFSCollector: @unchecked Sendable {
         
         var gatewayConfig = baseGatewayConfig
         let timeoutSeconds = max(1, Int(options.requestTimeout.rounded()))
-        gatewayConfig.timeout = timeoutSeconds
+        gatewayConfig.timeoutMs = timeoutSeconds * 1000
         
         while let itemURL = enumerator?.nextObject() as? URL {
             scanned += 1

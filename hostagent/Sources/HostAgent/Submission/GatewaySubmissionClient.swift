@@ -35,13 +35,13 @@ actor GatewaySubmissionClient {
     init(config: GatewayConfig, authToken: String, session: URLSession? = nil) {
         self.config = config
         self.authToken = authToken
-        self.timeout = TimeInterval(config.timeout)
+        self.timeout = TimeInterval(config.timeoutMs) / 1000.0
         if let providedSession = session {
             self.session = providedSession
         } else {
             let configuration = URLSessionConfiguration.default
-            configuration.timeoutIntervalForRequest = TimeInterval(config.timeout)
-            configuration.timeoutIntervalForResource = TimeInterval(config.timeout)
+            configuration.timeoutIntervalForRequest = TimeInterval(config.timeoutMs) / 1000.0
+            configuration.timeoutIntervalForResource = TimeInterval(config.timeoutMs) / 1000.0
             self.session = URLSession(configuration: configuration)
         }
         let encoder = JSONEncoder()

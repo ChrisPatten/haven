@@ -1,5 +1,6 @@
 import Foundation
 import HavenCore
+import Contacts
 
 /// Handler for GET /v1/capabilities
 public struct CapabilitiesHandler {
@@ -47,16 +48,16 @@ public struct CapabilitiesHandler {
                 ),
                 contacts: StubModuleCapability(
                     enabled: config.modules.contacts.enabled,
-                    permissions: [:],
-                    status: "stub"
+                    permissions: ["contacts": checkContactsPermission()],
+                    status: config.modules.contacts.enabled ? "active" : "stub"
                 ),
                 calendar: StubModuleCapability(
-                    enabled: config.modules.calendar.enabled,
+                    enabled: false,
                     permissions: [:],
                     status: "stub"
                 ),
                 reminders: StubModuleCapability(
-                    enabled: config.modules.reminders.enabled,
+                    enabled: false,
                     permissions: [:],
                     status: "stub"
                 ),
@@ -66,7 +67,7 @@ public struct CapabilitiesHandler {
                     status: "stub"
                 ),
                 notes: StubModuleCapability(
-                    enabled: config.modules.notes.enabled,
+                    enabled: false,
                     permissions: [:],
                     status: "stub"
                 ),
@@ -84,6 +85,12 @@ public struct CapabilitiesHandler {
         // Check if we can read the Messages database
         let messagesPath = NSHomeDirectory() + "/Library/Messages/chat.db"
         return FileManager.default.isReadableFile(atPath: messagesPath)
+    }
+    
+    private func checkContactsPermission() -> Bool {
+        // Check Contacts authorization status
+        let authStatus = CNContactStore.authorizationStatus(for: .contacts)
+        return authStatus == .authorized
     }
 }
 

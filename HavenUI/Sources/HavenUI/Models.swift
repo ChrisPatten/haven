@@ -1,4 +1,5 @@
 import Foundation
+import Yams
 
 // MARK: - Health Response Models
 
@@ -33,30 +34,88 @@ struct ModuleSummary: Codable {
 // MARK: - Modules Response
 
 struct ModulesResponse: Codable {
-    let imessage: SimpleModuleInfo
-    let ocr: SimpleModuleInfo
-    let fswatch: SimpleModuleInfo
+    let imessage: IMessageModuleInfo
+    let ocr: OCRModuleInfo
+    let fswatch: FSWatchModuleInfo
     let contacts: SimpleModuleInfo
-    let calendar: SimpleModuleInfo
-    let reminders: SimpleModuleInfo
     let mail: SimpleModuleInfo
-    let notes: SimpleModuleInfo
     let face: SimpleModuleInfo
     
     // Computed property to provide dictionary-like access
     var modules: [String: SimpleModuleInfo] {
-        [
-            "imessage": imessage,
-            "ocr": ocr,
-            "fswatch": fswatch,
-            "contacts": contacts,
-            "calendar": calendar,
-            "reminders": reminders,
-            "mail": mail,
-            "notes": notes,
-            "face": face
-        ]
+        var result: [String: SimpleModuleInfo] = [:]
+        result["imessage"] = SimpleModuleInfo(enabled: imessage.enabled)
+        result["ocr"] = SimpleModuleInfo(enabled: ocr.enabled)
+        result["fswatch"] = SimpleModuleInfo(enabled: fswatch.enabled)
+        result["contacts"] = contacts
+        result["mail"] = mail
+        result["face"] = face
+        // Add missing modules as disabled by default
+        result["calendar"] = SimpleModuleInfo(enabled: false)
+        result["reminders"] = SimpleModuleInfo(enabled: false)
+        result["notes"] = SimpleModuleInfo(enabled: false)
+        return result
     }
+}
+
+struct IMessageModuleInfo: Codable {
+    let enabled: Bool
+    let config: IMessageModuleConfig
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case config
+    }
+}
+
+struct IMessageModuleConfig: Codable {
+    let ocrEnabled: Bool
+    
+    enum CodingKeys: String, CodingKey {
+        case ocrEnabled = "ocr_enabled"
+    }
+}
+
+struct OCRModuleInfo: Codable {
+    let enabled: Bool
+    let config: OCRModuleConfigInfo
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case config
+    }
+}
+
+struct OCRModuleConfigInfo: Codable {
+    let languages: [String]
+    let timeoutMs: Int
+    
+    enum CodingKeys: String, CodingKey {
+        case languages
+        case timeoutMs = "timeout_ms"
+    }
+}
+
+struct FSWatchModuleInfo: Codable {
+    let enabled: Bool
+    let config: FSWatchModuleConfigInfo
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case config
+    }
+}
+
+struct FSWatchModuleConfigInfo: Codable {
+    let watches: [WatchInfo]
+}
+
+struct WatchInfo: Codable {
+    let id: String
+    let path: String
+    let glob: String
+    let target: String
+    let handoff: String
 }
 
 struct SimpleModuleInfo: Codable {
@@ -239,10 +298,20 @@ enum AnyCodable: Codable {
     }
 }
 
+// MARK: - IMAP Account Info
+
+struct IMAPAccountInfo: Codable {
+    let id: String
+    let username: String?
+    let host: String?
+    let enabled: Bool
+    let folders: [String]?
+}
+
 // MARK: - Collector Info Model
 
 struct CollectorInfo: Identifiable {
-    let id: String  // e.g., "imessage", "email_imap"
+    let id: String  // e.g., "imessage", "email_imap", or "email_imap:personal-icloud"
     let displayName: String
     let description: String
     let category: String  // e.g., "messages", "email", "files", "contacts"
@@ -252,6 +321,7 @@ struct CollectorInfo: Identifiable {
     var isRunning: Bool = false
     var lastError: String?
     var payload: String = ""
+    var imapAccountId: String?  // For IMAP account-specific collectors
     
     static let supportedCollectors: [String: CollectorInfo] = [
         "imessage": CollectorInfo(
@@ -292,7 +362,14 @@ struct CollectorInfo: Identifiable {
     static let stateAwareCollectors = Set(["imessage", "contacts", "localfs"])
     
     static func hasStateEndpoint(_ collectorId: String) -> Bool {
-        return stateAwareCollectors.contains(collectorId)
+        // Extract base collector ID for account-specific collectors (e.g., "email_imap" from "email_imap:personal-icloud")
+        let baseCollectorId: String
+        if let colonIndex = collectorId.firstIndex(of: ":") {
+            baseCollectorId = String(collectorId[..<colonIndex])
+        } else {
+            baseCollectorId = collectorId
+        }
+        return stateAwareCollectors.contains(baseCollectorId)
     }
     
     func statusDescription() -> String {

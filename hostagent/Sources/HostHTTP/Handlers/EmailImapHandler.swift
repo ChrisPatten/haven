@@ -24,7 +24,7 @@ public actor EmailImapHandler {
         } else {
             self.emailCollector = EmailCollector(
                 gatewayConfig: config.gateway,
-                authToken: config.auth.secret,
+                authToken: config.service.auth.secret,
                 sourceType: "email",
                 sourceIdPrefix: "email_imap",
                 moduleRedaction: config.modules.mail.redactPii,
@@ -71,8 +71,8 @@ public actor EmailImapHandler {
         
         if let req = runRequest {
             // Top-level fields
-            limit = req.limit ?? config.defaultLimit
-            order = req.order.rawValue
+            limit = req.limit
+            order = req.order?.rawValue ?? "desc"
             concurrency = req.concurrency ?? 4
             batchMode = req.batch ?? false
             batchSize = req.batchSize
@@ -86,45 +86,58 @@ public actor EmailImapHandler {
             // Mode -> dryRun
             dryRun = ((req.mode ?? .real) == .simulate)
             
-            // Handle collector-specific options from OpenAPI-generated payload
-            if let collectorOptions = req.collectorOptions {
-                if case let .ImapCollectorOptions(options) = collectorOptions {
-                    reset = options.reset
-                    dryRun = options.dryRun ?? dryRun
-                    folder = options.folder ?? options.mailbox
-                    accountId = options.accountId
-                    maxLimit = options.maxLimit
+            // Collector-specific options are now handled via scope field in CollectorRunRequest
+            // OpenAPI-generated RunRequest doesn't include collectorOptions
+            // Extract from scope if needed - scope is OpenAPI-generated type, convert to dict
+            var scopeDict: [String: Any] = [:]
+            if let scope = req.scope {
+                // Try to convert OpenAPI scope to dictionary
+                if let scopeData = try? JSONEncoder().encode(scope),
+                   let dict = try? JSONSerialization.jsonObject(with: scopeData) as? [String: Any] {
+                    scopeDict = dict
+                }
+            }
+            if let imapScope = scopeDict["imap"] as? [String: Any] {
+                reset = (imapScope["reset"] as? Bool) ?? false
+                if let folderStr = imapScope["folder"] as? String ?? imapScope["mailbox"] as? String {
+                    folder = folderStr
+                }
+                accountId = imapScope["account_id"] as? String
+                maxLimit = imapScope["max_limit"] as? Int
 
-                    // Handle credentials
-                    if let creds = options.credentials {
-                        credentials = ImapCredentials(
-                            kind: creds.kind.rawValue,
-                            secret: creds.secret,
-                            secretRef: creds.secretRef
-                        )
-                    }
+                // Handle credentials
+                if let creds = imapScope["credentials"] as? [String: Any] {
+                    let kindStr = creds["kind"] as? String ?? "secret"
+                    credentials = ImapCredentials(
+                        kind: kindStr,
+                        secret: creds["secret"] as? String,
+                        secretRef: creds["secret_ref"] as? String
+                    )
                 }
             }
         }
         
-        guard let account = selectAccount(identifier: accountId) else {
-            return HTTPResponse.badRequest(message: "IMAP account not found")
+        // Get accounts to process: if accountId is provided, process that account only;
+        // otherwise, process all enabled IMAP accounts
+        let accountsToProcess: [MailSourceConfig]
+        if let accountId = accountId, !accountId.isEmpty {
+            guard let account = selectAccount(identifier: accountId) else {
+                return HTTPResponse.badRequest(message: "IMAP account not found: \(accountId)")
+            }
+            accountsToProcess = [account]
+        } else {
+            // No account_id provided: process all enabled IMAP accounts
+            let imapAccounts = (config.modules.mail.sources ?? [])
+                .filter { $0.type == "imap" && $0.enabled }
+            if imapAccounts.isEmpty {
+                return HTTPResponse.badRequest(message: "No enabled IMAP accounts found")
+            }
+            accountsToProcess = imapAccounts
         }
         
-        // Determine folders to process: explicit folder in the request wins, otherwise
-        // process all configured folders (or INBOX if none configured).
-        let foldersToProcess: [String]
-        if let reqFolder = folder, !reqFolder.isEmpty {
-            foldersToProcess = [reqFolder]
-        } else if let accountFolders = account.folders, !accountFolders.isEmpty {
-            foldersToProcess = accountFolders
-        } else {
-            foldersToProcess = ["INBOX"]
-        }
-
         logger.info("Starting IMAP collector run", metadata: [
-            "account": account.responseIdentifier,
-            "folders": foldersToProcess.joined(separator: ","),
+            "account_count": "\(accountsToProcess.count)",
+            "accounts": accountsToProcess.map { $0.responseIdentifier }.joined(separator: ","),
             "batch_mode": batchMode ? "true" : "false",
             "batch_size": batchSize.map(String.init) ?? "default"
         ])
@@ -145,43 +158,66 @@ public actor EmailImapHandler {
         }
         let fetchConcurrency = max(1, min(concurrency, 12))
 
-        guard let authResolution = resolveAuth(for: account, credentials: credentials) else {
-            return HTTPResponse.badRequest(message: "Unable to resolve IMAP credentials")
-        }
+        // Helper: process one account and return per-account results
+        func processAccount(
+            _ account: MailSourceConfig,
+            remainingGlobalLimit: Int
+        ) async -> (accountId: String, totalFound: Int, processed: Int, submitted: Int, results: [ImapMessageResult], errors: [ImapRunError], earliestTouched: Date?, latestTouched: Date?) {
+            
+            // Determine folders to process: explicit folder in the request wins, otherwise
+            // process all configured folders (or INBOX if none configured).
+            let foldersToProcess: [String]
+            if let reqFolder = folder, !reqFolder.isEmpty {
+                foldersToProcess = [reqFolder]
+            } else if let accountFolders = account.folders, !accountFolders.isEmpty {
+                foldersToProcess = accountFolders
+            } else {
+                foldersToProcess = ["INBOX"]
+            }
 
-        let security: ImapSessionConfiguration.Security = (account.tls ?? true) ? .tls : .plaintext
-        let imapConfig = ImapSessionConfiguration(
-            hostname: account.host ?? "",
-            port: UInt32(account.port ?? 993),
-            username: account.username ?? "",
-            security: security,
-            auth: authResolution.auth,
-            timeout: 60,
-            fetchConcurrency: fetchConcurrency,
-            allowsInsecurePlainAuth: !(account.tls ?? true)
-        )
-
-        let imapSession: ImapSession
-        do {
-            imapSession = try ImapSession(configuration: imapConfig, secretResolver: authResolution.resolver)
-        } catch {
-            logger.error("Failed to instantiate IMAP session", metadata: [
-                "account": account.debugIdentifier,
-                "error": error.localizedDescription
+            logger.info("Processing IMAP account", metadata: [
+                "account": account.responseIdentifier,
+                "folders": foldersToProcess.joined(separator: ",")
             ])
-            return HTTPResponse.internalError(message: "Failed to initialize IMAP session")
-        }
 
-        // Helper: process one folder and return per-folder results. The helper respects
-        // the globalLimit (0 == unlimited) by checking submitted counts and stopping
-        // early if globalLimit is reached.
-        func processFolder(
-            _ folder: String,
-            remainingGlobalLimit: Int,
-            fetchBatchSize: Int,
-            submissionBatchSize: Int,
-            batchMode: Bool
-        ) async -> (totalFound: Int, processed: Int, submitted: Int, results: [ImapMessageResult], errors: [ImapRunError], earliestTouched: Date?, latestTouched: Date?) {
+            guard let authResolution = resolveAuth(for: account, credentials: credentials) else {
+                logger.error("Unable to resolve IMAP credentials", metadata: ["account": account.debugIdentifier])
+                return (accountId: account.responseIdentifier, totalFound: 0, processed: 0, submitted: 0, results: [], errors: [ImapRunError(uid: 0, reason: "Unable to resolve IMAP credentials")], earliestTouched: nil, latestTouched: nil)
+            }
+
+            let security: ImapSessionConfiguration.Security = (account.tls ?? true) ? .tls : .plaintext
+            let imapConfig = ImapSessionConfiguration(
+                hostname: account.host ?? "",
+                port: UInt32(account.port ?? 993),
+                username: account.username ?? "",
+                security: security,
+                auth: authResolution.auth,
+                timeout: 60,
+                fetchConcurrency: fetchConcurrency,
+                allowsInsecurePlainAuth: !(account.tls ?? true)
+            )
+
+            let imapSession: ImapSession
+            do {
+                imapSession = try ImapSession(configuration: imapConfig, secretResolver: authResolution.resolver)
+            } catch {
+                logger.error("Failed to instantiate IMAP session", metadata: [
+                    "account": account.debugIdentifier,
+                    "error": error.localizedDescription
+                ])
+                return (accountId: account.responseIdentifier, totalFound: 0, processed: 0, submitted: 0, results: [], errors: [ImapRunError(uid: 0, reason: "Failed to initialize IMAP session: \(error.localizedDescription)")], earliestTouched: nil, latestTouched: nil)
+            }
+
+            // Helper: process one folder and return per-folder results. The helper respects
+            // the globalLimit (0 == unlimited) by checking submitted counts and stopping
+            // early if globalLimit is reached.
+            func processFolder(
+                _ folder: String,
+                remainingGlobalLimit: Int,
+                fetchBatchSize: Int,
+                submissionBatchSize: Int,
+                batchMode: Bool
+            ) async -> (totalFound: Int, processed: Int, submitted: Int, results: [ImapMessageResult], errors: [ImapRunError], earliestTouched: Date?, latestTouched: Date?) {
             do {
                 logger.info("Starting IMAP search", metadata: [
                     "account": account.responseIdentifier,
@@ -489,8 +525,56 @@ public actor EmailImapHandler {
                 return (totalFound: 0, processed: 0, submitted: 0, results: [], errors: [ImapRunError(uid: 0, reason: error.localizedDescription)], earliestTouched: nil, latestTouched: nil)
             }
         }
+            
+            // Iterate folders, aggregating results. The globalLimit is enforced across folders.
+            var accountTotalFound = 0
+            var accountProcessed = 0
+            var accountSubmitted = 0
+            var accountResults: [ImapMessageResult] = []
+            var accountErrors: [ImapRunError] = []
+            var accountEarliestTouched: Date? = nil
+            var accountLatestTouched: Date? = nil
 
-        // Iterate folders, aggregating results. The globalLimit is enforced across folders.
+            for folder in foldersToProcess {
+                let remainingAllowed = (remainingGlobalLimit > 0) ? max(0, remainingGlobalLimit - accountSubmitted) : 0
+                let folderResult = await processFolder(
+                    folder,
+                    remainingGlobalLimit: remainingAllowed,
+                    fetchBatchSize: resolvedFetchBatchSize,
+                    submissionBatchSize: resolvedSubmissionBatchSize,
+                    batchMode: batchMode
+                )
+
+                logger.info("Folder processing completed", metadata: [
+                    "account": account.responseIdentifier,
+                    "folder": folder,
+                    "totalFound": "\(folderResult.totalFound)",
+                    "processed": "\(folderResult.processed)",
+                    "submitted": "\(folderResult.submitted)"
+                ])
+
+                accountTotalFound += folderResult.totalFound
+                accountProcessed += folderResult.processed
+                accountSubmitted += folderResult.submitted
+                accountResults.append(contentsOf: folderResult.results)
+                accountErrors.append(contentsOf: folderResult.errors)
+
+                if let e = folderResult.earliestTouched {
+                    if let prev = accountEarliestTouched { if e < prev { accountEarliestTouched = e } } else { accountEarliestTouched = e }
+                }
+                if let l = folderResult.latestTouched {
+                    if let prev = accountLatestTouched { if l > prev { accountLatestTouched = l } } else { accountLatestTouched = l }
+                }
+
+                if remainingGlobalLimit > 0 && accountSubmitted >= remainingGlobalLimit {
+                    break
+                }
+            }
+            
+            return (accountId: account.responseIdentifier, totalFound: accountTotalFound, processed: accountProcessed, submitted: accountSubmitted, results: accountResults, errors: accountErrors, earliestTouched: accountEarliestTouched, latestTouched: accountLatestTouched)
+        }
+
+        // Iterate accounts, aggregating results. The globalLimit is enforced across all accounts.
         var totalFoundSum = 0
         var processedSum = 0
         var submittedSum = 0
@@ -498,34 +582,30 @@ public actor EmailImapHandler {
         var errorsAll: [ImapRunError] = []
         var earliestTouchedGlobal: Date? = nil
         var latestTouchedGlobal: Date? = nil
+        var accountIds: [String] = []
 
-        for folder in foldersToProcess {
+        for account in accountsToProcess {
             let remainingAllowed = (globalLimit > 0) ? max(0, globalLimit - submittedSum) : 0
-            let folderResult = await processFolder(
-                folder,
-                remainingGlobalLimit: remainingAllowed,
-                fetchBatchSize: resolvedFetchBatchSize,
-                submissionBatchSize: resolvedSubmissionBatchSize,
-                batchMode: batchMode
-            )
-
-            logger.info("Folder processing completed", metadata: [
-                "folder": folder,
-                "totalFound": "\(folderResult.totalFound)",
-                "processed": "\(folderResult.processed)",
-                "submitted": "\(folderResult.submitted)"
+            let accountResult = await processAccount(account, remainingGlobalLimit: remainingAllowed)
+            
+            logger.info("Account processing completed", metadata: [
+                "account": accountResult.accountId,
+                "totalFound": "\(accountResult.totalFound)",
+                "processed": "\(accountResult.processed)",
+                "submitted": "\(accountResult.submitted)"
             ])
+            
+            accountIds.append(accountResult.accountId)
+            totalFoundSum += accountResult.totalFound
+            processedSum += accountResult.processed
+            submittedSum += accountResult.submitted
+            resultsAll.append(contentsOf: accountResult.results)
+            errorsAll.append(contentsOf: accountResult.errors)
 
-            totalFoundSum += folderResult.totalFound
-            processedSum += folderResult.processed
-            submittedSum += folderResult.submitted
-            resultsAll.append(contentsOf: folderResult.results)
-            errorsAll.append(contentsOf: folderResult.errors)
-
-            if let e = folderResult.earliestTouched {
+            if let e = accountResult.earliestTouched {
                 if let prev = earliestTouchedGlobal { if e < prev { earliestTouchedGlobal = e } } else { earliestTouchedGlobal = e }
             }
-            if let l = folderResult.latestTouched {
+            if let l = accountResult.latestTouched {
                 if let prev = latestTouchedGlobal { if l > prev { latestTouchedGlobal = l } } else { latestTouchedGlobal = l }
             }
 
@@ -533,10 +613,14 @@ public actor EmailImapHandler {
                 break
             }
         }
-
+        
+        // Build response with aggregated results from all accounts
+        // Use first account's identifier for compatibility, but log all accounts
+        let primaryAccountId = accountIds.first ?? "unknown"
+        let folderDescription = folder ?? (accountIds.count > 1 ? "all" : "all")
         let response = ImapRunResponse(
-            accountId: account.responseIdentifier,
-            folder: foldersToProcess.joined(separator: ","),
+            accountId: primaryAccountId,
+            folder: folderDescription,
             totalFound: totalFoundSum,
             processed: processedSum,
             submitted: submittedSum,
@@ -554,12 +638,17 @@ public actor EmailImapHandler {
     // MARK: - Helpers
     
     private func selectAccount(identifier: String?) -> MailSourceConfig? {
-        let imapSources = config.modules.mail.sources.filter { $0.type == "imap" }
-        guard !imapSources.isEmpty else { return nil }
-        guard let identifier, !identifier.isEmpty else {
-            return imapSources.first
+        // Load accounts from config.modules.mail.sources
+        // If identifier is provided, match by id; otherwise return first enabled IMAP account
+        let imapAccounts = (config.modules.mail.sources ?? [])
+            .filter { $0.type == "imap" && $0.enabled }
+        
+        if let identifier = identifier, !identifier.isEmpty {
+            return imapAccounts.first { $0.id == identifier }
         }
-        return imapSources.first { $0.id == identifier }
+        
+        // Return first enabled IMAP account if no identifier provided
+        return imapAccounts.first
     }
     
     private struct ImapCredentials {

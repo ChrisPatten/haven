@@ -200,7 +200,7 @@ struct HavenHostAgent: AsyncParsableCommand {
         let fsWatchHandler = FSWatchHandler(fsWatchService: fsWatchService, config: config.modules.fswatch)
         
         // Initialize gateway client for iMessage handler
-        let gatewayClient = GatewayClient(config: config.gateway, authToken: config.auth.secret)
+        let gatewayClient = GatewayClient(config: config.gateway, authToken: config.service.auth.secret)
         let iMessageHandler = IMessageHandler(config: config, gatewayClient: gatewayClient)
         
     // Initialize contacts handler

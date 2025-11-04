@@ -471,19 +471,50 @@ final class LogViewerModel: ObservableObject {
             .appendingPathComponent("Library/Logs/Haven")
         logFileURL = logsDir.appendingPathComponent(logFileName)
 
-        loadInitialContent()
-        startTailingOrPolling()
+        // Load initial content asynchronously to avoid blocking UI
+        Task { @MainActor in
+            await loadInitialContent()
+            startTailingOrPolling()
+        }
     }
 
-    private func loadInitialContent() {
-        do {
-            let content = try String(contentsOf: logFileURL, encoding: .utf8)
-            logContent = content.isEmpty ? "No logs yet..." : content
-            lastFileSize = UInt64((try? logFileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-        } catch {
-            logContent = "Log file not found or empty"
-            lastFileSize = 0
+    private func loadInitialContent() async {
+        // Run file I/O on background thread to avoid blocking main thread
+        // For large log files, only load the last portion to avoid memory issues
+        let result = Task.detached { [logFileURL] in
+            do {
+                let fileSize = (try? logFileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                let maxBytesToRead = 100_000  // Only read last ~100KB
+                
+                if fileSize > maxBytesToRead {
+                    // For large files, read only the tail
+                    if let fileHandle = try? FileHandle(forReadingFrom: logFileURL) {
+                        fileHandle.seek(toFileOffset: UInt64(fileSize - maxBytesToRead))
+                        let data = fileHandle.readDataToEndOfFile()
+                        try? fileHandle.close()
+                        
+                        if let content = String(data: data, encoding: .utf8) {
+                            // Find first newline to avoid partial line
+                            let firstNewline = content.firstIndex(of: "\n") ?? content.startIndex
+                            let tailContent = String(content[firstNewline...])
+                            return ("... (showing last \(maxBytesToRead / 1000)KB)\n" + tailContent, UInt64(fileSize))
+                        }
+                    }
+                }
+                
+                // For small files or if tail read failed, read entire file
+                let content = try String(contentsOf: logFileURL, encoding: .utf8)
+                return (content.isEmpty ? "No logs yet..." : content, UInt64(fileSize))
+            } catch {
+                return ("Log file not found or empty", UInt64(0))
+            }
         }
+        
+        let content = await result.value
+        
+        // Update UI on main thread
+        logContent = content.0
+        lastFileSize = content.1
     }
 
     private func startTailingOrPolling() {
@@ -582,10 +613,12 @@ final class LogViewerModel: ObservableObject {
 
     @MainActor
     func refreshContent() {
-        loadInitialContent()
-        if isTailing {
-            source?.cancel()
-            startTailingOrPolling()
+        Task {
+            await loadInitialContent()
+            if isTailing {
+                source?.cancel()
+                startTailingOrPolling()
+            }
         }
     }
 

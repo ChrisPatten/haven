@@ -70,10 +70,7 @@ public struct HealthHandler {
         // different module config types like MailModuleConfig and StubModuleConfig)
         for (name, enabled) in [
             ("contacts", config.modules.contacts.enabled),
-            ("calendar", config.modules.calendar.enabled),
-            ("reminders", config.modules.reminders.enabled),
-            ("mail", config.modules.mail.enabled),
-            ("notes", config.modules.notes.enabled)
+            ("mail", config.modules.mail.enabled)
         ] {
             summaries.append(ModuleSummary(
                 name: name,

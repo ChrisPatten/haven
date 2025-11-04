@@ -59,7 +59,7 @@ public struct ModulesHandler {
             )
         } catch {
             logger.error("Failed to encode modules response", metadata: ["error": error.localizedDescription])
-            return HTTPResponse.internalServerError(message: "Failed to encode response")
+            return HTTPResponse.internalError(message: "Failed to encode response")
         }
     }
     

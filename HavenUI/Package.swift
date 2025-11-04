@@ -12,11 +12,15 @@ let package = Package(
             targets: ["HavenUI"]
         )
     ],
-    dependencies: [],
+    dependencies: [
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.6")
+    ],
     targets: [
         .executableTarget(
             name: "HavenUI",
-            dependencies: [],
+            dependencies: [
+                .product(name: "Yams", package: "Yams")
+            ],
             path: "Sources/HavenUI"
         )
     ]

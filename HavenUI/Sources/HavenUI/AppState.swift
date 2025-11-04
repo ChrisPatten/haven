@@ -131,17 +131,47 @@ final class AppState {
     func updateCollectorState(_ collectorId: String, with state: CollectorStateResponse) {
         if var collector = collectorsList.first(where: { $0.id == collectorId }) {
             // Parse last_run_time if available
+            var lastRunTime: Date?
             if let lastRunTimeStr = state.lastRunTime {
                 let formatter = ISO8601DateFormatter()
-                collector.lastRunTime = formatter.date(from: lastRunTimeStr)
+                lastRunTime = formatter.date(from: lastRunTimeStr)
+                collector.lastRunTime = lastRunTime
             }
             collector.lastRunStatus = state.lastRunStatus
             collector.lastError = state.lastRunError
+            
+            // Persist the updated state
+            persistCollectorState(collectorId: collectorId, lastRunTime: lastRunTime, lastRunStatus: state.lastRunStatus, lastError: state.lastRunError)
             
             // Update in list
             if let index = collectorsList.firstIndex(where: { $0.id == collectorId }) {
                 collectorsList[index] = collector
             }
+        }
+    }
+    
+    // MARK: - Collector State Persistence
+    
+    private func persistCollectorState(collectorId: String, lastRunTime: Date?, lastRunStatus: String?, lastError: String?) {
+        let key = "collector_last_run_\(collectorId)"
+        
+        var dict: [String: Any] = [:]
+        
+        if let lastRunTime = lastRunTime {
+            let formatter = ISO8601DateFormatter()
+            dict["lastRunTime"] = formatter.string(from: lastRunTime)
+        }
+        
+        if let lastRunStatus = lastRunStatus {
+            dict["lastRunStatus"] = lastRunStatus
+        }
+        
+        if let lastError = lastError {
+            dict["lastError"] = lastError
+        }
+        
+        if let data = try? JSONSerialization.data(withJSONObject: dict) {
+            UserDefaults.standard.set(data, forKey: key)
         }
     }
 }

@@ -153,7 +153,7 @@ public actor IMessageHandler {
                 
                 // Extract parameters from RunRequest
                 params.limit = runRequest!.limit  // Use provided limit or nil for unlimited
-                params.order = runRequest!.order.rawValue
+                params.order = runRequest!.order?.rawValue ?? "desc"
                 params.batchMode = runRequest!.batch ?? false
                 if let providedBatchSize = runRequest!.batchSize {
                     params.batchSize = providedBatchSize
@@ -162,18 +162,8 @@ public actor IMessageHandler {
                     params.since = dateRange.since
                     params.until = dateRange.until
                 }
-                // Handle collector-specific options from OpenAPI-generated payload
-                if let collectorOptions = runRequest?.collectorOptions {
-                    if case let .IMessageCollectorOptions(options) = collectorOptions {
-                        params.limit = options.limit ?? params.limit
-                        if let order = options.order {
-                            params.order = order.rawValue
-                        }
-                        params.threadLookbackDays = options.threadLookbackDays ?? params.threadLookbackDays
-                        params.messageLookbackDays = options.messageLookbackDays ?? params.messageLookbackDays
-                        params.chatDbPath = options.chatDbPath ?? params.chatDbPath
-                    }
-                }
+                // Collector-specific options are now handled via scope field in CollectorRunRequest
+                // OpenAPI-generated RunRequest doesn't include collectorOptions
             } catch {
                 logger.error("Failed to decode RunRequest", metadata: ["error": error.localizedDescription])
                 return HTTPResponse.badRequest(message: "Invalid request format: \(error.localizedDescription)")
@@ -2266,7 +2256,7 @@ public actor IMessageHandler {
     /// Static method for testing attributed body decoding without initialization
     static func testDecodeAttributedBodyStatic(_ data: Data) -> String? {
         let config = HavenConfig()
-        let gatewayClient = GatewayClient(config: config.gateway, authToken: config.auth.secret)
+        let gatewayClient = GatewayClient(config: config.gateway, authToken: config.service.auth.secret)
         let handler = IMessageHandler(config: config, gatewayClient: gatewayClient)
         return handler.decodeAttributedBody(data)
     }
@@ -2352,8 +2342,8 @@ public actor IMessageHandler {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
-            request.setValue("Bearer \(config.auth.secret)", forHTTPHeaderField: "Authorization")
-            request.timeoutInterval = TimeInterval(config.gateway.timeout)
+            request.setValue("Bearer \(config.service.auth.secret)", forHTTPHeaderField: "Authorization")
+            request.timeoutInterval = TimeInterval(config.gateway.timeoutMs) / 1000.0
             request.httpBody = requestBody
 
             logger.debug("Posting batch to gateway", metadata: [
@@ -2485,8 +2475,8 @@ public actor IMessageHandler {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(config.auth.secret)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = TimeInterval(config.gateway.timeout)
+        request.setValue("Bearer \(config.service.auth.secret)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = TimeInterval(config.gateway.timeoutMs) / 1000.0
         
         // Serialize document to JSON
         request.httpBody = try JSONSerialization.data(withJSONObject: document, options: [])

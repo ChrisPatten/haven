@@ -111,6 +111,7 @@ struct HavenUIApp: App {
                     stopAction: stopHostAgent,
                     runAllAction: runAllCollectors
                 )
+                .background(WindowFocusHelper())
             } else {
                 // Fallback when client isn't available yet
                 Text("Loading...")
@@ -120,6 +121,7 @@ struct HavenUIApp: App {
         .keyboardShortcut("1", modifiers: [.command])
         .windowStyle(.automatic)
         .windowToolbarStyle(.unified(showsTitle: true))
+        .defaultSize(width: 600, height: 500)
         
         WindowGroup("Haven Collectors", id: "collectors") {
             if let client = appDelegate.client {
@@ -127,6 +129,7 @@ struct HavenUIApp: App {
                     appState: appState,
                     client: client
                 )
+                .background(WindowFocusHelper())
             } else {
                 // Fallback when client isn't available yet
                 Text("Loading...")
@@ -150,6 +153,10 @@ struct HavenUIApp: App {
     }
 
     private func openOrFocusDashboard() {
+        // Activate the app first to ensure it comes to foreground
+        // This must happen before opening the window
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        
         // Check if dashboard window already exists
         if let existingWindow = NSApplication.shared.windows.first(where: { window in
             window.identifier?.rawValue == "dashboard" ||
@@ -157,14 +164,47 @@ struct HavenUIApp: App {
         }) {
             // Bring existing window to front
             existingWindow.makeKeyAndOrderFront(nil)
-            NSApplication.shared.activate(ignoringOtherApps: true)
+            existingWindow.orderFrontRegardless()
+            existingWindow.makeMain()
         } else {
             // Open new dashboard window
             openWindow(id: "dashboard")
+            
+            // Ensure the new window is focused when it appears
+            // Use multiple attempts to catch window creation
+            func bringWindowToFront() {
+                if let newWindow = NSApplication.shared.windows.first(where: { window in
+                    window.identifier?.rawValue == "dashboard" ||
+                    window.title == "Haven Dashboard"
+                }) {
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    newWindow.makeKeyAndOrderFront(nil)
+                    newWindow.orderFrontRegardless()
+                    newWindow.makeMain()
+                }
+            }
+            
+            // Try immediately
+            DispatchQueue.main.async {
+                bringWindowToFront()
+            }
+            
+            // Try after short delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                bringWindowToFront()
+            }
+            
+            // Try after longer delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                bringWindowToFront()
+            }
         }
     }
     
     private func openOrFocusCollectors() {
+        // Activate the app first to ensure it comes to foreground
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        
         // Check if collectors window already exists
         if let existingWindow = NSApplication.shared.windows.first(where: { window in
             window.identifier?.rawValue == "collectors" ||
@@ -172,10 +212,40 @@ struct HavenUIApp: App {
         }) {
             // Bring existing window to front
             existingWindow.makeKeyAndOrderFront(nil)
-            NSApplication.shared.activate(ignoringOtherApps: true)
+            existingWindow.orderFrontRegardless()
+            existingWindow.makeMain()
         } else {
             // Open new collectors window
             openWindow(id: "collectors")
+            
+            // Ensure the new window is focused when it appears
+            // Use multiple attempts to catch window creation
+            func bringWindowToFront() {
+                if let newWindow = NSApplication.shared.windows.first(where: { window in
+                    window.identifier?.rawValue == "collectors" ||
+                    window.title == "Haven Collectors"
+                }) {
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    newWindow.makeKeyAndOrderFront(nil)
+                    newWindow.orderFrontRegardless()
+                    newWindow.makeMain()
+                }
+            }
+            
+            // Try immediately
+            DispatchQueue.main.async {
+                bringWindowToFront()
+            }
+            
+            // Try after short delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                bringWindowToFront()
+            }
+            
+            // Try after longer delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                bringWindowToFront()
+            }
         }
     }
 
@@ -232,6 +302,9 @@ struct HavenUIApp: App {
                 do {
                     let response = try await client.runCollector(collector)
                     
+                    // Persist last run information
+                    persistCollectorRunInfo(collectorId: collector, response: response)
+                    
                     // Create activity record
                     let activity = CollectorActivity(
                         id: response.runId,
@@ -250,6 +323,9 @@ struct HavenUIApp: App {
                         message: "Processed \(response.stats.submitted) items"
                     )
                 } catch {
+                    // Persist error state
+                    persistCollectorRunError(collectorId: collector, error: error.localizedDescription)
+                    
                     // Log error but continue with next collector
                     let activity = CollectorActivity(
                         id: UUID().uuidString,
@@ -314,6 +390,43 @@ struct HavenUIApp: App {
                 // Permission denied or error, fallback to console
                 print("📣 \(title): \(message)")
             }
+        }
+    }
+    
+    // MARK: - Collector State Persistence
+    
+    private func persistCollectorRunInfo(collectorId: String, response: RunResponse) {
+        let key = "collector_last_run_\(collectorId)"
+        
+        var dict: [String: Any] = [:]
+        
+        // Save current time as last run time
+        let formatter = ISO8601DateFormatter()
+        dict["lastRunTime"] = formatter.string(from: Date())
+        dict["lastRunStatus"] = response.status
+        
+        if !response.errors.isEmpty {
+            dict["lastError"] = response.errors.joined(separator: "; ")
+        }
+        
+        if let data = try? JSONSerialization.data(withJSONObject: dict) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+    
+    private func persistCollectorRunError(collectorId: String, error: String) {
+        let key = "collector_last_run_\(collectorId)"
+        
+        var dict: [String: Any] = [:]
+        
+        // Save current time as last run time
+        let formatter = ISO8601DateFormatter()
+        dict["lastRunTime"] = formatter.string(from: Date())
+        dict["lastRunStatus"] = "error"
+        dict["lastError"] = error
+        
+        if let data = try? JSONSerialization.data(withJSONObject: dict) {
+            UserDefaults.standard.set(data, forKey: key)
         }
     }
 }

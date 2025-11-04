@@ -43,7 +43,7 @@ public actor LocalFSHandler {
     
     public init(config: HavenConfig) {
         self.config = config
-        self.collector = LocalFSCollector(gatewayConfig: config.gateway, authToken: config.auth.secret)
+        self.collector = LocalFSCollector(gatewayConfig: config.gateway, authToken: config.service.auth.secret)
     }
     
     public func handleRun(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
@@ -202,18 +202,29 @@ public actor LocalFSHandler {
     
     private func buildOptions(from runRequest: CollectorRunRequest?) throws -> LocalFSCollectorOptions {
         let moduleConfig = config.modules.localfs
-        let watchDirString = runRequest?.collectorOptions?.watchDir?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? moduleConfig.defaultWatchDir?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let watchDir = watchDirString, !watchDir.isEmpty else {
+        let scope = runRequest?.getLocalfsScope()
+        
+        // Extract watch directory from scope paths (first path) or require it
+        let watchDir: String
+        if let paths = scope?.paths, !paths.isEmpty, let firstPath = paths.first {
+            watchDir = firstPath.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        } else {
+            throw LocalFSCollectorError.watchDirectoryMissing
+        }
+        guard !watchDir.isEmpty else {
             throw LocalFSCollectorError.watchDirectoryMissing
         }
         
-        let include = runRequest?.collectorOptions?.include ?? moduleConfig.include
-        let exclude = runRequest?.collectorOptions?.exclude ?? moduleConfig.exclude
-        let tags = runRequest?.collectorOptions?.tags ?? moduleConfig.tags
+        // Default include patterns: text files, markdown, PDFs, and images
+        let defaultInclude = ["*.txt", "*.md", "*.markdown", "*.pdf", "*.jpg", "*.jpeg", "*.png", "*.gif", "*.heic", "*.heif"]
+        let include = scope?.includeGlobs ?? defaultInclude
+        let exclude = scope?.excludeGlobs ?? []
         
-        let moveToString = runRequest?.collectorOptions?.moveTo?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? moduleConfig.moveTo?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Extract other options from scope if present (as dictionary)
+        let scopeDict = runRequest?.scope?.value as? [String: Any] ?? [:]
+        
+        let tags = (scopeDict["tags"] as? [String]) ?? []
+        let moveToString = (scopeDict["move_to"] as? String)?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
         let moveToURL: URL?
         if let moveTo = moveToString, !moveTo.isEmpty {
             moveToURL = URL(fileURLWithPath: expandTilde(in: moveTo), isDirectory: true)
@@ -221,17 +232,17 @@ public actor LocalFSHandler {
             moveToURL = nil
         }
         
-        let deleteAfter = runRequest?.collectorOptions?.deleteAfter ?? moduleConfig.deleteAfter
-        let dryRun = runRequest?.collectorOptions?.dryRun ?? moduleConfig.dryRun
-        let oneShot = runRequest?.collectorOptions?.oneShot ?? moduleConfig.oneShot
+        let deleteAfter = (scopeDict["delete_after"] as? Bool) ?? false
+        let dryRun = runRequest?.mode == .simulate
+        let oneShot = (scopeDict["one_shot"] as? Bool) ?? false
         
-        let stateFileString = runRequest?.collectorOptions?.stateFile?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? moduleConfig.stateFile
+        let stateFileString = (scopeDict["state_file"] as? String)?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            ?? "~/.haven/localfs_collector_state.json"
         let stateFileURL = URL(fileURLWithPath: expandTilde(in: stateFileString))
         
-        let maxFileBytes = runRequest?.collectorOptions?.maxFileBytes ?? moduleConfig.maxFileBytes
-        let requestTimeout = runRequest?.collectorOptions?.requestTimeout ?? moduleConfig.requestTimeout
-        let followSymlinks = runRequest?.collectorOptions?.followSymlinks ?? moduleConfig.followSymlinks
+        let maxFileBytes = moduleConfig.maxFileBytes
+        let requestTimeout: TimeInterval = 30.0 // Default 30 seconds
+        let followSymlinks = (scopeDict["follow_symlinks"] as? Bool) ?? false
         
         let limit = runRequest?.limit
         
@@ -257,8 +268,7 @@ public actor LocalFSHandler {
     }
     
     private func defaultStateFileURL() -> URL? {
-        let statePath = config.modules.localfs.stateFile
-        guard !statePath.isEmpty else { return nil }
+        let statePath = "~/.haven/localfs_collector_state.json"
         return URL(fileURLWithPath: expandTilde(in: statePath))
     }
     
@@ -295,15 +305,15 @@ public actor LocalFSHandler {
     private func mapCollectorError(_ error: LocalFSCollectorError) -> HTTPResponse {
         switch error {
         case .watchDirectoryMissing:
-            return HTTPResponse.badRequest(message: error.localizedDescription ?? "Watch directory missing")
+            return HTTPResponse.badRequest(message: error.localizedDescription)
         case .watchDirectoryNotFound:
-            return HTTPResponse.notFound(message: error.localizedDescription ?? "Watch directory not found")
+            return HTTPResponse.notFound(message: error.localizedDescription)
         case .watchDirectoryNotDirectory:
-            return HTTPResponse.badRequest(message: error.localizedDescription ?? "Watch path is not a directory")
+            return HTTPResponse.badRequest(message: error.localizedDescription)
         case .moveDirectoryCreationFailed:
-            return HTTPResponse.badRequest(message: error.localizedDescription ?? "Failed to prepare move directory")
+            return HTTPResponse.badRequest(message: error.localizedDescription)
         case .statePersistenceFailed:
-            return HTTPResponse.internalError(message: error.localizedDescription ?? "Failed to persist collector state")
+            return HTTPResponse.internalError(message: error.localizedDescription)
         }
     }
 }

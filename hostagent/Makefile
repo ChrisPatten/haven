@@ -35,7 +35,7 @@ clean:
 	rm -rf .build
 
 # Install binary to system
-install: release
+install:
 	@echo "Installing hostagent to /usr/local/bin..."; \
 	RELEASE_BIN=$$(swift build -c release --show-bin-path)/hostagent; \
 	if [ ! -f "$$RELEASE_BIN" ]; then \

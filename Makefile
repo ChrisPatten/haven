@@ -30,6 +30,8 @@ help:
 	@echo "  build-ui                  Build HavenUI.app for macOS"
 	@echo "  run-ui                    Run HavenUI menu bar app locally (requires hostagent running)"
 	@echo "  hostagent-fresh           Runs make purge, make start,and make -C hostagent run"
+	@echo "  hostagent-install          Installs hostagent binary to /usr/local/bin"
+	@echo "  hostagent-run              Runs hostagent binary"
 	
 # Rebuild docker compose services from scratch, start detached, and follow logs
 # Usage: make rebuild [SERVICE]
@@ -183,3 +185,9 @@ build-ui:
 run-ui:
 	@echo "Running HavenUI menu bar app..."
 	@cd HavenUI && swift run -c debug HavenUI
+
+hostagent-install:
+	@make -C hostagent install
+
+hostagent-run:
+	@make -C hostagent run

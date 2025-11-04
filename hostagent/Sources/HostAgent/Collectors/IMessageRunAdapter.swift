@@ -29,6 +29,68 @@ public struct IMessageRunAdapter {
     private static let minConcurrency = 1
     private static let maxConcurrency = 12
 
+    /// Parse ISO-8601 duration string (e.g., "PT24H", "P1D") to TimeInterval in seconds
+    private static func parseISO8601Duration(_ duration: String) -> TimeInterval? {
+        // ISO-8601 duration format: P[n]Y[n]M[n]DT[n]H[n]M[n]S
+        // Examples: "PT24H" (24 hours), "P1D" (1 day), "P7D" (7 days)
+        var durationStr = duration.trimmingCharacters(in: .whitespaces)
+        guard durationStr.hasPrefix("P") else { return nil }
+        
+        var totalSeconds: TimeInterval = 0
+        durationStr = String(durationStr.dropFirst()) // Remove "P"
+        
+        // Split date and time parts
+        let parts = durationStr.split(separator: "T", maxSplits: 1)
+        let datePart = parts[0]
+        let timePart = parts.count > 1 ? String(parts[1]) : ""
+        
+        // Parse date part (Y, M, D)
+        var currentNumber = ""
+        for char in datePart {
+            if char.isNumber {
+                currentNumber.append(char)
+            } else {
+                if let value = Double(currentNumber) {
+                    switch char {
+                    case "Y":
+                        totalSeconds += value * 365.25 * 24 * 3600 // Years
+                    case "M":
+                        totalSeconds += value * 30.44 * 24 * 3600 // Months (average)
+                    case "D":
+                        totalSeconds += value * 24 * 3600 // Days
+                    default:
+                        return nil
+                    }
+                }
+                currentNumber = ""
+            }
+        }
+        
+        // Parse time part (H, M, S)
+        currentNumber = ""
+        for char in timePart {
+            if char.isNumber {
+                currentNumber.append(char)
+            } else {
+                if let value = Double(currentNumber) {
+                    switch char {
+                    case "H":
+                        totalSeconds += value * 3600 // Hours
+                    case "M":
+                        totalSeconds += value * 60 // Minutes
+                    case "S":
+                        totalSeconds += value // Seconds
+                    default:
+                        return nil
+                    }
+                }
+                currentNumber = ""
+            }
+        }
+        
+        return totalSeconds > 0 ? totalSeconds : nil
+    }
+
     /// Map a `CollectorRunRequest` to `IMessageRunRequest`.
     /// - Parameters:
     ///   - dto: the decoded unified DTO
@@ -47,9 +109,11 @@ public struct IMessageRunAdapter {
             since = dr.since
             until = dr.until
             // When an explicit date_range is provided we keep threadLookbackDays as default
-        } else if let lookbackDays = dto.timeWindow {
-            // compute since = now - lookbackDays
-            since = Calendar(identifier: .gregorian).date(byAdding: .day, value: -lookbackDays, to: now)
+        } else if let timeWindow = dto.timeWindow {
+            // Parse ISO-8601 duration and compute since = now - duration
+            if let durationSeconds = parseISO8601Duration(timeWindow) {
+                since = now.addingTimeInterval(-durationSeconds)
+            }
             until = nil
             // thread lookback not present on the unified DTO - keep default
         }

@@ -615,28 +615,34 @@ extension MailSourceConfig {
 public struct MailModuleConfig: Codable {
     public var enabled: Bool
     public var redactPii: RedactionConfig?
+    public var sources: [MailSourceConfig]?
     
     enum CodingKeys: String, CodingKey {
         case enabled
         case redactPii = "redact_pii"
+        case sources
     }
     
     public init(
         enabled: Bool = false,
-        redactPii: RedactionConfig? = nil
+        redactPii: RedactionConfig? = nil,
+        sources: [MailSourceConfig]? = nil
     ) {
         self.enabled = enabled
         self.redactPii = redactPii
+        self.sources = sources
     }
     
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         redactPii = try container.decodeIfPresent(RedactionConfig.self, forKey: .redactPii)
+        sources = try container.decodeIfPresent([MailSourceConfig].self, forKey: .sources)
         
-        // Validate that no per-run fields are present (sources, filters, state, etc.)
+        // Validate that no per-run fields are present (filters, state, default_order, etc.)
+        // Note: sources is NOT deprecated - it's account configuration, not per-run configuration
         let allKeys = Set(container.allKeys.map { $0.stringValue })
-        let deprecatedKeys = ["sources", "filters", "state", "default_order", "default_since", "default_until", "allow_override"]
+        let deprecatedKeys = ["filters", "state", "default_order", "default_since", "default_until", "allow_override"]
         let foundDeprecated = allKeys.intersection(deprecatedKeys)
         if !foundDeprecated.isEmpty {
             throw DecodingError.dataCorruptedError(

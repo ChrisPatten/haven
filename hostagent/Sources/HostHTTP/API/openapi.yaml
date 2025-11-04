@@ -118,7 +118,7 @@ components:
           additionalProperties:
             type: boolean
           nullable: true
-          description: Optional map of PII types to override module-level redaction defaults (e.g., {"emails": false, "phones": true})
+          description: 'Optional map of PII types to override module-level redaction defaults (e.g., {"emails": false, "phones": true})'
         filters:
           $ref: '#/components/schemas/FiltersConfig'
         scope:

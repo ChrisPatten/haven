@@ -2,10 +2,13 @@ import SwiftUI
 import AppKit
 import Combine
 import UserNotifications
+import Yams
 
 struct CollectorsView: View {
     var appState: AppState
     var client: HostAgentClient
+    
+    @StateObject private var collectorService: CollectorService
     
     @State private var collectors: [CollectorInfo] = []
     @State private var isLoading = false
@@ -15,6 +18,13 @@ struct CollectorsView: View {
     @State private var editingCollector: String?
     @State private var editingPayload: String = ""
     @State private var collectorFieldValues: [String: [String: AnyCodable]] = [:]
+    @State private var showingIMAPManagement = false
+    
+    init(appState: AppState, client: HostAgentClient) {
+        self.appState = appState
+        self.client = client
+        _collectorService = StateObject(wrappedValue: CollectorService(client: client, appState: appState))
+    }
     
     var body: some View {
         VStack(spacing: 12) {
@@ -33,6 +43,12 @@ struct CollectorsView: View {
                 }
                 
                 Spacer()
+                
+                Button(action: { showingIMAPManagement = true }) {
+                    Label("Manage IMAP Accounts", systemImage: "envelope.badge")
+                }
+                .buttonStyle(.bordered)
+                .help("Manage IMAP account instances")
                 
                 Button(action: refreshCollectors) {
                     Image(systemName: "arrow.clockwise")
@@ -135,44 +151,26 @@ struct CollectorsView: View {
         .sheet(isPresented: .constant(editingCollector != nil)) {
             if let collectorId = editingCollector {
                 if let collector = collectors.first(where: { $0.id == collectorId }) {
-                    if let schema = CollectorSchema.schema(for: collectorId) {
-                        ConfiguratorView(
-                            schema: schema,
-                            fieldValues: Binding(
-                                get: { collectorFieldValues[collectorId] ?? [:] },
-                                set: { newValues in
-                                    collectorFieldValues[collectorId] = newValues
-                                    // Persist settings when they change
-                                    savePersistedSettings(for: collectorId, values: newValues)
-                                }
-                            ),
-                            onSave: {
-                                // Save settings one more time before running
-                                if let fieldValues = collectorFieldValues[collectorId] {
-                                    savePersistedSettings(for: collectorId, values: fieldValues)
-                                }
-                                saveAndRunCollector(collector)
-                                editingCollector = nil
-                            },
-                            onCancel: {
-                                editingCollector = nil
-                            }
-                        )
-                    } else {
-                        PayloadEditorView(
-                            collectorName: collector.displayName,
-                            payload: $editingPayload,
-                            onSave: { payload in
-                                runCollectorWithPayload(collector, customPayload: payload)
-                                editingCollector = nil
-                            },
-                            onCancel: {
-                                editingCollector = nil
-                            }
-                        )
-                    }
+                    CollectorRunRequestBuilderView(
+                        collector: collector,
+                        collectorService: collectorService,
+                        onSave: {
+                            editingCollector = nil
+                            refreshCollectors() // Refresh to show new IMAP accounts
+                        },
+                        onCancel: {
+                            editingCollector = nil
+                        }
+                    )
+                    .background(WindowFocusHelper())
                 }
             }
+        }
+        .sheet(isPresented: $showingIMAPManagement) {
+            IMAPAccountManagementView()
+                .onDisappear {
+                    refreshCollectors() // Refresh to show updated IMAP accounts
+                }
         }
     }
     
@@ -196,8 +194,15 @@ struct CollectorsView: View {
                 let modulesResponse = try await client.getModules()
                 var loadedCollectors: [CollectorInfo] = []
                 
+                // Load IMAP accounts from config file
+                let imapAccounts = loadIMAPAccountsFromConfig()
+                
                 // Load collectors from supported set
                 for (collectorId, baseInfo) in CollectorInfo.supportedCollectors {
+                    // Skip generic email_imap if we have specific accounts
+                    if collectorId == "email_imap" && !imapAccounts.isEmpty {
+                        continue
+                    }
                     var info = baseInfo
                     
                     // Map collector IDs to module names (some collectors share modules)
@@ -206,7 +211,6 @@ struct CollectorsView: View {
                     // Check if enabled in modules
                     if let moduleInfo = modulesResponse.modules[moduleName] {
                         info.enabled = moduleInfo.enabled
-                        print("DEBUG: Found module \(moduleName) for collector \(collectorId), enabled: \(moduleInfo.enabled)")
                     } else if collectorId == "localfs" {
                         // localfs might not be in modules response, check if fswatch is enabled as fallback
                         // or default to enabled if we can't determine
@@ -216,24 +220,29 @@ struct CollectorsView: View {
                             // Default to enabled if we can't determine (localfs might be standalone)
                             info.enabled = true
                         }
-                    } else {
-                        // Module not found in response - log for debugging
-                        print("DEBUG: Module \(moduleName) not found in modules response for collector \(collectorId)")
-                        print("DEBUG: Available modules: \(modulesResponse.modules.keys.sorted())")
                     }
                     
-                    // Fetch state if available
+                    // Load persisted last run info first (as fallback)
+                    loadPersistedLastRunInfo(for: &info)
+                    
+                    // Fetch state if available (use base collector ID for account-specific collectors)
                     if CollectorInfo.hasStateEndpoint(collectorId) && info.enabled {
                         do {
-                            let state = try await client.getCollectorState(collectorId)
+                            let baseCollectorId = extractBaseCollectorId(collectorId)
+                            let state = try await client.getCollectorState(baseCollectorId)
+                            
+                            // Update with API state (API takes precedence)
                             if let lastRunTimeStr = state.lastRunTime {
                                 let formatter = ISO8601DateFormatter()
                                 info.lastRunTime = formatter.date(from: lastRunTimeStr)
                             }
                             info.lastRunStatus = state.lastRunStatus
                             info.lastError = state.lastRunError
+                            
+                            // Persist the state we got from API
+                            savePersistedLastRunInfo(for: collectorId, lastRunTime: info.lastRunTime, lastRunStatus: info.lastRunStatus, lastError: info.lastError)
                         } catch {
-                            // Continue if state fetch fails
+                            // Continue if state fetch fails - use persisted data
                             print("Failed to fetch state for \(collectorId): \(error)")
                         }
                     }
@@ -241,12 +250,100 @@ struct CollectorsView: View {
                     loadedCollectors.append(info)
                 }
                 
-                collectors = loadedCollectors
-                appState.updateCollectorsList(loadedCollectors)
+                // Add IMAP account-specific collectors
+                for account in imapAccounts {
+                    let accountCollectorId = "email_imap:\(account.id)"
+                    
+                    // Generate friendly display name from account ID
+                    let friendlyProviderName = extractFriendlyProviderName(from: account.id)
+                    let displayName = "IMAP \(friendlyProviderName)"
+                    
+                    var accountInfo = CollectorInfo(
+                        id: accountCollectorId,
+                        displayName: displayName,
+                        description: "IMAP: \(account.host ?? "unknown host")",
+                        category: "email",
+                        enabled: account.enabled,
+                        imapAccountId: account.id
+                    )
+                    
+                    // Check if mail module is enabled
+                    if let mailInfo = modulesResponse.modules["mail"] {
+                        accountInfo.enabled = account.enabled && mailInfo.enabled
+                    }
+                    
+                    // Load persisted last run info for this collector
+                    loadPersistedLastRunInfo(for: &accountInfo)
+                    
+                    // Fetch state if available (email_imap doesn't have state endpoint, but we can try to persist from run responses)
+                    // Note: IMAP collectors don't have /state endpoints, so we rely on persisted data
+                    
+                    loadedCollectors.append(accountInfo)
+                }
+                
+                collectors = loadedCollectors.sorted { $0.displayName < $1.displayName }
+                appState.updateCollectorsList(collectors)
                 errorMessage = nil
             } catch {
                 errorMessage = "Failed to load collectors: \(error.localizedDescription)"
             }
+        }
+    }
+    
+    // MARK: - Config File Loading
+    
+    private func loadIMAPAccountsFromConfig() -> [IMAPAccountInfo] {
+        let configPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".haven/hostagent.yaml")
+            .path
+        
+        guard FileManager.default.fileExists(atPath: configPath) else {
+            return []
+        }
+        
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: configPath))
+            let decoder = YAMLDecoder()
+            
+            // Partial config structure to extract just mail sources
+            struct PartialConfig: Codable {
+                struct Modules: Codable {
+                    struct MailModule: Codable {
+                        struct MailSource: Codable {
+                            let id: String
+                            let type: String?
+                            let username: String?
+                            let host: String?
+                            let enabled: Bool?
+                            let folders: [String]?
+                        }
+                        let sources: [MailSource]?
+                    }
+                    let mail: MailModule?
+                }
+                let modules: Modules?
+            }
+            
+            let config = try decoder.decode(PartialConfig.self, from: data)
+            
+            guard let sources = config.modules?.mail?.sources else {
+                return []
+            }
+            
+            // Filter to IMAP sources only
+            let imapSources = sources.filter { $0.type == "imap" }
+            
+            return imapSources.map { source in
+                IMAPAccountInfo(
+                    id: source.id,
+                    username: source.username,
+                    host: source.host,
+                    enabled: source.enabled ?? true,
+                    folders: source.folders
+                )
+            }
+        } catch {
+            return []
         }
     }
     
@@ -256,31 +353,14 @@ struct CollectorsView: View {
     
     private func runCollector(_ collector: CollectorInfo) {
         Task {
-            appState.setCollectorRunning(collector.id, running: true)
-            defer { appState.setCollectorRunning(collector.id, running: false) }
-            
             do {
-                let response = try await client.runCollector(collector.id)
+                let response = try await collectorService.runCollector(collector)
                 
-                // Create activity record
-                let activity = CollectorActivity(
-                    id: response.runId,
-                    collector: collector.displayName,
-                    timestamp: Date(),
-                    status: response.status,
-                    scanned: response.stats.scanned,
-                    submitted: response.stats.submitted,
-                    errors: response.errors
-                )
-                appState.addActivity(activity)
-                
-                // Refresh collector state
-                if CollectorInfo.hasStateEndpoint(collector.id) {
-                    try await Task.sleep(nanoseconds: 500_000_000) // Wait 0.5s for state to update
-                    if let state = try? await client.getCollectorState(collector.id) {
-                        appState.updateCollectorState(collector.id, with: state)
-                    }
-                }
+                // Save last run information
+                let now = Date()
+                let status = response.status
+                let error = response.errors.isEmpty ? nil : response.errors.joined(separator: "; ")
+                savePersistedLastRunInfo(for: collector.id, lastRunTime: now, lastRunStatus: status, lastError: error)
                 
                 // Update local collectors list
                 loadCollectors()
@@ -291,80 +371,9 @@ struct CollectorsView: View {
                     message: "Processed \(response.stats.submitted) items"
                 )
             } catch {
-                // Create error activity
-                let activity = CollectorActivity(
-                    id: UUID().uuidString,
-                    collector: collector.displayName,
-                    timestamp: Date(),
-                    status: "error",
-                    scanned: 0,
-                    submitted: 0,
-                    errors: [error.localizedDescription]
-                )
-                appState.addActivity(activity)
-                
-                errorMessage = "Failed to run \(collector.displayName): \(error.localizedDescription)"
-                showNotification(
-                    title: collector.displayName,
-                    message: "Run failed: \(error.localizedDescription)"
-                )
-            }
-        }
-    }
-    
-    private func runCollectorWithPayload(_ collector: CollectorInfo, customPayload: String) {
-        Task {
-            appState.setCollectorRunning(collector.id, running: true)
-            defer { appState.setCollectorRunning(collector.id, running: false) }
-            
-            do {
-                print("DEBUG: About to send request to /v1/collectors/\(collector.id):run with payload: \(customPayload)")
-                let response = try await client.runCollectorWithPayload(collector.id, jsonPayload: customPayload)
-                print("DEBUG: Response received: \(response)")
-                
-                // Create activity record
-                let activity = CollectorActivity(
-                    id: response.runId,
-                    collector: collector.displayName,
-                    timestamp: Date(),
-                    status: response.status,
-                    scanned: response.stats.scanned,
-                    submitted: response.stats.submitted,
-                    errors: response.errors
-                )
-                appState.addActivity(activity)
-                
-                // Refresh collector state
-                if CollectorInfo.hasStateEndpoint(collector.id) {
-                    try await Task.sleep(nanoseconds: 500_000_000) // Wait 0.5s for state to update
-                    if let state = try? await client.getCollectorState(collector.id) {
-                        appState.updateCollectorState(collector.id, with: state)
-                    }
-                }
-                
-                // Update local collectors list
-                loadCollectors()
-                
-                // Show notification
-                showNotification(
-                    title: collector.displayName,
-                    message: "Processed \(response.stats.submitted) items"
-                )
-            } catch {
-                print("DEBUG: Error running collector: \(error)")
-                print("DEBUG: Error description: \(error.localizedDescription)")
-                
-                // Create error activity
-                let activity = CollectorActivity(
-                    id: UUID().uuidString,
-                    collector: collector.displayName,
-                    timestamp: Date(),
-                    status: "error",
-                    scanned: 0,
-                    submitted: 0,
-                    errors: [error.localizedDescription]
-                )
-                appState.addActivity(activity)
+                // Save error state
+                let now = Date()
+                savePersistedLastRunInfo(for: collector.id, lastRunTime: now, lastRunStatus: "error", lastError: error.localizedDescription)
                 
                 errorMessage = "Failed to run \(collector.displayName): \(error.localizedDescription)"
                 showNotification(
@@ -391,6 +400,82 @@ struct CollectorsView: View {
     }
     
     // MARK: - Persistence Helpers
+    
+    // Extract base collector ID from account-specific IDs (e.g., "email_imap" from "email_imap:personal-icloud")
+    private func extractBaseCollectorId(_ collectorId: String) -> String {
+        if let colonIndex = collectorId.firstIndex(of: ":") {
+            return String(collectorId[..<colonIndex])
+        }
+        return collectorId
+    }
+    
+    // Extract friendly provider name from account ID (e.g., "personal-icloud" -> "iCloud", "personal-gmail" -> "Gmail")
+    private func extractFriendlyProviderName(from accountId: String) -> String {
+        // Try to extract provider name after dash or underscore
+        let separators = ["-", "_"]
+        for separator in separators {
+            if let range = accountId.range(of: separator) {
+                let providerPart = String(accountId[range.upperBound...])
+                if !providerPart.isEmpty {
+                    // Capitalize first letter
+                    return providerPart.prefix(1).uppercased() + providerPart.dropFirst()
+                }
+            }
+        }
+        
+        // If no separator found, capitalize first letter of the whole ID
+        return accountId.prefix(1).uppercased() + accountId.dropFirst()
+    }
+    
+    // Load persisted last run information from UserDefaults
+    private func loadPersistedLastRunInfo(for collector: inout CollectorInfo) {
+        let key = "collector_last_run_\(collector.id)"
+        
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        
+        // Load last run time
+        if let lastRunTimeStr = dict["lastRunTime"] as? String {
+            let formatter = ISO8601DateFormatter()
+            collector.lastRunTime = formatter.date(from: lastRunTimeStr)
+        }
+        
+        // Load last run status
+        if let lastRunStatus = dict["lastRunStatus"] as? String {
+            collector.lastRunStatus = lastRunStatus
+        }
+        
+        // Load last error
+        if let lastError = dict["lastError"] as? String {
+            collector.lastError = lastError
+        }
+    }
+    
+    // Save persisted last run information to UserDefaults
+    private func savePersistedLastRunInfo(for collectorId: String, lastRunTime: Date?, lastRunStatus: String?, lastError: String?) {
+        let key = "collector_last_run_\(collectorId)"
+        
+        var dict: [String: Any] = [:]
+        
+        if let lastRunTime = lastRunTime {
+            let formatter = ISO8601DateFormatter()
+            dict["lastRunTime"] = formatter.string(from: lastRunTime)
+        }
+        
+        if let lastRunStatus = lastRunStatus {
+            dict["lastRunStatus"] = lastRunStatus
+        }
+        
+        if let lastError = lastError {
+            dict["lastError"] = lastError
+        }
+        
+        if let data = try? JSONSerialization.data(withJSONObject: dict) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
     
     // Map collector IDs to their corresponding module names
     private func mapCollectorToModule(_ collectorId: String) -> String {
@@ -453,25 +538,55 @@ struct CollectorsView: View {
     private func saveAndRunCollector(_ collector: CollectorInfo) {
         // Convert field values to JSON payload
         let fieldValues = collectorFieldValues[collector.id] ?? [:]
-        print("DEBUG: saveAndRunCollector for \(collector.id), fieldValues: \(fieldValues)")
         
-        if !fieldValues.isEmpty {
+        Task {
             do {
-                let jsonPayload = try fieldValuesToJSON(fieldValues)
-                print("DEBUG: Generated JSON payload: \(jsonPayload)")
-                runCollectorWithPayload(collector, customPayload: jsonPayload)
+                let response: RunResponse
+                if !fieldValues.isEmpty {
+                    let jsonPayload = try fieldValuesToJSON(fieldValues, collector: collector)
+                    response = try await collectorService.runCollectorWithJSONPayload(collector, jsonPayload: jsonPayload)
+                } else {
+                    // For account-specific IMAP collectors, ensure account_id is included even with empty options
+                    var jsonPayload = "{}"
+                    if let accountId = collector.imapAccountId {
+                        do {
+                            var dict: [String: Any] = ["order": "desc"]
+                            dict["collector_options"] = ["account_id": accountId]
+                            let jsonData = try JSONSerialization.data(withJSONObject: dict, options: [])
+                            jsonPayload = String(data: jsonData, encoding: .utf8) ?? "{}"
+                        } catch {
+                            jsonPayload = "{}"
+                        }
+                    }
+                    response = try await collectorService.runCollectorWithJSONPayload(collector, jsonPayload: jsonPayload)
+                }
+                
+                // Save last run information
+                let now = Date()
+                let status = response.status
+                let error = response.errors.isEmpty ? nil : response.errors.joined(separator: "; ")
+                savePersistedLastRunInfo(for: collector.id, lastRunTime: now, lastRunStatus: status, lastError: error)
+                
+                loadCollectors()
+                showNotification(
+                    title: collector.displayName,
+                    message: "Processed \(response.stats.submitted) items"
+                )
             } catch {
-                errorMessage = "Failed to serialize configuration: \(error.localizedDescription)"
-                print("DEBUG: Serialization error: \(error)")
+                // Save error state
+                let now = Date()
+                savePersistedLastRunInfo(for: collector.id, lastRunTime: now, lastRunStatus: "error", lastError: error.localizedDescription)
+                
+                errorMessage = "Failed to run \(collector.displayName): \(error.localizedDescription)"
+                showNotification(
+                    title: collector.displayName,
+                    message: "Run failed: \(error.localizedDescription)"
+                )
             }
-        } else {
-            // Run with empty options
-            print("DEBUG: No field values set, running with empty payload")
-            runCollectorWithPayload(collector, customPayload: "{}")
         }
     }
     
-    private func fieldValuesToJSON(_ fieldValues: [String: AnyCodable]) throws -> String {
+    private func fieldValuesToJSON(_ fieldValues: [String: AnyCodable], collector: CollectorInfo) throws -> String {
         var dict: [String: Any] = [:]
         var dateRangeValues: [String: Any] = [:]
         
@@ -516,6 +631,13 @@ struct CollectorsView: View {
             dict["date_range"] = dateRangeValues
         }
         
+        // For account-specific IMAP collectors, automatically include account_id if not already set
+        if let accountId = collector.imapAccountId {
+            if collectorOptions["account_id"] == nil {
+                collectorOptions["account_id"] = accountId
+            }
+        }
+        
         // Add collector_options if it has values
         if !collectorOptions.isEmpty {
             dict["collector_options"] = collectorOptions
@@ -530,7 +652,6 @@ struct CollectorsView: View {
         guard let jsonString = String(data: jsonData, encoding: .utf8) else {
             throw NSError(domain: "JSON", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON"])
         }
-        print("DEBUG: Final serialized JSON: \(jsonString)")
         return jsonString
     }
     

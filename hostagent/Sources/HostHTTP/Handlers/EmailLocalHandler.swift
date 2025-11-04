@@ -273,7 +273,7 @@
         self.config = config
         self.emailService = emailService ?? EmailService()
         // If config.modules.mail.sourcePath is set, initialize an indexed collector pointing at that mail root
-        if let mailSource = config.modules.mail.sourcePath, !mailSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let mailSource = config.modules.mail.sourcePath, !mailSource.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
             let expanded = (mailSource as NSString).expandingTildeInPath
             let mailRootURL = URL(fileURLWithPath: expanded)
             let envelopeIndexURL = mailRootURL.appendingPathComponent("Envelope Index", isDirectory: false)
@@ -286,7 +286,7 @@
         } else {
             self.emailCollector = EmailCollector(
                 gatewayConfig: config.gateway,
-                authToken: config.auth.secret
+                authToken: config.service.auth.secret
             )
         }
         let stateConfig = config.modules.mail.state
@@ -935,7 +935,7 @@
     
     private func parseParameters(from request: HTTPRequest) throws -> RunParameters {
         var mode = "real"
-        var limit = config.defaultLimit
+        var limit: Int? = nil  // No default limit, use nil for unlimited
         var simulatePath: String?
         var order: String?
         var since: Date?

@@ -203,8 +203,9 @@ public actor ContactsHandler {
         var warnings: [String] = []
         var errors: [String] = []
         
-        // Check if a VCF directory was specified
-        let vcfDirectory = runRequest?.collectorOptions?.vcf_directory
+        // Check if a VCF directory was specified in scope
+        let scopeDict = runRequest?.scope?.value as? [String: Any] ?? [:]
+        let vcfDirectory = scopeDict["vcf_directory"] as? String
         
         // In simulate mode, return mock data
         if mode == .simulate {
@@ -239,7 +240,7 @@ public actor ContactsHandler {
             // Use macOS Contacts
             let contacts: [CNContact]
             do {
-                contacts = try fetchContacts(limit: limit)
+                contacts = try await fetchContacts(limit: limit)
             } catch {
                 let errorMsg = "Failed to fetch contacts: \(error.localizedDescription)"
                 logger.error(errorMsg)
@@ -278,13 +279,54 @@ public actor ContactsHandler {
         return CollectionResult(warnings: warnings, errors: errors)
     }
     
-    private func fetchContacts(limit: Int?) throws -> [CNContact] {
+    private func fetchContacts(limit: Int?) async throws -> [CNContact] {
         let store = CNContactStore()
         
-        // Request authorization if needed
-        let authStatus = CNContactStore.authorizationStatus(for: .contacts)
+        // Check current authorization status
+        var authStatus = CNContactStore.authorizationStatus(for: .contacts)
+        
+        // Request authorization if not determined
+        if authStatus == .notDetermined {
+            logger.info("Requesting Contacts permission")
+            do {
+                let granted = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
+                    store.requestAccess(for: .contacts) { granted, error in
+                        if let error = error {
+                            continuation.resume(throwing: error)
+                        } else {
+                            continuation.resume(returning: granted)
+                        }
+                    }
+                }
+                if granted {
+                    authStatus = .authorized
+                    logger.info("Contacts permission granted")
+                } else {
+                    authStatus = .denied
+                    logger.warning("Contacts permission denied by user")
+                }
+            } catch {
+                logger.error("Failed to request Contacts permission", metadata: ["error": error.localizedDescription])
+                throw ContactsError.contactAccessFailed("Failed to request Contacts permission: \(error.localizedDescription)")
+            }
+        }
+        
+        // Check if authorized
         guard authStatus == .authorized else {
-            throw ContactsError.contactAccessDenied("Contacts access denied. Status: \(authStatus.rawValue)")
+            let statusDescription: String
+            switch authStatus {
+            case .notDetermined:
+                statusDescription = "not determined"
+            case .denied:
+                statusDescription = "denied - please grant Contacts access in System Settings"
+            case .restricted:
+                statusDescription = "restricted by parental controls"
+            case .authorized:
+                statusDescription = "authorized" // Should not reach here
+            @unknown default:
+                statusDescription = "unknown (\(authStatus.rawValue))"
+            }
+            throw ContactsError.contactAccessDenied("Contacts access denied. Status: \(statusDescription). Please grant Contacts permission in System Settings → Privacy & Security → Contacts.")
         }
         
         // Define keys to fetch
@@ -708,8 +750,8 @@ public actor ContactsHandler {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(config.auth.secret)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = TimeInterval(config.gateway.timeout)
+        request.setValue("Bearer \(config.service.auth.secret)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = TimeInterval(config.gateway.timeoutMs) / 1000.0
         
         // Build payload
         let deviceId = getDeviceId()
