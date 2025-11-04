@@ -21,7 +21,11 @@ let package = Package(
             dependencies: [
                 .product(name: "Yams", package: "Yams")
             ],
-            path: "Sources/HavenUI"
+            path: "Sources/HavenUI",
+            resources: [
+                // Processes the Resources directory so Assets.xcassets (AppIcon) is bundled
+                .process("Resources")
+            ]
         )
     ]
 )

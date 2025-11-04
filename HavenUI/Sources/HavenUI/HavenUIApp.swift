@@ -6,7 +6,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState?
     var client: HostAgentClient?
     private var poller: HealthPoller?
-    var launchAgentManager: LaunchAgentManager?
+    var processManager: HostAgentProcessManager?
     private var initialized = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -21,40 +21,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         let newClient = HostAgentClient()
         let newPoller = HealthPoller(client: newClient, appState: appState)
-        let newLaunchAgentManager = LaunchAgentManager()
+        let newProcessManager = HostAgentProcessManager()
 
         self.client = newClient
         self.poller = newPoller
-        self.launchAgentManager = newLaunchAgentManager
+        self.processManager = newProcessManager
 
         Task {
-            ensureLogsDirectory()
+            // Auto-start hostagent as a child process
+            do {
+                try await newProcessManager.startHostAgent()
+                print("✓ Started hostagent process on launch")
+                appState.updateProcessState(.running)
+                
+                // Give hostagent a moment to initialize before polling
+                try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+            } catch {
+                print("⚠️ Failed to start hostagent on launch: \(error.localizedDescription)")
+                appState.setError("Failed to start: \(error.localizedDescription)")
+                appState.updateProcessState(.stopped)
+            }
+            
+            // Start health polling after starting hostagent
             newPoller.startPolling()
-
-            let state = await newLaunchAgentManager.getProcessState()
-            appState.updateProcessState(state)
         }
     }
     
     func applicationWillTerminate(_ notification: Notification) {
-        // Stop hostagent when the UI app exits
-        guard let manager = launchAgentManager else { return }
-        
-        // Use a semaphore to wait for async operation to complete
-        let semaphore = DispatchSemaphore(value: 0)
-        
+        // Stop hostagent child process when the UI app exits
+        guard let manager = processManager else { return }
+
+        // Block the terminating thread until we finish shutdown (max 3s)
+        let deadline = Date().addingTimeInterval(3.0)
+        var stopped = false
+
+        // Because this is an actor, perform a synchronous hop via Task and wait.
+        let group = DispatchGroup()
+        group.enter()
         Task {
             do {
                 try await manager.stopHostAgent()
                 print("✓ Stopped hostagent on exit")
+                stopped = true
             } catch {
-                print("⚠️ Failed to stop hostagent on exit: \(error.localizedDescription)")
+                print("⚠️ Failed graceful stop: \(error.localizedDescription)")
             }
-            semaphore.signal()
+            group.leave()
         }
-        
-        // Wait up to 2 seconds for the stop command to complete
-        _ = semaphore.wait(timeout: .now() + 2.0)
+        while group.wait(timeout: .now() + 0.05) == .timedOut && Date() < deadline { /* spin */ }
+
+        if !stopped {
+            // Fallback force kill
+            Task { await manager.forceStop() }
+            // Give a brief moment
+            usleep(150_000)
+        }
     }
     
     private func ensureLogsDirectory() {
@@ -250,7 +271,7 @@ struct HavenUIApp: App {
     }
 
     private func startHostAgent() async {
-        guard let manager = appDelegate.launchAgentManager else { return }
+        guard let manager = appDelegate.processManager else { return }
         
         appState.setStarting(true)
         defer { appState.setStarting(false) }
@@ -259,14 +280,17 @@ struct HavenUIApp: App {
             try await manager.startHostAgent()
             appState.updateProcessState(.running)
             appState.clearError()
+            
+            // Give it a moment to initialize
+            try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
         } catch {
             appState.setError("Failed to start: \(error.localizedDescription)")
-            appState.updateProcessState(.unknown)
+            appState.updateProcessState(.stopped)
         }
     }
     
     private func stopHostAgent() async {
-        guard let manager = appDelegate.launchAgentManager else { return }
+        guard let manager = appDelegate.processManager else { return }
         
         appState.setStopping(true)
         defer { appState.setStopping(false) }
@@ -277,7 +301,8 @@ struct HavenUIApp: App {
             appState.clearError()
         } catch {
             appState.setError("Failed to stop: \(error.localizedDescription)")
-            appState.updateProcessState(.unknown)
+            let state = await manager.getProcessState()
+            appState.updateProcessState(state)
         }
     }
     
