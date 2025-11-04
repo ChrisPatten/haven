@@ -36,12 +36,12 @@ public final class HavenHTTPServer: @unchecked Sendable {
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
         
         do {
-            self.channel = try await bootstrap.bind(host: "127.0.0.1", port: config.port).get()
+            self.channel = try await bootstrap.bind(host: "127.0.0.1", port: config.service.port).get()
             
             logger.info("🚀 Haven Host Agent started", metadata: [
                 "host": "127.0.0.1",
-                "port": config.port,
-                "auth_header": config.auth.header
+                "port": config.service.port,
+                "auth_header": config.service.auth.header
             ])
             
             // Wait for server to close
@@ -155,9 +155,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         ])
         
         // Auth check
-        let authHeader = config.auth.header.lowercased()
+        let authHeader = config.service.auth.header.lowercased()
         guard let token = request.headers[authHeader],
-              constantTimeCompare(token, config.auth.secret) else {
+              constantTimeCompare(token, config.service.auth.secret) else {
             await MetricsCollector.shared.incrementCounter("http_requests_total", labels: ["status": "401"])
             return HTTPResponse(
                 statusCode: 401,

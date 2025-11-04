@@ -41,8 +41,8 @@ struct HavenHostAgent: AsyncParsableCommand {
         let logger = HavenLogger(category: "main")
 
         logger.info("Configuration loaded", metadata: [
-            "port": config.port,
-            "auth_header": config.auth.header,
+            "port": config.service.port,
+            "auth_header": config.service.auth.header,
             "gateway_url": config.gateway.baseUrl
         ])
         logger.info("Beginning hostagent initialization")

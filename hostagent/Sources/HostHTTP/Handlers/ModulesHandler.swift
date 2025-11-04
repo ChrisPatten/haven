@@ -42,14 +42,25 @@ public struct ModulesHandler {
                 )
             ),
             contacts: SimpleModuleInfo(enabled: config.modules.contacts.enabled),
-            calendar: SimpleModuleInfo(enabled: config.modules.calendar.enabled),
-            reminders: SimpleModuleInfo(enabled: config.modules.reminders.enabled),
             mail: SimpleModuleInfo(enabled: config.modules.mail.enabled),
-            notes: SimpleModuleInfo(enabled: config.modules.notes.enabled),
             face: SimpleModuleInfo(enabled: config.modules.face.enabled)
         )
         
-        return HTTPResponse.ok(json: modules)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        
+        do {
+            let jsonData = try encoder.encode(modules)
+            return HTTPResponse(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: jsonData
+            )
+        } catch {
+            logger.error("Failed to encode modules response", metadata: ["error": error.localizedDescription])
+            return HTTPResponse.internalServerError(message: "Failed to encode response")
+        }
     }
     
     public func handleUpdate(request: HTTPRequest, context: RequestContext, moduleName: String) async -> HTTPResponse {
@@ -94,10 +105,7 @@ struct ModulesListResponse: Codable {
     let ocr: OCRModuleInfo
     let fswatch: FSWatchModuleInfo
     let contacts: SimpleModuleInfo
-    let calendar: SimpleModuleInfo
-    let reminders: SimpleModuleInfo
     let mail: SimpleModuleInfo
-    let notes: SimpleModuleInfo
     let face: SimpleModuleInfo
     
     enum CodingKeys: String, CodingKey {
@@ -105,10 +113,7 @@ struct ModulesListResponse: Codable {
         case ocr
         case fswatch
         case contacts
-        case calendar
-        case reminders
         case mail
-        case notes
         case face
     }
 }

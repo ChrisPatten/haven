@@ -2,34 +2,71 @@ import Foundation
 
 /// Global application configuration
 public struct HavenConfig: Codable {
-    public var port: Int
-    public var defaultLimit: Int
-    public var auth: AuthConfig
+    public var service: ServiceConfig
+    public var api: ApiConfig
     public var gateway: GatewayConfig
-    public var modules: ModulesConfig
     public var logging: LoggingConfig
+    public var modules: ModulesConfig
+    
+    enum CodingKeys: String, CodingKey {
+        case service
+        case api
+        case gateway
+        case logging
+        case modules
+    }
+    
+    public init(service: ServiceConfig = ServiceConfig(),
+                api: ApiConfig = ApiConfig(),
+                gateway: GatewayConfig = GatewayConfig(),
+                logging: LoggingConfig = LoggingConfig(),
+                modules: ModulesConfig = ModulesConfig()) {
+        self.service = service
+        self.api = api
+        self.gateway = gateway
+        self.logging = logging
+        self.modules = modules
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        // For backward compatibility, decode service section if present
+        self.service = try container.decodeIfPresent(ServiceConfig.self, forKey: .service) ?? ServiceConfig()
+        self.api = try container.decodeIfPresent(ApiConfig.self, forKey: .api) ?? ApiConfig()
+        self.gateway = try container.decode(GatewayConfig.self, forKey: .gateway)
+        self.logging = try container.decode(LoggingConfig.self, forKey: .logging)
+        self.modules = try container.decode(ModulesConfig.self, forKey: .modules)
+    }
+}
+
+public struct ServiceConfig: Codable {
+    public var port: Int
+    public var auth: AuthConfig
     
     enum CodingKeys: String, CodingKey {
         case port
-        case defaultLimit = "default_limit"
         case auth
-        case gateway
-        case modules
-        case logging
     }
     
-    public init(port: Int = 7090,
-                defaultLimit: Int = 100,
-                auth: AuthConfig = AuthConfig(),
-                gateway: GatewayConfig = GatewayConfig(),
-                modules: ModulesConfig = ModulesConfig(),
-                logging: LoggingConfig = LoggingConfig()) {
+    public init(port: Int = 7090, auth: AuthConfig = AuthConfig()) {
         self.port = port
-        self.defaultLimit = defaultLimit
         self.auth = auth
-        self.gateway = gateway
-        self.modules = modules
-        self.logging = logging
+    }
+}
+
+public struct ApiConfig: Codable {
+    public var responseTimeoutMs: Int
+    public var statusTtlMinutes: Int
+    
+    enum CodingKeys: String, CodingKey {
+        case responseTimeoutMs = "response_timeout_ms"
+        case statusTtlMinutes = "status_ttl_minutes"
+    }
+    
+    public init(responseTimeoutMs: Int = 2000, statusTtlMinutes: Int = 1440) {
+        self.responseTimeoutMs = responseTimeoutMs
+        self.statusTtlMinutes = statusTtlMinutes
     }
 }
 
@@ -47,23 +84,23 @@ public struct GatewayConfig: Codable {
     public var baseUrl: String
     public var ingestPath: String
     public var ingestFilePath: String
-    public var timeout: Int
+    public var timeoutMs: Int
     
     enum CodingKeys: String, CodingKey {
         case baseUrl = "base_url"
         case ingestPath = "ingest_path"
         case ingestFilePath = "ingest_file_path"
-        case timeout
+        case timeoutMs = "timeout_ms"
     }
     
     public init(baseUrl: String = "http://gateway:8080",
                 ingestPath: String = "/v1/ingest",
                 ingestFilePath: String = "/v1/ingest/file",
-                timeout: Int = 30) {
+                timeoutMs: Int = 30000) {
         self.baseUrl = baseUrl
         self.ingestPath = ingestPath
         self.ingestFilePath = ingestFilePath
-        self.timeout = timeout
+        self.timeoutMs = timeoutMs
     }
     
     public init(from decoder: Decoder) throws {
@@ -71,7 +108,19 @@ public struct GatewayConfig: Codable {
         self.baseUrl = try container.decode(String.self, forKey: .baseUrl)
         self.ingestPath = try container.decode(String.self, forKey: .ingestPath)
         self.ingestFilePath = try container.decodeIfPresent(String.self, forKey: .ingestFilePath) ?? "/v1/ingest/file"
-        self.timeout = try container.decodeIfPresent(Int.self, forKey: .timeout) ?? 30
+        
+        // Support both timeout_ms (new) and timeout (legacy)
+        if let timeoutMs = try container.decodeIfPresent(Int.self, forKey: .timeoutMs) {
+            self.timeoutMs = timeoutMs
+        } else {
+            // Legacy: try to decode as timeout (in seconds) and convert to ms
+            let legacyKey = CodingKeys(stringValue: "timeout")!
+            if let timeoutSecs = try container.decodeIfPresent(Int.self, forKey: legacyKey) {
+                self.timeoutMs = timeoutSecs * 1000
+            } else {
+                self.timeoutMs = 30000
+            }
+        }
     }
 }
 
@@ -83,10 +132,7 @@ public struct ModulesConfig: Codable {
     public var fswatch: FSWatchModuleConfig
     public var localfs: LocalFSModuleConfig
     public var contacts: StubModuleConfig
-    public var calendar: StubModuleConfig
-    public var reminders: StubModuleConfig
     public var mail: MailModuleConfig
-    public var notes: StubModuleConfig
     
     enum CodingKeys: String, CodingKey {
         case imessage
@@ -96,10 +142,7 @@ public struct ModulesConfig: Codable {
         case fswatch
         case localfs
         case contacts
-        case calendar
-        case reminders
         case mail
-        case notes
     }
     
     public init(imessage: IMessageModuleConfig = IMessageModuleConfig(),
@@ -109,10 +152,7 @@ public struct ModulesConfig: Codable {
                 fswatch: FSWatchModuleConfig = FSWatchModuleConfig(),
                 localfs: LocalFSModuleConfig = LocalFSModuleConfig(),
                 contacts: StubModuleConfig = StubModuleConfig(),
-                calendar: StubModuleConfig = StubModuleConfig(),
-                reminders: StubModuleConfig = StubModuleConfig(),
-                mail: MailModuleConfig = MailModuleConfig(),
-                notes: StubModuleConfig = StubModuleConfig()) {
+                mail: MailModuleConfig = MailModuleConfig()) {
         self.imessage = imessage
         self.ocr = ocr
         self.entity = entity
@@ -120,10 +160,7 @@ public struct ModulesConfig: Codable {
         self.fswatch = fswatch
         self.localfs = localfs
         self.contacts = contacts
-        self.calendar = calendar
-        self.reminders = reminders
         self.mail = mail
-        self.notes = notes
     }
     
     public init(from decoder: Decoder) throws {
@@ -139,8 +176,6 @@ public struct ModulesConfig: Codable {
         fswatch = try container.decode(FSWatchModuleConfig.self, forKey: .fswatch)
         localfs = try container.decodeIfPresent(LocalFSModuleConfig.self, forKey: .localfs) ?? LocalFSModuleConfig()
         contacts = try container.decode(StubModuleConfig.self, forKey: .contacts)
-        calendar = try container.decode(StubModuleConfig.self, forKey: .calendar)
-        reminders = try container.decode(StubModuleConfig.self, forKey: .reminders)
         
         if let mailConfig = try container.decodeIfPresent(MailModuleConfig.self, forKey: .mail) {
             mail = mailConfig
@@ -149,7 +184,18 @@ public struct ModulesConfig: Codable {
         } else {
             mail = MailModuleConfig()
         }
-        notes = try container.decode(StubModuleConfig.self, forKey: .notes)
+        
+        // Validate that no placeholder modules are present
+        let allKeys = Set(container.allKeys.map { $0.stringValue })
+        let placeholderKeys = ["calendar", "reminders", "notes"]
+        let foundPlaceholders = allKeys.intersection(placeholderKeys)
+        if !foundPlaceholders.isEmpty {
+            throw DecodingError.dataCorruptedError(
+                forKey: CodingKeys.imessage,
+                in: container,
+                debugDescription: "Placeholder modules are no longer supported: \(foundPlaceholders.joined(separator: ", ")). Please use Haven UI to configure these features."
+            )
+        }
     }
 }
 
@@ -157,24 +203,28 @@ public struct IMessageModuleConfig: Codable {
     public var enabled: Bool
     public var ocrEnabled: Bool
     public var chatDbPath: String
+    public var attachmentsPath: String
     
     enum CodingKeys: String, CodingKey {
         case enabled
         case ocrEnabled = "ocr_enabled"
         case chatDbPath = "chat_db_path"
+        case attachmentsPath = "attachments_path"
     }
     
-    public init(enabled: Bool = true, ocrEnabled: Bool = true, chatDbPath: String = "") {
+    public init(enabled: Bool = true, ocrEnabled: Bool = false, chatDbPath: String = "", attachmentsPath: String = "") {
         self.enabled = enabled
         self.ocrEnabled = ocrEnabled
         self.chatDbPath = chatDbPath
+        self.attachmentsPath = attachmentsPath
     }
     
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decode(Bool.self, forKey: .enabled)
-        ocrEnabled = try container.decode(Bool.self, forKey: .ocrEnabled)
+        ocrEnabled = try container.decodeIfPresent(Bool.self, forKey: .ocrEnabled) ?? false
         chatDbPath = try container.decodeIfPresent(String.self, forKey: .chatDbPath) ?? ""
+        attachmentsPath = try container.decodeIfPresent(String.self, forKey: .attachmentsPath) ?? ""
     }
 }
 
@@ -307,80 +357,47 @@ public struct FSWatchModuleConfig: Codable {
 
 public struct LocalFSModuleConfig: Codable {
     public var enabled: Bool
-    public var defaultWatchDir: String?
-    public var include: [String]
-    public var exclude: [String]
-    public var tags: [String]
-    public var moveTo: String?
-    public var deleteAfter: Bool
-    public var dryRun: Bool
-    public var oneShot: Bool
-    public var stateFile: String
+    public var eventQueueSize: Int
+    public var debounceMs: Int
     public var maxFileBytes: Int
-    public var requestTimeout: Double
-    public var followSymlinks: Bool
 
     enum CodingKeys: String, CodingKey {
         case enabled
-        case defaultWatchDir = "default_watch_dir"
-        case include
-        case exclude
-        case tags
-        case moveTo = "move_to"
-        case deleteAfter = "delete_after"
-        case dryRun = "dry_run"
-        case oneShot = "one_shot"
-        case stateFile = "state_file"
+        case eventQueueSize = "event_queue_size"
+        case debounceMs = "debounce_ms"
         case maxFileBytes = "max_file_bytes"
-        case requestTimeout = "request_timeout"
-        case followSymlinks = "follow_symlinks"
     }
 
     public init(
         enabled: Bool = false,
-        defaultWatchDir: String? = nil,
-        include: [String] = ["*.txt", "*.md", "*.pdf", "*.png", "*.jpg", "*.jpeg", "*.heic"],
-        exclude: [String] = ["*.tmp", "~*"],
-        tags: [String] = [],
-        moveTo: String? = nil,
-        deleteAfter: Bool = false,
-        dryRun: Bool = false,
-        oneShot: Bool = true,
-        stateFile: String = "~/.haven/localfs_collector_state.json",
-        maxFileBytes: Int = 10 * 1024 * 1024,
-        requestTimeout: Double = 30.0,
-        followSymlinks: Bool = false
+        eventQueueSize: Int = 1024,
+        debounceMs: Int = 500,
+        maxFileBytes: Int = 104857600
     ) {
         self.enabled = enabled
-        self.defaultWatchDir = defaultWatchDir
-        self.include = include
-        self.exclude = exclude
-        self.tags = tags
-        self.moveTo = moveTo
-        self.deleteAfter = deleteAfter
-        self.dryRun = dryRun
-        self.oneShot = oneShot
-        self.stateFile = stateFile
+        self.eventQueueSize = eventQueueSize
+        self.debounceMs = debounceMs
         self.maxFileBytes = maxFileBytes
-        self.requestTimeout = requestTimeout
-        self.followSymlinks = followSymlinks
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
-        defaultWatchDir = try container.decodeIfPresent(String.self, forKey: .defaultWatchDir)
-        include = try container.decodeIfPresent([String].self, forKey: .include) ?? ["*.txt", "*.md", "*.pdf", "*.png", "*.jpg", "*.jpeg", "*.heic"]
-        exclude = try container.decodeIfPresent([String].self, forKey: .exclude) ?? ["*.tmp", "~*"]
-        tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
-        moveTo = try container.decodeIfPresent(String.self, forKey: .moveTo)
-        deleteAfter = try container.decodeIfPresent(Bool.self, forKey: .deleteAfter) ?? false
-        dryRun = try container.decodeIfPresent(Bool.self, forKey: .dryRun) ?? false
-        oneShot = try container.decodeIfPresent(Bool.self, forKey: .oneShot) ?? true
-        stateFile = try container.decodeIfPresent(String.self, forKey: .stateFile) ?? "~/.haven/localfs_collector_state.json"
-        maxFileBytes = try container.decodeIfPresent(Int.self, forKey: .maxFileBytes) ?? 10 * 1024 * 1024
-        requestTimeout = try container.decodeIfPresent(Double.self, forKey: .requestTimeout) ?? 30.0
-        followSymlinks = try container.decodeIfPresent(Bool.self, forKey: .followSymlinks) ?? false
+        eventQueueSize = try container.decodeIfPresent(Int.self, forKey: .eventQueueSize) ?? 1024
+        debounceMs = try container.decodeIfPresent(Int.self, forKey: .debounceMs) ?? 500
+        maxFileBytes = try container.decodeIfPresent(Int.self, forKey: .maxFileBytes) ?? 104857600
+        
+        // Validate that no per-run fields are present
+        let allKeys = Set(container.allKeys.map { $0.stringValue })
+        let deprecatedKeys = ["default_watch_dir", "include", "exclude", "tags", "move_to", "delete_after", "dry_run", "one_shot", "state_file", "request_timeout", "follow_symlinks"]
+        let foundDeprecated = allKeys.intersection(deprecatedKeys)
+        if !foundDeprecated.isEmpty {
+            throw DecodingError.dataCorruptedError(
+                forKey: CodingKeys.enabled,
+                in: container,
+                debugDescription: "LocalFS module no longer supports per-run configuration in config file: \(foundDeprecated.joined(separator: ", ")). These must now be passed per-run via API calls from Haven UI."
+            )
+        }
     }
 }
 
@@ -415,10 +432,36 @@ public struct StubModuleConfig: Codable {
 public struct LoggingConfig: Codable {
     public var level: String
     public var format: String
+    public var paths: LoggingPathsConfig
     
-    public init(level: String = "info", format: String = "json") {
+    enum CodingKeys: String, CodingKey {
+        case level
+        case format
+        case paths
+    }
+    
+    public init(level: String = "info", format: String = "json", paths: LoggingPathsConfig = LoggingPathsConfig()) {
         self.level = level
         self.format = format
+        self.paths = paths
+    }
+}
+
+public struct LoggingPathsConfig: Codable {
+    public var app: String
+    public var error: String
+    public var access: String
+    
+    enum CodingKeys: String, CodingKey {
+        case app
+        case error
+        case access
+    }
+    
+    public init(app: String = "~/.haven/hostagent.log", error: String = "~/.haven/hostagent_error.log", access: String = "~/.haven/hostagent_access.log") {
+        self.app = app
+        self.error = error
+        self.access = access
     }
 }
 
@@ -572,59 +615,36 @@ extension MailSourceConfig {
 public struct MailModuleConfig: Codable {
     public var enabled: Bool
     public var redactPii: RedactionConfig?
-    public var sources: [MailSourceConfig]
-    public var filters: MailFiltersConfig
-    public var state: MailStateConfig
-    public var defaultOrder: String?
-    public var defaultSince: String?
-    public var defaultUntil: String?
-    public var allowOverride: Bool
     
     enum CodingKeys: String, CodingKey {
         case enabled
         case redactPii = "redact_pii"
-        case sources
-        case filters
-        case state
-        case defaultOrder = "default_order"
-        case defaultSince = "default_since"
-        case defaultUntil = "default_until"
-        case allowOverride = "allow_override"
     }
     
     public init(
         enabled: Bool = false,
-        redactPii: RedactionConfig? = nil,
-        sources: [MailSourceConfig] = [],
-        filters: MailFiltersConfig = MailFiltersConfig(),
-        state: MailStateConfig = MailStateConfig(),
-        defaultOrder: String? = nil,
-        defaultSince: String? = nil,
-        defaultUntil: String? = nil,
-        allowOverride: Bool = true
+        redactPii: RedactionConfig? = nil
     ) {
         self.enabled = enabled
         self.redactPii = redactPii
-        self.sources = sources
-        self.filters = filters
-        self.state = state
-        self.defaultOrder = defaultOrder
-        self.defaultSince = defaultSince
-        self.defaultUntil = defaultUntil
-        self.allowOverride = allowOverride
     }
     
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         redactPii = try container.decodeIfPresent(RedactionConfig.self, forKey: .redactPii)
-        sources = try container.decodeIfPresent([MailSourceConfig].self, forKey: .sources) ?? []
-        filters = try container.decodeIfPresent(MailFiltersConfig.self, forKey: .filters) ?? MailFiltersConfig()
-        state = try container.decodeIfPresent(MailStateConfig.self, forKey: .state) ?? MailStateConfig()
-        defaultOrder = try container.decodeIfPresent(String.self, forKey: .defaultOrder)
-        defaultSince = try container.decodeIfPresent(String.self, forKey: .defaultSince)
-        defaultUntil = try container.decodeIfPresent(String.self, forKey: .defaultUntil)
-        allowOverride = try container.decodeIfPresent(Bool.self, forKey: .allowOverride) ?? true
+        
+        // Validate that no per-run fields are present (sources, filters, state, etc.)
+        let allKeys = Set(container.allKeys.map { $0.stringValue })
+        let deprecatedKeys = ["sources", "filters", "state", "default_order", "default_since", "default_until", "allow_override"]
+        let foundDeprecated = allKeys.intersection(deprecatedKeys)
+        if !foundDeprecated.isEmpty {
+            throw DecodingError.dataCorruptedError(
+                forKey: CodingKeys.enabled,
+                in: container,
+                debugDescription: "Mail module no longer supports per-run configuration in config file: \(foundDeprecated.joined(separator: ", ")). These must now be passed per-run via API calls from Haven UI."
+            )
+        }
     }
 }
 
@@ -884,11 +904,11 @@ public class ConfigLoader {
     private func applyEnvironmentOverrides(_ config: inout HavenConfig) {
         if let port = ProcessInfo.processInfo.environment["HAVEN_PORT"],
            let portInt = Int(port) {
-            config.port = portInt
+            config.service.port = portInt
         }
         
         if let secret = ProcessInfo.processInfo.environment["HAVEN_AUTH_SECRET"] {
-            config.auth.secret = secret
+            config.service.auth.secret = secret
         }
         
         if let gatewayUrl = ProcessInfo.processInfo.environment["HAVEN_GATEWAY_URL"] {
@@ -908,19 +928,17 @@ public class ConfigLoader {
     }
     
     private func validate(_ config: HavenConfig) throws {
-        if config.port < 1024 || config.port > 65535 {
+        if config.service.port < 1024 || config.service.port > 65535 {
             throw ConfigError.validationError("Port must be between 1024 and 65535")
         }
         
-        if config.auth.secret.isEmpty || config.auth.secret == "changeme" {
+        if config.service.auth.secret.isEmpty || config.service.auth.secret == "changeme" {
             logger.warning("Using default auth secret - this is insecure!")
         }
         
         if config.gateway.baseUrl.isEmpty {
             throw ConfigError.validationError("Gateway base URL cannot be empty")
         }
-        
-        // No longer need to check for mail/mailImap conflicts since mailImap is removed
     }
     
     internal func validateConfiguration(_ config: HavenConfig) throws {

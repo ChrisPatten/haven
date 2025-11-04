@@ -5,6 +5,47 @@ public enum RunRouterError: Error {
 }
 
 public struct RunRouter {
+    /// Check capability gating: verify that requested modules/features are enabled
+    /// Returns an error response if capability is not available, nil if OK
+    public static func checkCapabilityGates(request: HTTPRequest, config: HavenConfig) -> HTTPResponse? {
+        // Decode request to check scope
+        guard let runReq = try? request.decodeJSON(CollectorRunRequest.self) else {
+            return nil  // Will be caught as validation error elsewhere
+        }
+        
+        // Check scope for capability requirements
+        guard let scopeData = runReq.scope else {
+            return nil  // No scope, no capability checks needed
+        }
+        
+        let scopeValue = scopeData.value as? [String: Any] ?? [:]
+        
+        // For iMessage: check OCR and Entity capabilities if requested
+        if let useOcr = scopeValue["use_ocr_on_attachments"] as? Bool, useOcr {
+            if !config.modules.ocr.enabled {
+                let errorMsg = "OCR module is disabled but use_ocr_on_attachments=true. Enable modules.ocr in hostagent.yaml"
+                return HTTPResponse(
+                    statusCode: 412,
+                    headers: ["Content-Type": "application/json"],
+                    body: #"{"error":"Precondition Failed","message":"\#(errorMsg)"}"#.data(using: .utf8)
+                )
+            }
+        }
+        
+        if let extractEntities = scopeValue["extract_entities"] as? Bool, extractEntities {
+            if !config.modules.entity.enabled {
+                let errorMsg = "Entity module is disabled but extract_entities=true. Enable modules.entity in hostagent.yaml"
+                return HTTPResponse(
+                    statusCode: 412,
+                    headers: ["Content-Type": "application/json"],
+                    body: #"{"error":"Precondition Failed","message":"\#(errorMsg)"}"#.data(using: .utf8)
+                )
+            }
+        }
+        
+        return nil  // All checks passed
+    }
+    
     /// Dispatch map maps collector name -> handler closure
     public static func handle(request: HTTPRequest, context: RequestContext, dispatchMap: [String: (HTTPRequest, RequestContext) async -> HTTPResponse]) async -> HTTPResponse {
         let prefix = "/v1/collectors/"
