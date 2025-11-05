@@ -12,6 +12,7 @@ struct MenuContent: View {
     var appState: AppState
     let openDashboard: () -> Void
     let openCollectors: () -> Void
+    let openSettings: () -> Void
     let startAction: () async -> Void
     let stopAction: () async -> Void
     let runAllAction: () async -> Void
@@ -39,6 +40,11 @@ struct MenuContent: View {
             // Collectors Button
             Button(action: { openCollectors() }) {
                 Label("Collectors", systemImage: "list.bullet")
+            }
+            
+            // Settings Button
+            Button(action: { openSettings() }) {
+                Label("Settings", systemImage: "gearshape")
             }
             
             Divider()

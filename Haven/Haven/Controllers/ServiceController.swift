@@ -10,22 +10,37 @@ import Foundation
 /// Manages shared services and configuration for all collectors
 public actor ServiceController {
     private var config: HavenConfig?
-    private var configLoader: ConfigLoader
+    private var configManager: ConfigManager
     private var gatewayClient: GatewayClient?
     private var ocrService: OCRService?
     private var entityService: EntityService?
     private var fsWatchService: FSWatchService?
     private let logger = StubLogger(category: "service-controller")
     
-    public init() {
-        self.configLoader = ConfigLoader()
+    public init(configManager: ConfigManager? = nil) {
+        self.configManager = configManager ?? ConfigManager()
     }
     
     // MARK: - Configuration
     
-    /// Load configuration from file or use defaults
-    public func loadConfig(from path: String? = nil) throws -> HavenConfig {
-        let config = try configLoader.load(from: path)
+    /// Load configuration from plist files via ConfigManager
+    public func loadConfig() async throws -> HavenConfig {
+        // Load all plist configs
+        let systemConfig = try await configManager.loadSystemConfig()
+        let emailConfig = try await configManager.loadEmailConfig()
+        let filesConfig = try await configManager.loadFilesConfig()
+        let contactsConfig = try await configManager.loadContactsConfig()
+        let imessageConfig = try await configManager.loadIMessageConfig()
+        
+        // Convert to HavenConfig for compatibility with existing code
+        let config = ConfigConverter.toHavenConfig(
+            systemConfig: systemConfig,
+            emailConfig: emailConfig,
+            filesConfig: filesConfig,
+            contactsConfig: contactsConfig,
+            imessageConfig: imessageConfig
+        )
+        
         self.config = config
         
         // Apply logging configuration
@@ -39,7 +54,7 @@ public actor ServiceController {
         StubLogger.setOutputFormat(config.logging.format)
         StubLogger.enableDirectFileLogging()
         
-        logger.info("Configuration loaded", metadata: [
+        logger.info("Configuration loaded from plist files", metadata: [
             "gateway_url": config.gateway.baseUrl
         ])
         

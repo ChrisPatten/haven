@@ -14,181 +14,131 @@ struct CollectorsView: View {
     var appState: AppState
     var hostAgentController: HostAgentController
     
-    @State private var collectors: [CollectorInfo] = []
-    @State private var isLoading = false
-    @State private var refreshTimer: Timer?
+    @StateObject private var viewModel: CollectorsViewModel
+    
+    @State private var runBuilderViewModel: CollectorRunRequestBuilderViewModel?
+    @State private var showingRunConfiguration = false
     @State private var errorMessage: String?
-    @State private var editingCollector: String?
+    
+    init(appState: AppState, hostAgentController: HostAgentController) {
+        self.appState = appState
+        self.hostAgentController = hostAgentController
+        
+        let vm = CollectorsViewModel(hostAgentController: hostAgentController, appState: appState)
+        _viewModel = StateObject(wrappedValue: vm)
+    }
     
     var body: some View {
-        VStack(spacing: 12) {
-            // Header
-            HStack {
-                Image(systemName: "circle.fill")
-                    .foregroundStyle(statusColor)
-                    .font(.system(size: 12))
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Collectors")
+        NavigationSplitView {
+            // Sidebar
+            CollectorListSidebar(
+                collectors: $viewModel.collectors,
+                selectedCollectorId: $viewModel.selectedCollectorId,
+                isCollectorRunning: { collectorId in
+                    appState.isCollectorRunning(collectorId)
+                },
+                onRunAll: {
+                    Task {
+                        await runAllCollectors()
+                    }
+                },
+                isLoading: viewModel.isLoading
+            )
+            .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 300)
+        } detail: {
+            // Detail panel
+            if let collector = viewModel.getSelectedCollector() {
+                CollectorDetailView(
+                    collector: collector,
+                    isRunning: appState.isCollectorRunning(collector.id),
+                    lastRunStats: viewModel.collectorStates[collector.id],
+                    onRunNow: {
+                        runCollectorNow(collector)
+                    },
+                    onRunWithOptions: {
+                        showRunConfiguration(collector)
+                    },
+                    onViewHistory: {
+                        // TODO: Implement history view
+                        errorMessage = "History view not yet implemented"
+                    }
+                )
+            } else {
+                // Empty state
+                VStack(spacing: 16) {
+                    Image(systemName: "tray.and.arrow.down")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    
+                    Text("Select a collector")
                         .font(.headline)
-                    Text("Manage data collection sources")
+                        .foregroundStyle(.secondary)
+                    
+                    Text("Choose a collector from the sidebar to view details and run configuration")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 300)
                 }
-                
-                Spacer()
-                
-                Button(action: refreshCollectors) {
-                    Image(systemName: "arrow.clockwise")
-                        .foregroundStyle(.secondary)
-                }
-                .help("Refresh collector status")
-                .disabled(isLoading)
-                .buttonStyle(PlainButtonStyle())
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            
-            Divider()
-            
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    if isLoading && collectors.isEmpty {
-                        HStack {
-                            ProgressView()
-                                .scaleEffect(0.8)
-                            Text("Loading collectors...")
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                        }
-                        .padding(12)
-                    } else if collectors.isEmpty {
-                        Text("No collectors available")
-                            .foregroundStyle(.secondary)
-                            .padding(12)
-                    } else {
-                        // Table header
-                        HStack(spacing: 0) {
-                            Text("Collector")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 8)
-                            
-                            Text("Enabled")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .frame(width: 60, alignment: .center)
-                            
-                            Text("Status")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .frame(width: 70, alignment: .center)
-                            
-                            Text("Last Run")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .frame(width: 80, alignment: .center)
-                            
-                            Text("Options")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .frame(width: 30, alignment: .center)
-                            
-                            Text("Action")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .frame(width: 70, alignment: .center)
-                        }
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 8)
-                        .background(Color(.controlBackgroundColor))
-                        
-                        Divider()
-                        
-                        ForEach(collectors) { collector in
-                            CollectorRowView(
-                                collector: collector,
-                                isRunning: appState.isCollectorRunning(collector.id),
-                                onRun: { runCollector(collector) },
-                                onToggleEnabled: { toggleCollectorEnabled(collector) },
-                                onEditPayload: { editPayload(collector) }
-                            )
-                            Divider()
-                        }
-                    }
-                    
-                    // Error banner
-                    if let error = errorMessage {
-                        ErrorBannerView(message: error)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(minWidth: 700, minHeight: 400)
-        .background(Color(.controlBackgroundColor))
+        .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                Button(action: {
+                    viewModel.refreshCollectors()
+                }) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(viewModel.isLoading)
+                
+                Button(action: {
+                    Task {
+                        await runAllCollectors()
+                    }
+                }) {
+                    Label("Run All", systemImage: "play.fill")
+                }
+                .disabled(viewModel.isLoading || viewModel.collectors.isEmpty)
+            }
+        }
+        .sheet(isPresented: $showingRunConfiguration) {
+            if let collector = viewModel.getSelectedCollector(),
+               let runBuilderVM = runBuilderViewModel {
+                RunConfigurationSheet(
+                    collector: collector,
+                    viewModel: runBuilderVM,
+                    onRun: {
+                        runCollectorWithConfiguration(collector, viewModel: runBuilderVM)
+                    },
+                    onCancel: {
+                        showingRunConfiguration = false
+                        runBuilderViewModel = nil
+                    }
+                )
+            }
+        }
+        .alert("Error", isPresented: .constant(errorMessage != nil), presenting: errorMessage) { _ in
+            Button("OK") {
+                errorMessage = nil
+            }
+        } message: { message in
+            Text(message)
+        }
         .onAppear {
-            loadCollectors()
-            startRefreshTimer()
+            viewModel.startPolling()
         }
         .onDisappear {
-            stopRefreshTimer()
+            viewModel.stopPolling()
         }
     }
     
-    private var statusColor: Color {
-        switch appState.status {
-        case .green:
-            return .green
-        case .yellow:
-            return .yellow
-        case .red:
-            return .red
-        }
-    }
+    // MARK: - Actions
     
-    private func loadCollectors() {
-        Task {
-            isLoading = true
-            defer { isLoading = false }
-            
-            // For now, load from supported collectors
-            // This will be replaced with actual API calls when HostAgent is integrated
-            var loadedCollectors: [CollectorInfo] = []
-            
-            for (_, baseInfo) in CollectorInfo.supportedCollectors {
-                var info = baseInfo
-                
-                // Load persisted last run info
-                loadPersistedLastRunInfo(for: &info)
-                
-                loadedCollectors.append(info)
-            }
-            
-            collectors = loadedCollectors.sorted { $0.displayName < $1.displayName }
-            appState.updateCollectorsList(collectors)
-            errorMessage = nil
-        }
-    }
-    
-    private func refreshCollectors() {
-        loadCollectors()
-    }
-    
-    private func runCollector(_ collector: CollectorInfo) {
+    private func runCollectorNow(_ collector: CollectorInfo) {
         Task {
             do {
-                // Parse payload if available
-                var request: CollectorRunRequest? = nil
-                if let payloadData = collector.payload.data(using: .utf8) {
-                    let decoder = JSONDecoder()
-                    decoder.dateDecodingStrategy = .iso8601
-                    request = try? decoder.decode(CollectorRunRequest.self, from: payloadData)
-                }
-                
-                let response = try await hostAgentController.runCollector(id: collector.id, request: request)
+                let response = try await hostAgentController.runCollector(id: collector.id, request: nil)
                 
                 // Save last run information
                 let lastRunTime = ISO8601DateFormatter().date(from: response.started_at) ?? Date()
@@ -199,8 +149,8 @@ struct CollectorsView: View {
                     lastError: response.errors.isEmpty ? nil : response.errors.joined(separator: "; ")
                 )
                 
-                // Update local collectors list
-                loadCollectors()
+                // Refresh collectors list
+                await viewModel.loadCollectors()
                 
                 // Show notification
                 showNotification(
@@ -219,53 +169,73 @@ struct CollectorsView: View {
                     lastError: error.localizedDescription
                 )
                 
-                // Update local collectors list
-                loadCollectors()
+                // Refresh collectors list
+                await viewModel.loadCollectors()
             }
         }
     }
     
-    private func toggleCollectorEnabled(_ collector: CollectorInfo) {
-        // TODO: Implement YAML config file read/write
-        // For now, show a placeholder message
-        errorMessage = "Enable/disable configuration not yet implemented"
+    private func showRunConfiguration(_ collector: CollectorInfo) {
+        let vm = CollectorRunRequestBuilderViewModel(
+            collector: collector,
+            hostAgentController: hostAgentController
+        )
+        vm.loadPersistedSettings()
+        Task {
+            await vm.loadModules()
+        }
+        
+        runBuilderViewModel = vm
+        showingRunConfiguration = true
     }
     
-    private func editPayload(_ collector: CollectorInfo) {
-        // TODO: Implement payload editor
-        editingCollector = collector.id
-        errorMessage = "Payload editor not yet implemented"
+    private func runCollectorWithConfiguration(_ collector: CollectorInfo, viewModel: CollectorRunRequestBuilderViewModel) {
+        Task {
+            do {
+                let response = try await viewModel.runCollector()
+                
+                // Save configuration
+                viewModel.saveSettings()
+                
+                // Save last run information
+                let lastRunTime = ISO8601DateFormatter().date(from: response.started_at) ?? Date()
+                savePersistedLastRunInfo(
+                    for: collector.id,
+                    lastRunTime: lastRunTime,
+                    lastRunStatus: response.status.rawValue,
+                    lastError: response.errors.isEmpty ? nil : response.errors.joined(separator: "; ")
+                )
+                
+                // Refresh collectors list
+                await self.viewModel.loadCollectors()
+                
+                // Close sheet
+                showingRunConfiguration = false
+                
+                // Show notification
+                showNotification(
+                    title: collector.displayName,
+                    message: "Collector run completed"
+                )
+            } catch {
+                errorMessage = "Failed to run collector: \(error.localizedDescription)"
+                appState.setError(error.localizedDescription)
+            }
+        }
+    }
+    
+    private func runAllCollectors() async {
+        do {
+            try await hostAgentController.runAllCollectors()
+            await viewModel.loadCollectors()
+        } catch {
+            errorMessage = "Failed to run all collectors: \(error.localizedDescription)"
+            appState.setError(error.localizedDescription)
+        }
     }
     
     // MARK: - Persistence Helpers
     
-    // Load persisted last run information from UserDefaults
-    private func loadPersistedLastRunInfo(for collector: inout CollectorInfo) {
-        let key = "collector_last_run_\(collector.id)"
-        
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return
-        }
-        
-        // Load last run time
-        if let lastRunTimeStr = dict["lastRunTime"] as? String {
-            let formatter = ISO8601DateFormatter()
-            collector.lastRunTime = formatter.date(from: lastRunTimeStr)
-        }
-        
-        // Load last run status
-        if let lastRunStatus = dict["lastRunStatus"] as? String {
-            collector.lastRunStatus = lastRunStatus
-        }
-        
-        // Load last error
-        if let lastError = dict["lastError"] as? String {
-            collector.lastError = lastError
-        }
-    }
-    
-    // Save persisted last run information to UserDefaults
     private func savePersistedLastRunInfo(for collectorId: String, lastRunTime: Date?, lastRunStatus: String?, lastError: String?) {
         let key = "collector_last_run_\(collectorId)"
         
@@ -289,16 +259,7 @@ struct CollectorsView: View {
         }
     }
     
-    private func startRefreshTimer() {
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { _ in
-            loadCollectors()
-        }
-    }
-    
-    private func stopRefreshTimer() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
-    }
+    // MARK: - Notifications
     
     private func showNotification(title: String, message: String) {
         guard Bundle.main.bundleIdentifier != nil else {
@@ -332,97 +293,29 @@ struct CollectorsView: View {
     }
 }
 
-// MARK: - Collector Row View
+// MARK: - Run Configuration Sheet
 
-struct CollectorRowView: View {
+struct RunConfigurationSheet: View {
     let collector: CollectorInfo
-    let isRunning: Bool
+    @ObservedObject var viewModel: CollectorRunRequestBuilderViewModel
     let onRun: () -> Void
-    let onToggleEnabled: () -> Void
-    let onEditPayload: () -> Void
+    let onCancel: () -> Void
     
     var body: some View {
-        HStack(spacing: 0) {
-            // Collector name and description
-            VStack(alignment: .leading, spacing: 2) {
-                Text(collector.displayName)
-                    .font(.callout)
-                    .fontWeight(.medium)
-                
-                Text(collector.description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 8)
-            
-            // Enabled toggle
-            Toggle("", isOn: .constant(collector.enabled))
-                .labelsHidden()
-                .frame(width: 60, alignment: .center)
-                .disabled(true)  // Disable until config implementation
-            
-            // Status indicator
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 8, height: 8)
-                
-                Text(collector.statusDescription())
-                    .font(.caption)
-                    .lineLimit(1)
-            }
-            .frame(width: 70, alignment: .center)
-            
-            // Last run time
-            Text(collector.lastRunDescription())
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 80, alignment: .center)
-            
-            // Edit Payload button (gear icon)
-            Button(action: onEditPayload) {
-                Image(systemName: "gear")
-                    .font(.caption)
-            }
-            .buttonStyle(PlainButtonStyle())
-            .help("Edit collector options")
-            .frame(width: 30, alignment: .center)
-            
-            // Run Now button
-            Button(action: onRun) {
-                if isRunning {
-                    HStack(spacing: 4) {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                        Text("Running")
-                            .font(.caption2)
+        NavigationStack {
+            RunConfigurationView(viewModel: viewModel)
+                .navigationTitle("Run Configuration: \(collector.displayName)")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel", action: onCancel)
                     }
-                } else {
-                    Label("Run", systemImage: "play.fill")
-                        .font(.caption2)
+                    
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Run", action: onRun)
+                            .buttonStyle(.borderedProminent)
+                    }
                 }
-            }
-            .disabled(isRunning || !collector.enabled)
-            .frame(width: 70, alignment: .center)
         }
-        .padding(.vertical, 6)
-    }
-    
-    private var statusColor: Color {
-        if isRunning {
-            return .yellow
-        }
-        switch collector.lastRunStatus?.lowercased() {
-        case "ok":
-            return .green
-        case "error":
-            return .red
-        case "partial":
-            return .yellow
-        default:
-            return .gray
-        }
+        .frame(minWidth: 600, minHeight: 500)
     }
 }
-

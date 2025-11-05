@@ -119,6 +119,43 @@ import HavenCore
 // as a library. These local definitions match the real types from hostagent.
 // TODO: Move RunResponse and CollectorRunRequest to HavenCore or export HostAgentEmail
 
+// MARK: - CollectorRunRequest (API-compatible version with snake_case)
+
+/// API-compatible CollectorRunRequest for HTTP requests
+/// Uses snake_case properties to match the actual API
+public struct CollectorRunRequest: Codable {
+    public var mode: String?
+    public var order: String?
+    public var limit: Int?
+    public var concurrency: Int?
+    public var date_range: DateRange?
+    public var time_window: String?
+    public var filters: FilterConfig?
+    public var redaction_override: [String: Bool]?
+    public var scope: [String: AnyCodable]?
+    public var wait_for_completion: Bool?
+    public var timeout_ms: Int?
+    
+    public init() {}
+    
+    public struct DateRange: Codable {
+        public var since: String?
+        public var until: String?
+        
+        public init() {}
+    }
+    
+    public struct FilterConfig: Codable {
+        public var combination_mode: String?
+        public var default_action: String?
+        public var inline: String?
+        public var files: [String]?
+        public var environment_variable: String?
+        
+        public init() {}
+    }
+}
+
 /// Temporary stub for hostagent's AnyCodable
 public enum HostAgentAnyCodable: Codable {
     case string(String)
@@ -319,6 +356,34 @@ public struct CollectorInfo: Identifiable {
         formatter.timeStyle = .short
         formatter.dateStyle = .short
         return formatter.string(from: lastRunTime)
+    }
+    
+    func relativeTimeString() -> String {
+        guard let lastRunTime = lastRunTime else {
+            return "Never"
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: lastRunTime, relativeTo: Date())
+    }
+    
+    static func groupedByCategory(_ collectors: [CollectorInfo]) -> [String: [CollectorInfo]] {
+        Dictionary(grouping: collectors, by: { $0.category })
+    }
+    
+    static func categoryDisplayName(_ category: String) -> String {
+        switch category {
+        case "messages":
+            return "Messages"
+        case "email":
+            return "Email"
+        case "files":
+            return "Files"
+        case "contacts":
+            return "Contacts"
+        default:
+            return category.capitalized
+        }
     }
 }
 

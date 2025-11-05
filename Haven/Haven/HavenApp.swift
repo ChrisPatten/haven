@@ -50,6 +50,7 @@ struct HavenApp: App {
                 appState: appState,
                 openDashboard: { openOrFocusDashboard() },
                 openCollectors: { openOrFocusCollectors() },
+                openSettings: { openOrFocusSettings() },
                 startAction: startHostAgent,
                 stopAction: stopHostAgent,
                 runAllAction: runAllCollectors
@@ -89,6 +90,16 @@ struct HavenApp: App {
         .keyboardShortcut("2", modifiers: [.command])
         .windowStyle(.automatic)
         .windowToolbarStyle(.unified(showsTitle: true))
+        .defaultSize(width: 900, height: 600)
+        
+        WindowGroup("Settings", id: "settings") {
+            SettingsWindow()
+                .background(WindowFocusHelper())
+        }
+        .keyboardShortcut(",", modifiers: [.command])
+        .windowStyle(.automatic)
+        .windowToolbarStyle(.unified(showsTitle: true))
+        .defaultSize(width: 800, height: 600)
     }
 
     private var statusColor: Color {
@@ -174,6 +185,53 @@ struct HavenApp: App {
                 if let newWindow = NSApplication.shared.windows.first(where: { window in
                     window.identifier?.rawValue == "collectors" ||
                     window.title == "Haven Collectors"
+                }) {
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    newWindow.makeKeyAndOrderFront(nil)
+                    newWindow.orderFrontRegardless()
+                    newWindow.makeMain()
+                }
+            }
+            
+            // Try immediately
+            DispatchQueue.main.async {
+                bringWindowToFront()
+            }
+            
+            // Try after short delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                bringWindowToFront()
+            }
+            
+            // Try after longer delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                bringWindowToFront()
+            }
+        }
+    }
+    
+    private func openOrFocusSettings() {
+        // Activate the app first to ensure it comes to foreground
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        
+        // Check if settings window already exists
+        if let existingWindow = NSApplication.shared.windows.first(where: { window in
+            window.identifier?.rawValue == "settings" ||
+            window.title == "Settings"
+        }) {
+            // Bring existing window to front
+            existingWindow.makeKeyAndOrderFront(nil)
+            existingWindow.orderFrontRegardless()
+            existingWindow.makeMain()
+        } else {
+            // Open new settings window
+            openWindow(id: "settings")
+            
+            // Ensure the new window is focused when it appears
+            func bringWindowToFront() {
+                if let newWindow = NSApplication.shared.windows.first(where: { window in
+                    window.identifier?.rawValue == "settings" ||
+                    window.title == "Settings"
                 }) {
                     NSApplication.shared.activate(ignoringOtherApps: true)
                     newWindow.makeKeyAndOrderFront(nil)

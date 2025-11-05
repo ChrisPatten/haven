@@ -132,11 +132,20 @@ public struct IMessageModuleConfig: Codable {
     public var enabled: Bool
     public var chatDbPath: String
     public var ocrEnabled: Bool
+    public var attachmentsPath: String
     
-    public init(enabled: Bool = false, chatDbPath: String = "~/Library/Messages/chat.db", ocrEnabled: Bool = false) {
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case chatDbPath = "chat_db_path"
+        case ocrEnabled = "ocr_enabled"
+        case attachmentsPath = "attachments_path"
+    }
+    
+    public init(enabled: Bool = false, chatDbPath: String = "~/Library/Messages/chat.db", ocrEnabled: Bool = false, attachmentsPath: String = "") {
         self.enabled = enabled
         self.chatDbPath = chatDbPath
         self.ocrEnabled = ocrEnabled
+        self.attachmentsPath = attachmentsPath
     }
 }
 
@@ -210,9 +219,16 @@ public struct FSWatchEntry: Codable, Identifiable {
 
 public struct LocalFSModuleConfig: Codable {
     public var enabled: Bool
+    public var maxFileBytes: Int?
     
-    public init(enabled: Bool = false) {
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case maxFileBytes = "max_file_bytes"
+    }
+    
+    public init(enabled: Bool = false, maxFileBytes: Int? = nil) {
         self.enabled = enabled
+        self.maxFileBytes = maxFileBytes
     }
 }
 
@@ -313,7 +329,10 @@ public struct IngestEvent: Codable {
     // Stub implementation
 }
 
-public struct CollectorRunRequest: Codable {
+/// HavenCore package interface version of CollectorRunRequest
+/// Uses camelCase properties and Date types for Swift package interface
+/// Note: The HTTP API uses snake_case - see CollectorRunRequest in Models.swift
+public struct HavenCoreCollectorRunRequest: Codable {
     public enum Mode: String, Codable {
         case simulate
         case real
