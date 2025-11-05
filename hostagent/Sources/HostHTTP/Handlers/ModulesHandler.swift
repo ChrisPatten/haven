@@ -13,7 +13,31 @@ public struct ModulesHandler {
     }
     
     public func handleList(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        let modules = ModulesListResponse(
+        let modules = getModuleSummaries()
+        
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        
+        do {
+            let jsonData = try encoder.encode(modules)
+            return HTTPResponse(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: jsonData
+            )
+        } catch {
+            logger.error("Failed to encode modules response", metadata: ["error": error.localizedDescription])
+            return HTTPResponse.internalError(message: "Failed to encode response")
+        }
+    }
+    
+    // MARK: - Direct Swift API
+    
+    /// Direct Swift API for getting module summaries
+    /// Replaces HTTP-based handleList for in-app integration
+    public func getModuleSummaries() -> ModulesListResponse {
+        return ModulesListResponse(
             imessage: IMessageModuleInfo(
                 enabled: config.modules.imessage.enabled,
                 config: IMessageModuleConfig(
@@ -45,22 +69,6 @@ public struct ModulesHandler {
             mail: SimpleModuleInfo(enabled: config.modules.mail.enabled),
             face: SimpleModuleInfo(enabled: config.modules.face.enabled)
         )
-        
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        
-        do {
-            let jsonData = try encoder.encode(modules)
-            return HTTPResponse(
-                statusCode: 200,
-                headers: ["Content-Type": "application/json"],
-                body: jsonData
-            )
-        } catch {
-            logger.error("Failed to encode modules response", metadata: ["error": error.localizedDescription])
-            return HTTPResponse.internalError(message: "Failed to encode response")
-        }
     }
     
     public func handleUpdate(request: HTTPRequest, context: RequestContext, moduleName: String) async -> HTTPResponse {

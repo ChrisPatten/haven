@@ -192,6 +192,124 @@ public actor ContactsHandler {
         }
     }
     
+    // MARK: - Direct Swift APIs
+    
+    /// Direct Swift API for running the Contacts collector
+    /// Replaces HTTP-based handleRun for in-app integration
+    public func runCollector(request: CollectorRunRequest?) async throws -> RunResponse {
+        // Check if already running
+        guard !isRunning else {
+            throw ContactsError.contactAccessFailed("Collector is already running")
+        }
+        
+        // Parse request
+        let mode: CollectorRunRequest.Mode = request?.mode ?? .real
+        let limit = request?.limit
+        
+        // Store request for access in collectContacts
+        self.runRequest = request
+        
+        logger.info("Starting Contacts collector", metadata: [
+            "mode": mode.rawValue,
+            "limit": limit?.description ?? "unlimited"
+        ])
+        
+        // Initialize response
+        let runID = UUID().uuidString
+        let startTime = Date()
+        var response = RunResponse(collector: "contacts", runID: runID, startedAt: startTime)
+        
+        // Run collection
+        isRunning = true
+        lastRunTime = startTime
+        lastRunStatus = "running"
+        lastRunError = nil
+        
+        var stats = CollectorStats(
+            contactsScanned: 0,
+            contactsProcessed: 0,
+            contactsSubmitted: 0,
+            contactsSkipped: 0,
+            batchesSubmitted: 0,
+            startTime: startTime
+        )
+        
+        do {
+            let result = try await collectContacts(mode: mode, limit: limit, stats: &stats)
+            
+            let endTime = Date()
+            stats.endTime = endTime
+            stats.durationMs = Int((endTime.timeIntervalSince(startTime)) * 1000)
+            
+            isRunning = false
+            lastRunStatus = "completed"
+            lastRunStats = stats
+            
+            logger.info("Contacts collection completed", metadata: [
+                "scanned": String(stats.contactsScanned),
+                "submitted": String(stats.contactsSubmitted),
+                "batches": String(stats.batchesSubmitted),
+                "duration_ms": String(stats.durationMs ?? 0)
+            ])
+            
+            // Convert stats to RunResponse
+            response.finish(status: .ok, finishedAt: endTime)
+            response.stats = RunResponse.Stats(
+                scanned: stats.contactsScanned,
+                matched: stats.contactsProcessed,
+                submitted: stats.contactsSubmitted,
+                skipped: stats.contactsSkipped,
+                earliest_touched: nil,
+                latest_touched: nil,
+                batches: stats.batchesSubmitted
+            )
+            response.warnings = result.warnings
+            response.errors = result.errors
+            
+            return response
+            
+        } catch {
+            let endTime = Date()
+            stats.endTime = endTime
+            stats.durationMs = Int((endTime.timeIntervalSince(startTime)) * 1000)
+            
+            isRunning = false
+            lastRunStatus = "failed"
+            lastRunStats = stats
+            lastRunError = error.localizedDescription
+            
+            logger.error("Contacts collection failed", metadata: ["error": error.localizedDescription])
+            
+            response.finish(status: .error, finishedAt: endTime)
+            response.errors = [error.localizedDescription]
+            
+            throw error
+        }
+    }
+    
+    /// Direct Swift API for getting collector state
+    /// Replaces HTTP-based handleState for in-app integration
+    public func getCollectorState() async -> CollectorStateInfo {
+        // Convert lastRunStats to [String: AnyCodable]
+        var statsDict: [String: AnyCodable]? = nil
+        if let stats = lastRunStats {
+            var dict: [String: AnyCodable] = [:]
+            let statsDictAny = stats.toDict
+            for (key, value) in statsDictAny {
+                dict[key] = AnyCodable(value)
+            }
+            statsDict = dict
+        }
+        
+        return CollectorStateInfo(
+            isRunning: isRunning,
+            lastRunTime: lastRunTime,
+            lastRunStatus: lastRunStatus,
+            lastRunStats: statsDict,
+            lastRunError: lastRunError
+        )
+    }
+    
     // MARK: - Collection Logic
     
     private struct CollectionResult {

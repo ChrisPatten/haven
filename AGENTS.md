@@ -36,7 +36,9 @@ Embedding Worker → Catalog → Qdrant
 ```
 
 **Codebase Map:**
-- `hostagent/`: Swift native daemon
+- `hostagent/`: Swift native daemon (legacy - being migrated to `Haven/`)
+- `HavenUI/`: Original SwiftUI menubar app (legacy - being migrated to `Haven/`)
+- `Haven/`: New unified Swift app combining HavenUI and HostAgent functionality
 - `services/`: FastAPI microservices (gateway, catalog, search, embedding)
 - `shared/`: Cross-service utilities (DB, logging, image enrichment)
 - `schema/`: Postgres migrations
@@ -44,6 +46,68 @@ Embedding Worker → Catalog → Qdrant
 - `tests/`: Pytest suite
 
 All inter-service comm via Gateway API. No direct service-to-service calls.
+
+## Migration: HavenUI + HostAgent → Unified Haven.App
+
+**Status: In Progress**
+
+We are migrating from two separate Swift applications to a single unified macOS app called `Haven.App`:
+
+### Legacy Applications (Being Migrated)
+
+1. **HavenUI** (`HavenUI/`):
+   - Original SwiftUI menubar application
+   - Provided UI for managing collectors and viewing status
+   - Menubar integration with dashboard and collectors views
+   - Communicated with HostAgent via localhost HTTP API
+
+2. **HostAgent** (`hostagent/`):
+   - Original Swift daemon/CLI application
+   - Provided localhost HTTP API for macOS capabilities
+   - Handled collectors (iMessage, email, localfs, contacts)
+   - OCR and file watching functionality
+
+### New Unified App (`Haven/`)
+
+The new `Haven/` Xcode project consolidates both applications into a single macOS app:
+
+- **Menubar functionality**: Complete menubar UI from HavenUI
+  - Status indicator (green/yellow/red)
+  - Dashboard window (Cmd+1)
+  - Collectors window (Cmd+2)
+  - Start/Stop controls
+  - Run All Collectors functionality
+
+- **HostAgent functionality**: Will include all HostAgent capabilities
+  - Migrating from HTTP API to direct interaction with modules
+  - Collector implementations
+  - OCR and file watching
+  - All macOS-specific data collection
+
+**Migration Strategy:**
+- Phase 1 (Current): UI components migrated from HavenUI
+  - ✅ Menubar menu
+  - ✅ Dashboard view
+  - ✅ Collectors view
+  - ✅ Basic state management
+  - ✅ App icons
+
+- Phase 2 (Next): HostAgent functionality integration
+  - Transition API handlers to direct interaction with modules
+  - Collector implementations
+  - Async job management
+  - Health polling and status updates
+
+- Phase 3 (Future): Complete migration
+  - Remove legacy HavenUI and HostAgent code
+  - Consolidate all functionality in unified app
+  - Update documentation
+
+**Reference Implementation:**
+- When implementing new features, reference the original implementations in:
+  - `HavenUI/Sources/HavenUI/` for UI patterns
+  - `hostagent/Sources/` for business logic and API handlers
+- The new app should maintain feature parity with both original applications
 
 ## Documentation
 **Guidelines:**
@@ -111,7 +175,48 @@ bd automatically syncs with git. No user intervention is necessary:
 - ❌ Do NOT duplicate tracking systems
 - ❌ Do NOT read from or modify ANYTHING in the .beads directory
 
+## Directory Structure
+
+**Core Application:**
+- `Haven/`: New unified Swift macOS application (Xcode project)
+  - `Haven/Haven/`: Main app source code (SwiftUI views, models, state)
+  - `Haven/Haven.xcodeproj/`: Xcode project configuration
+  - Migrating from HavenUI + HostAgent into single app
+
+**Legacy Applications (Reference Only):**
+- `HavenUI/`: Original SwiftUI menubar app (being phased out)
+  - `HavenUI/Sources/HavenUI/`: UI components and views
+  - Reference implementation for UI patterns
+- `hostagent/`: Original Swift daemon/CLI (being phased out)
+  - `hostagent/Sources/`: Business logic, collectors, HTTP API
+  - Reference implementation for backend functionality
+
+**Backend Services:**
+- `services/`: FastAPI microservices
+  - `gateway_api/`: Public API gateway
+  - `catalog_api/`: Document persistence service
+  - `search_service/`: Hybrid search service
+  - `embedding_service/`: Vectorization worker
+
+**Shared Code:**
+- `shared/`: Cross-service Python utilities
+- `src/haven/`: Reusable Python package
+- `schema/`: Database migrations
+
+**Documentation:**
+- `docs/`: MkDocs documentation source
+- `documentation/`: Additional reference docs
+
+**Testing:**
+- `tests/`: Python test suite
+- `hostagent/Tests/`: Swift tests (legacy)
+
+**Build & Configuration:**
+- `openapi/`: API specifications
+- `scripts/`: Build and utility scripts
+- `build-bundle/`: Build artifacts (not in git)
+
 ## Miscellaneous
 
-- There is a symlink file .tmp/hostagent.yaml that points to the life config file for hostagent.
+- There is a symlink file `.tmp/hostagent.yaml` that points to the config file for hostagent.
 - Do not commit changes to git unless asked. If asked to commit, always create a clear, complete message that reflects all of the changes.

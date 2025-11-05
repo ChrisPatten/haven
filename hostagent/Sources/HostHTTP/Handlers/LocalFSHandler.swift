@@ -198,6 +198,142 @@ public actor LocalFSHandler {
         }
     }
     
+    // MARK: - Direct Swift APIs
+    
+    /// Direct Swift API for running the LocalFS collector
+    /// Replaces HTTP-based handleRun for in-app integration
+    public func runCollector(request: CollectorRunRequest?) async throws -> RunResponse {
+        guard config.modules.localfs.enabled else {
+            throw LocalFSCollectorError.watchDirectoryNotFound("LocalFS collector module is disabled")
+        }
+        
+        guard !isRunning else {
+            throw LocalFSCollectorError.watchDirectoryNotFound("Collector is already running")
+        }
+        
+        let options: LocalFSCollectorOptions
+        do {
+            options = try buildOptions(from: request)
+        } catch let error as LocalFSCollectorError {
+            throw error
+        } catch {
+            throw LocalFSCollectorError.watchDirectoryNotFound("Failed to build collector options: \(error.localizedDescription)")
+        }
+        
+        lastStateFileURL = options.stateFile
+        isRunning = true
+        lastRunTime = Date()
+        lastRunStatus = "running"
+        lastRunError = nil
+        
+        let startTime = Date()
+        var stats = CollectorStats(
+            scanned: 0,
+            matched: 0,
+            submitted: 0,
+            skipped: 0,
+            startTime: startTime,
+            endTime: nil,
+            durationMs: nil
+        )
+        
+        // Initialize response
+        let runID = UUID().uuidString
+        var response = RunResponse(collector: "localfs", runID: runID, startedAt: startTime)
+        
+        do {
+            logger.info("Starting LocalFS collector", metadata: [
+                "watch_dir": options.watchDirectory.path,
+                "limit": options.limit.map(String.init) ?? "unlimited",
+                "dry_run": options.dryRun ? "true" : "false"
+            ])
+            
+            let result = try await collector.run(options: options)
+            let endTime = Date()
+            
+            stats.scanned = result.scanned
+            stats.matched = result.matched
+            stats.submitted = result.submitted
+            stats.skipped = result.skipped
+            stats.endTime = endTime
+            stats.durationMs = Int(endTime.timeIntervalSince(startTime) * 1000)
+            
+            isRunning = false
+            lastRunStatus = "completed"
+            lastRunStats = stats
+            
+            logger.info("LocalFS collection completed", metadata: [
+                "scanned": String(result.scanned),
+                "submitted": String(result.submitted),
+                "skipped": String(result.skipped),
+                "warnings": String(result.warnings.count),
+                "errors": String(result.errors.count)
+            ])
+            
+            // Convert stats to RunResponse
+            response.finish(status: .ok, finishedAt: endTime)
+            response.stats = RunResponse.Stats(
+                scanned: result.scanned,
+                matched: result.matched,
+                submitted: result.submitted,
+                skipped: result.skipped,
+                earliest_touched: nil,
+                latest_touched: nil,
+                batches: 0
+            )
+            response.warnings = result.warnings
+            response.errors = result.errors
+            
+            return response
+            
+        } catch let error as LocalFSCollectorError {
+            isRunning = false
+            lastRunStatus = "failed"
+            lastRunError = error.localizedDescription
+            logger.error("LocalFS collector failed", metadata: ["error": error.localizedDescription])
+            
+            let endTime = Date()
+            response.finish(status: .error, finishedAt: endTime)
+            response.errors = [error.localizedDescription]
+            
+            throw error
+        } catch {
+            isRunning = false
+            lastRunStatus = "failed"
+            lastRunError = error.localizedDescription
+            logger.error("LocalFS collector failed", metadata: ["error": error.localizedDescription])
+            
+            let endTime = Date()
+            response.finish(status: .error, finishedAt: endTime)
+            response.errors = [error.localizedDescription]
+            
+            throw error
+        }
+    }
+    
+    /// Direct Swift API for getting collector state
+    /// Replaces HTTP-based handleState for in-app integration
+    public func getCollectorState() async -> CollectorStateInfo {
+        // Convert lastRunStats to [String: AnyCodable]
+        var statsDict: [String: AnyCodable]? = nil
+        if let stats = lastRunStats {
+            var dict: [String: AnyCodable] = [:]
+            let statsDictAny = stats.toDict()
+            for (key, value) in statsDictAny {
+                dict[key] = AnyCodable(value)
+            }
+            statsDict = dict
+        }
+        
+        return CollectorStateInfo(
+            isRunning: isRunning,
+            lastRunTime: lastRunTime,
+            lastRunStatus: lastRunStatus,
+            lastRunStats: statsDict,
+            lastRunError: lastRunError
+        )
+    }
+    
     // MARK: - Helpers
     
     private func buildOptions(from runRequest: CollectorRunRequest?) throws -> LocalFSCollectorOptions {

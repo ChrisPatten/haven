@@ -1,52 +1,74 @@
-import Foundation
-import HavenCore
+//
+//  StatusController.swift
+//  Haven
+//
+//  Created by Chris Patten on 11/4/25.
+//
 
-/// Handler for GET /v1/health
-public struct HealthHandler {
+import Foundation
+
+/// Response structure for status information
+public struct StatusResponse: Codable {
+    let status: String
+    let startedAt: String
+    let version: String
+    let uptimeSeconds: Int
+    let modules: [ModuleSummary]
+    
+    enum CodingKeys: String, CodingKey {
+        case status
+        case startedAt = "started_at"
+        case version
+        case uptimeSeconds = "uptime_seconds"
+        case modules
+    }
+}
+
+/// Manages app status and module summaries
+public actor StatusController {
     private let config: HavenConfig
     private let startTime: Date
-    private let logger = HavenLogger(category: "health")
+    private let logger = StubLogger(category: "status-controller")
     
     public init(config: HavenConfig, startTime: Date = Date()) {
         self.config = config
         self.startTime = startTime
     }
     
-    public func handle(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
+    /// Get current status response
+    public func getStatus() -> StatusResponse {
         let moduleSummaries = buildModuleSummaries()
         
-        let response = HealthResponse(
+        return StatusResponse(
             status: "healthy",
             startedAt: ISO8601DateFormatter().string(from: startTime),
-            version: BuildInfo.versionWithBuildID,
-            uptimeSeconds: Int(Date().timeIntervalSince(startTime)),
-            modules: moduleSummaries
-        )
-        
-        logger.debug("Health check completed", metadata: [
-            "uptime": Int(Date().timeIntervalSince(startTime)),
-            "request_id": context.requestId
-        ])
-        
-        return HTTPResponse.ok(json: response)
-    }
-    
-    // MARK: - Direct Swift API
-    
-    /// Direct Swift API for getting health status
-    /// Replaces HTTP-based handle for in-app integration
-    public func getStatus() -> HealthResponse {
-        let moduleSummaries = buildModuleSummaries()
-        
-        return HealthResponse(
-            status: "healthy",
-            startedAt: ISO8601DateFormatter().string(from: startTime),
-            version: BuildInfo.versionWithBuildID,
+            version: "0.0.0-stub",
             uptimeSeconds: Int(Date().timeIntervalSince(startTime)),
             modules: moduleSummaries
         )
     }
     
+    /// Get uptime in seconds
+    public func getUptimeSeconds() -> Int {
+        return Int(Date().timeIntervalSince(startTime))
+    }
+    
+    /// Get start time
+    public func getStartTime() -> Date {
+        return startTime
+    }
+    
+    /// Get module summaries
+    public func getModuleSummaries() -> [ModuleSummary] {
+        return buildModuleSummaries()
+    }
+    
+    /// Get version
+    public func getVersion() -> String {
+        return "0.0.0-stub"
+    }
+    
+    /// Build module summaries from config
     private func buildModuleSummaries() -> [ModuleSummary] {
         var summaries: [ModuleSummary] = []
         
@@ -82,8 +104,7 @@ public struct HealthHandler {
             extraInfo: nil
         ))
         
-        // Stub and simple modules (use enabled booleans to avoid type mismatch between
-        // different module config types like MailModuleConfig and StubModuleConfig)
+        // Stub and simple modules
         for (name, enabled) in [
             ("contacts", config.modules.contacts.enabled),
             ("mail", config.modules.mail.enabled)
@@ -100,30 +121,3 @@ public struct HealthHandler {
     }
 }
 
-struct HealthResponse: Codable {
-    let status: String
-    let startedAt: String
-    let version: String
-    let uptimeSeconds: Int
-    let modules: [ModuleSummary]
-    
-    enum CodingKeys: String, CodingKey {
-        case status
-        case startedAt = "started_at"
-        case version
-        case uptimeSeconds = "uptime_seconds"
-        case modules
-    }
-}
-
-struct ModuleSummary: Codable {
-    let name: String
-    let enabled: Bool
-    let status: String
-    let extraInfo: [String: Int]?
-    
-    enum CodingKeys: String, CodingKey {
-        case name, enabled, status
-        case extraInfo = "extra_info"
-    }
-}

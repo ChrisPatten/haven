@@ -12,13 +12,21 @@ public struct CapabilitiesHandler {
     }
     
     public func handle(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        let capabilities = buildCapabilities()
+        let capabilities = getCapabilities()
         
         logger.debug("Capabilities check completed", metadata: [
             "request_id": context.requestId
         ])
         
         return HTTPResponse.ok(json: capabilities)
+    }
+    
+    // MARK: - Direct Swift API
+    
+    /// Direct Swift API for getting capabilities
+    /// Replaces HTTP-based handle for in-app integration
+    public func getCapabilities() -> CapabilitiesResponse {
+        return buildCapabilities()
     }
     
     private func buildCapabilities() -> CapabilitiesResponse {

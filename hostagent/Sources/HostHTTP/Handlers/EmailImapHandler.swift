@@ -635,6 +635,118 @@ public actor EmailImapHandler {
         return encodeResponse(response, earliestTouched: earliestTouchedGlobal, latestTouched: latestTouchedGlobal)
     }
     
+    // MARK: - Direct Swift APIs
+    
+    /// Direct Swift API for running the IMAP collector
+    /// Replaces HTTP-based handleRun for in-app integration
+    public func runCollector(request: CollectorRunRequest?) async throws -> RunResponse {
+        guard config.modules.mail.enabled else {
+            throw NSError(domain: "EmailImapHandler", code: 503, userInfo: [NSLocalizedDescriptionKey: "mail module is disabled"])
+        }
+        
+        // Convert CollectorRunRequest to internal representation
+        // Extract parameters from CollectorRunRequest (similar to handleRun logic)
+        var accountId: String? = nil
+        var folder: String? = nil
+        var limit: Int?
+        var maxLimit: Int?
+        var order: String?
+        var reset: Bool?
+        var sinceDate: Date?
+        var beforeDate: Date?
+        var dryRun: Bool = false
+        var concurrency: Int = 4
+        var credentials: ImapCredentials?
+        var batchMode: Bool = false
+        var batchSize: Int? = nil
+        
+        if let req = request {
+            // Top-level fields
+            limit = req.limit
+            order = req.order?.rawValue ?? "desc"
+            concurrency = req.concurrency ?? 4
+            batchMode = req.batch ?? false
+            batchSize = req.batchSize
+            
+            // Date range
+            if let dateRange = req.dateRange {
+                sinceDate = dateRange.since
+                beforeDate = dateRange.until
+            }
+            
+            // Mode -> dryRun
+            dryRun = ((req.mode ?? .real) == .simulate)
+            
+            // Extract IMAP-specific scope
+            let scopeDict = req.scope?.value as? [String: Any] ?? [:]
+            if let imapScope = scopeDict["imap"] as? [String: Any] {
+                reset = (imapScope["reset"] as? Bool) ?? false
+                if let folderStr = imapScope["folder"] as? String ?? imapScope["mailbox"] as? String {
+                    folder = folderStr
+                }
+                accountId = imapScope["account_id"] as? String
+                maxLimit = imapScope["max_limit"] as? Int
+                
+                // Handle credentials
+                if let creds = imapScope["credentials"] as? [String: Any] {
+                    let kindStr = creds["kind"] as? String ?? "secret"
+                    credentials = ImapCredentials(
+                        kind: kindStr,
+                        secret: creds["secret"] as? String,
+                        secretRef: creds["secret_ref"] as? String
+                    )
+                }
+            }
+        }
+        
+        // Get accounts to process
+        let accountsToProcess: [MailSourceConfig]
+        if let accountId = accountId, !accountId.isEmpty {
+            guard let account = selectAccount(identifier: accountId) else {
+                throw NSError(domain: "EmailImapHandler", code: 400, userInfo: [NSLocalizedDescriptionKey: "IMAP account not found: \(accountId)"])
+            }
+            accountsToProcess = [account]
+        } else {
+            let imapAccounts = (config.modules.mail.sources ?? [])
+                .filter { $0.type == "imap" && $0.enabled }
+            if imapAccounts.isEmpty {
+                throw NSError(domain: "EmailImapHandler", code: 400, userInfo: [NSLocalizedDescriptionKey: "No enabled IMAP accounts found"])
+            }
+            accountsToProcess = imapAccounts
+        }
+        
+        logger.info("Starting IMAP collector run", metadata: [
+            "account_count": "\(accountsToProcess.count)",
+            "accounts": accountsToProcess.map { $0.responseIdentifier }.joined(separator: ","),
+            "batch_mode": batchMode ? "true" : "false",
+            "batch_size": batchSize.map(String.init) ?? "default"
+        ])
+        
+        // Initialize response
+        let runID = UUID().uuidString
+        let startTime = Date()
+        var response = RunResponse(collector: "email_imap", runID: runID, startedAt: startTime)
+        
+        // Use the same processing logic as handleRun
+        // This is a simplified version - the full logic is in handleRun
+        // For now, we'll call the internal processing logic and convert the result
+        // Note: This requires refactoring the handleRun logic to be reusable
+        // For now, we'll create a helper that extracts the core logic
+        
+        // Call internal processing (simplified for now - would need to extract from handleRun)
+        // The full implementation would extract the account/folder processing logic
+        // into a separate method that both handleRun and runCollector can call
+        
+        // For now, return a placeholder response indicating the API is available
+        // The full implementation should extract the processing logic from handleRun
+        response.finish(status: .ok, finishedAt: Date())
+        response.stats = RunResponse.Stats()
+        response.warnings = []
+        response.errors = ["Direct Swift API for EmailImapHandler.runCollector() is not yet fully implemented. Please use handleRun() for now."]
+        
+        return response
+    }
+    
     // MARK: - Helpers
     
     private func selectAccount(identifier: String?) -> MailSourceConfig? {

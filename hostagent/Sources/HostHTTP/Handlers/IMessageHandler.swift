@@ -279,6 +279,162 @@ public actor IMessageHandler {
         }
     }
     
+    // MARK: - Direct Swift APIs
+    
+    /// Direct Swift API for running the iMessage collector
+    /// Replaces HTTP-based handleRun for in-app integration
+    public func runCollector(request: CollectorRunRequest?) async throws -> RunResponse {
+        guard config.modules.imessage.enabled else {
+            throw CollectorError.moduleDisabled("iMessage collector module is disabled")
+        }
+        
+        // Check if already running
+        guard !isRunning else {
+            throw CollectorError.alreadyRunning("Collector is already running")
+        }
+        
+        // Convert CollectorRunRequest to CollectorParams
+        let params = convertCollectorRunRequest(request)
+        
+        logger.info("Starting iMessage collector", metadata: [
+            "limit": params.limit?.description ?? "unlimited",
+            "thread_lookback_days": String(params.threadLookbackDays),
+            "message_lookback_days": String(params.messageLookbackDays),
+            "batch_mode": params.batchMode ? "true" : "false",
+            "batch_size": params.batchSize.map(String.init) ?? "default"
+        ])
+        
+        // Initialize response
+        let runID = UUID().uuidString
+        let startTime = Date()
+        var response = RunResponse(collector: "imessage", runID: runID, startedAt: startTime)
+        
+        // Run collection
+        isRunning = true
+        lastRunTime = startTime
+        lastRunStatus = "running"
+        lastRunError = nil
+        
+        var stats = CollectorStats(
+            messagesProcessed: 0,
+            threadsProcessed: 0,
+            attachmentsProcessed: 0,
+            documentsCreated: 0,
+            startTime: startTime,
+            earliestMessageTimestamp: nil,
+            latestMessageTimestamp: nil
+        )
+        
+        do {
+            let result = try await collectMessages(params: params, stats: &stats)
+            
+            // Documents are posted to gateway in batches during collection
+            let successCount = result.submittedCount
+            
+            let endTime = Date()
+            stats.endTime = endTime
+            stats.durationMs = Int((endTime.timeIntervalSince(startTime)) * 1000)
+            
+            isRunning = false
+            lastRunStatus = "completed"
+            lastRunStats = stats
+            
+            logger.info("iMessage collection completed", metadata: [
+                "documents": String(result.documents.count),
+                "posted": String(successCount),
+                "duration_ms": String(stats.durationMs ?? 0)
+            ])
+            
+            // Convert stats to RunResponse
+            let earliestTouched = stats.earliestMessageTimestamp.map { appleEpochToDate($0) }
+            let latestTouched = stats.latestMessageTimestamp.map { appleEpochToDate($0) }
+            
+            response.finish(status: .ok, finishedAt: endTime)
+            response.stats = RunResponse.Stats(
+                scanned: stats.messagesProcessed,
+                matched: stats.messagesProcessed,
+                submitted: successCount,
+                skipped: max(0, stats.messagesProcessed - successCount),
+                earliest_touched: earliestTouched.map { RunResponse.iso8601UTC($0) },
+                latest_touched: latestTouched.map { RunResponse.iso8601UTC($0) },
+                batches: 0
+            )
+            response.warnings = []
+            response.errors = []
+            
+            return response
+            
+        } catch {
+            let endTime = Date()
+            stats.endTime = endTime
+            stats.durationMs = Int((endTime.timeIntervalSince(startTime)) * 1000)
+            
+            isRunning = false
+            lastRunStatus = "failed"
+            lastRunStats = stats
+            lastRunError = error.localizedDescription
+            
+            logger.error("iMessage collection failed", metadata: ["error": error.localizedDescription])
+            
+            response.finish(status: .error, finishedAt: endTime)
+            response.errors = [error.localizedDescription]
+            
+            throw error
+        }
+    }
+    
+    /// Direct Swift API for getting collector state
+    /// Replaces HTTP-based handleState for in-app integration
+    public func getCollectorState() async -> CollectorStateInfo {
+        // Convert lastRunStats to [String: AnyCodable]
+        var statsDict: [String: AnyCodable]? = nil
+        if let stats = lastRunStats {
+            var dict: [String: AnyCodable] = [:]
+            let statsDictAny = stats.toDict
+            for (key, value) in statsDictAny {
+                dict[key] = AnyCodable(value)
+            }
+            statsDict = dict
+        }
+        
+        return CollectorStateInfo(
+            isRunning: isRunning,
+            lastRunTime: lastRunTime,
+            lastRunStatus: lastRunStatus,
+            lastRunStats: statsDict,
+            lastRunError: lastRunError
+        )
+    }
+    
+    /// Helper to convert CollectorRunRequest to CollectorParams
+    private func convertCollectorRunRequest(_ request: CollectorRunRequest?) -> CollectorParams {
+        var params = CollectorParams()
+        params.configChatDbPath = config.modules.imessage.chatDbPath
+        
+        guard let req = request else {
+            return params
+        }
+        
+        // Extract basic parameters
+        params.limit = req.limit
+        params.order = req.order?.rawValue ?? "desc"
+        params.batchMode = req.batch ?? false
+        params.batchSize = req.batchSize
+        
+        // Extract date range
+        if let dateRange = req.dateRange {
+            params.since = dateRange.since
+            params.until = dateRange.until
+        }
+        
+        // Extract iMessage-specific scope fields
+        let scopeFields = req.getIMessageScope()
+        // Note: scope fields are currently not used in CollectorParams
+        // but could be added if needed for filtering
+        
+        return params
+    }
+    
     // MARK: - Collection Logic
     
     private struct CollectorParams {
@@ -2581,6 +2737,8 @@ public actor IMessageHandler {
 // MARK: - Error Types
 
 enum CollectorError: Error, LocalizedError {
+    case moduleDisabled(String)
+    case alreadyRunning(String)
     case chatDbNotFound(String)
     case databaseOpenFailed(String)
     case snapshotFailed(String)
@@ -2591,6 +2749,10 @@ enum CollectorError: Error, LocalizedError {
     
     var errorDescription: String? {
         switch self {
+        case .moduleDisabled(let message):
+            return "Module disabled: \(message)"
+        case .alreadyRunning(let message):
+            return "Collector already running: \(message)"
         case .chatDbNotFound(let path):
             return "chat.db not found at path: \(path)"
         case .databaseOpenFailed(let message):
