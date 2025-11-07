@@ -69,7 +69,18 @@ python scripts/collectors/collector_imessage.py --no-images --once
 ```
 
 ### Local Files Collector
-The HostAgent exposes `/v1/collectors/localfs:run` for native filesystem ingestion. Monitor a directory for supported documents (`.txt`, `.md`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.heic`) and upload through the gateway file endpoint without leaving macOS.
+
+**Note**: The HostAgent HTTP API is being migrated into the unified Haven app. For new users, use the Haven app's Collectors interface instead of the HTTP API.
+
+**Using the Haven App (Recommended):**
+1. Launch Haven.app
+2. Open Collectors window (`⌘2`)
+3. Select "Local Files" collector
+4. Configure watch directory and options in Settings (`⌘,`)
+5. Click "Run" to start collection
+
+**Legacy HTTP API (Reference Only):**
+The HostAgent previously exposed `/v1/collectors/localfs:run` for native filesystem ingestion. Monitor a directory for supported documents (`.txt`, `.md`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.heic`) and upload through the gateway file endpoint without leaving macOS.
 
 ```bash
 export HOSTAGENT_TOKEN="changeme"

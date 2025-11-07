@@ -11,7 +11,7 @@ nav:
       - Getting Started: getting-started.md
       - Repository Overview: guides/README.md
       - Agents Overview: guides/AGENTS.md
-      - HavenUI App: guides/havenui.md
+      - Haven App: guides/havenui.md
       - Email Fixture Generator: guides/email-fixture-generator.md
       - Local Email Collector: guides/email-collector.md
   - Architecture:

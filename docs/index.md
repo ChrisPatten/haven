@@ -5,7 +5,8 @@ Haven is a personal data plane that keeps high-signal conversations, files, and 
 ## Start Here
 - [Getting Started](getting-started.md) — install prerequisites, run the stack locally, and preview docs.
 - [Repository Overview](guides/README.md) — tour of the source tree, collectors, and shared tooling.
-- [Agents Overview](guides/AGENTS.md) — HostAgent topology, orchestration rules, and runbooks.
+- [Agents Overview](guides/AGENTS.md) — System architecture, orchestration rules, and runbooks.
+- [Haven App Guide](guides/havenui.md) — unified macOS menu bar application for running collectors.
 
 ## How the Platform Fits Together
 - [Architecture Overview](architecture/overview.md) — system context, data flow, and critical data stores.
@@ -15,7 +16,7 @@ Haven is a personal data plane that keeps high-signal conversations, files, and 
 ## Operating Haven
 - [Local Development](operations/local-dev.md) — compose profiles, environment variables, and verification steps.
 - [Deployment](operations/deploy.md) — promote builds, run migrations, and validate production rollouts.
-- [HostAgent Landing](hostagent/index.md) — macOS-specific setup, permissions, and troubleshooting.
+- [HostAgent Overview](hostagent/index.md) — macOS collector architecture and migration status.
 
 ## APIs and References
 - [Gateway API](api/gateway.md) — download and explore the OpenAPI contract used for ingestion and search.

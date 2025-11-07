@@ -1,16 +1,17 @@
-# HavenUI - macOS Menu Bar Application
+# Haven - macOS Menu Bar Application
 
-HavenUI is a native macOS menu bar application that provides a convenient interface for managing Haven's hostagent service and running collectors.
+Haven is a native macOS menu bar application that provides a unified interface for managing collectors, viewing status, and running data collection tasks. It combines the functionality of the original HavenUI menubar app and HostAgent service into a single integrated application.
 
 ## Overview
 
-HavenUI is a SwiftUI-based menu bar app that:
+Haven is a SwiftUI-based menu bar app that:
 
-- **Auto-manages hostagent lifecycle**: Automatically starts hostagent on launch and stops it on quit
+- **Integrated collector runtime**: Directly runs collectors without requiring a separate HTTP server
 - **Monitors health status**: Real-time status indicator (green/yellow/red) in the menu bar
 - **Dashboard view**: Overview of recent collector activity and system status
 - **Collectors management**: View available collectors and trigger collection runs
-- **Process control**: Manual start/stop controls for hostagent when needed
+- **Settings management**: Comprehensive configuration UI for all collectors and system settings
+- **Process control**: Manual start/stop controls for the collector runtime
 
 ## Key Features
 
@@ -18,42 +19,26 @@ HavenUI is a SwiftUI-based menu bar app that:
 
 The menu bar icon changes color to reflect system status:
 
-- 🟢 **Green**: Hostagent is running and healthy
-- 🟡 **Yellow**: Hostagent process is running but health checks are failing/pending
-- 🔴 **Red**: Hostagent is stopped
+- 🟢 **Green**: Collector runtime is running and healthy
+- 🟡 **Yellow**: Collector runtime is running but health checks are failing/pending
+- 🔴 **Red**: Collector runtime is stopped
 
-### Automatic Lifecycle Management
+### Unified Architecture
 
-**On Launch:**
-- Checks if hostagent is already running
-- Automatically starts hostagent as a child process
-- Waits 0.5 seconds for initialization before starting health polling
+Unlike the previous architecture where HavenUI communicated with HostAgent via HTTP, the new Haven app:
 
-**On Quit:**
-- Gracefully terminates the hostagent child process (SIGTERM)
-- Waits up to 2 seconds for shutdown to complete
-- Force kills (SIGKILL) if graceful shutdown fails
-
-This ensures hostagent runs **only when HavenUI is active**, providing a seamless user experience. 
-HavenUI manages hostagent as a direct child process, not as a system service.
-
-### Shutdown Safeguards
-
-HavenUI employs multiple layers to guarantee hostagent stops on exit:
-
-1. Graceful shutdown via `applicationWillTerminate` (SIGTERM to hostagent + wait + SIGKILL fallback)
-2. Signal handlers for `SIGTERM` and `SIGINT` (ensure hostagent is terminated if HavenUI is killed externally)
-3. `atexit` fallback for normal process exits (best-effort final kill if still running)
-
-This combination covers user menu quits, command-line termination, and external system signals.
+- **Direct module integration**: Calls collector modules directly via Swift APIs
+- **No HTTP server**: Eliminates the need for a separate localhost HTTP service
+- **Simplified deployment**: Single app bundle instead of separate UI and daemon components
+- **Better performance**: Direct function calls instead of HTTP overhead
 
 ### Dashboard
 
 Access via the menu bar or `⌘1`:
 
-- **Status Overview**: Current health status and process state
-- **Recent Activity**: Last 10 collector runs with timestamps, status, and statistics
-- **Quick Actions**: Start/stop hostagent, run all collectors
+- **Status Overview**: Current health status and runtime state
+- **Recent Activity**: Last collector runs with timestamps, status, and statistics
+- **Quick Actions**: Start/stop runtime, run all collectors
 
 ### Collectors View
 
@@ -62,7 +47,17 @@ Access via the menu bar or `⌘2`:
 - **Available Collectors**: Lists all configured collectors (iMessage, email, files, contacts)
 - **Last Run Information**: Timestamp, status, and error details for each collector
 - **Individual Controls**: Run specific collectors on demand
-- **Request Builder**: Advanced parameters for collector runs (simulate mode, limits, etc.)
+- **Run Configuration**: Advanced parameters for collector runs (simulate mode, limits, scopes, etc.)
+- **Collector Details**: View detailed information about each collector including state and configuration
+
+### Settings Window
+
+Access via the menu bar or `⌘,`:
+
+- **General Settings**: Gateway URL, API timeouts, status TTL
+- **Collector Configuration**: Configure each collector type (iMessage, Email, Files, Contacts)
+- **Schedules**: Set up automatic collector runs
+- **Advanced**: System-level configuration options
 
 ## Installation
 
@@ -70,77 +65,89 @@ Access via the menu bar or `⌘2`:
 
 - macOS 14.0+ (Sonoma or later)
 - Xcode 15.0+ or Swift 5.9+ toolchain
-- hostagent installed at `/usr/local/bin/hostagent`
-- Haven configuration at `~/.haven/hostagent.yaml`
+- Haven configuration at `~/.haven/hostagent.yaml` (compatible with legacy config format)
 
 ### Build and Run
 
 ```bash
-cd HavenUI
-swift build -c release
-
-# Run directly
-.build/release/HavenUI
-
-# Or create an Xcode project and build as app bundle
-swift package generate-xcodeproj
-open HavenUI.xcodeproj
-# Build and run from Xcode
+cd Haven
+open Haven.xcodeproj
+# Build and run from Xcode (⌘R)
 ```
+
+Or build from command line:
+
+```bash
+cd Haven
+xcodebuild -scheme Haven -configuration Release
+# App bundle will be in build/Release/Haven.app
+```
+
+### First Launch
+
+On first launch, Haven will:
+
+1. Check for Full Disk Access permission (required for iMessage collection)
+2. Automatically open the Collectors window
+3. Load configuration from `~/.haven/hostagent.yaml`
+4. Initialize the collector runtime
 
 ## Configuration
 
-HavenUI uses the standard hostagent configuration at `~/.haven/hostagent.yaml`. No additional configuration is required.
+Haven uses the standard configuration file at `~/.haven/hostagent.yaml`. The app includes a built-in settings UI for managing configuration, or you can edit the YAML file directly.
 
-### Health Polling
+### Configuration Management
 
-HavenUI polls the hostagent health endpoint every 5 seconds to update status. The health check:
+The app provides a comprehensive settings interface accessible via `⌘,`:
 
-- Connects to `http://localhost:7090/v1/health`
-- Uses a 3-second timeout for fast failure detection
-- Updates the menu bar icon color based on response
+- **General**: Gateway URL, API configuration
+- **Collectors**: Per-collector settings (iMessage, Email IMAP, Local Files, Contacts)
+- **Schedules**: Automatic collector run schedules
+- **Advanced**: System-level options
 
-### Process Management
+Changes made in the settings UI are automatically saved to the configuration file.
 
-HavenUI manages hostagent as a direct child process:
+### Health Monitoring
 
-- **Binary**: `/usr/local/bin/hostagent`
-- **Config**: `~/.haven/hostagent.yaml`
-- **Logs**: `~/Library/Logs/Haven/hostagent.log` and `hostagent-error.log`
-- **Lifecycle**: Starts on HavenUI launch, terminates on HavenUI quit
+Haven monitors the collector runtime health internally. The status indicator updates based on:
 
-hostagent runs as a child process of HavenUI, not as a system service. This ensures:
-- hostagent only runs when you're actively using HavenUI
-- No background system services or LaunchAgents
-- Clean shutdown when HavenUI quits
+- Runtime initialization status
+- Collector execution results
+- Gateway connectivity
+- Permission availability (Full Disk Access, Contacts)
 
 ## Usage
 
 ### Starting Haven
 
-1. Launch HavenUI from Applications or the command line
+1. Launch Haven from Applications or the command line
 2. The app appears in the menu bar with a status indicator
-3. Hostagent automatically starts if not already running
-4. Wait a moment for the indicator to turn green
+3. The Collectors window opens automatically
+4. Click "Start" in the menu or Collectors window to initialize the runtime
+5. Wait a moment for the indicator to turn green
 
 ### Running Collectors
 
 **Run All Collectors:**
 1. Click the menu bar icon
 2. Select "Run All Collectors"
-3. Notifications appear as each collector completes
-4. View results in the Dashboard
+3. View progress in the Dashboard or Collectors window
+4. Notifications appear as each collector completes
 
 **Run Individual Collector:**
 1. Click the menu bar icon → "Collectors" (or press `⌘2`)
-2. Click the ▶️ button next to the desired collector
-3. View progress and results in the activity log
+2. Select a collector from the sidebar
+3. Click the ▶️ button or use "Run" from the menu
+4. View progress and results in the activity log
 
 **Advanced Options:**
 1. Open Collectors view
-2. Click "Advanced" for a collector
-3. Configure parameters (simulate mode, limits, date ranges)
-4. Click "Run with Options"
+2. Select a collector
+3. Click "Run with Options" to configure:
+   - Simulate mode
+   - Limits (message count, date ranges)
+   - Scope filters (folders, contacts, file patterns)
+   - Batch size and other collector-specific options
 
 ### Viewing Activity
 
@@ -151,14 +158,14 @@ hostagent runs as a child process of HavenUI, not as a system service. This ensu
 
 ### Manual Control
 
-If you need to manually control hostagent:
+If you need to manually control the runtime:
 
-**Stop hostagent:**
+**Stop runtime:**
 1. Click the menu bar icon
 2. Click "Stop"
 3. Wait for the indicator to turn red
 
-**Start hostagent:**
+**Start runtime:**
 1. Click the menu bar icon
 2. Click "Start"
 3. Wait for the indicator to turn green
@@ -166,117 +173,135 @@ If you need to manually control hostagent:
 ### Troubleshooting
 
 **Menu bar icon is red:**
-- Check if hostagent binary exists at `/usr/local/bin/hostagent`
-- Verify config file at `~/.haven/hostagent.yaml`
-- Check logs at `~/Library/Logs/Haven/hostagent-error.log`
+- Click "Start" to initialize the runtime
+- Check configuration file at `~/.haven/hostagent.yaml`
+- Verify Gateway is accessible at the configured URL
+- Check Console.app for error messages
 
 **Menu bar icon is yellow:**
-- Hostagent is running but health checks are failing
-- Check if hostagent has required permissions (Full Disk Access)
-- Verify the auth secret in config matches what HavenUI expects
-- Check logs for permission or configuration errors
+- Runtime is running but health checks are failing
+- Check that collectors have required permissions (Full Disk Access, Contacts)
+- Verify Gateway connectivity and authentication
+- Review error messages in the Dashboard
 
 **Collectors fail to run:**
-- Ensure hostagent is running (green status)
-- Check that collectors are enabled in `hostagent.yaml`
+- Ensure runtime is started (green status)
+- Check that collectors are enabled in settings
 - Review error messages in the Dashboard activity log
-- Check hostagent logs for detailed error information
+- Verify permissions are granted in System Settings
 
-**HavenUI won't quit:**
-- Force quit via Activity Monitor if needed
-- Hostagent will continue running until next HavenUI launch
-- Use `launchctl kill TERM gui/$(id -u)/com.haven.hostagent` to stop manually
+**Permission Issues:**
+- **Full Disk Access**: Required for iMessage collection
+  - System Settings → Privacy & Security → Full Disk Access
+  - Add Haven.app to the list
+- **Contacts**: Required for contacts collection
+  - System Settings → Privacy & Security → Contacts
+  - Enable Haven.app
 
 ## Architecture
 
 ### Components
 
-**AppDelegate:**
-- Manages app lifecycle (launch, terminate)
-- Initializes services (client, poller, launch agent manager)
-- Handles auto-start/stop of hostagent
+**HavenApp:**
+- Main SwiftUI app entry point
+- Manages app lifecycle and window management
+- Coordinates between UI and runtime
 
-**HostAgentClient:**
-- HTTP client for hostagent API
-- Handles authentication
-- Provides async/await interface for all endpoints
+**HostAgentController:**
+- Main orchestration controller for collector runtime
+- Manages collector lifecycle and execution
+- Coordinates with ServiceController for backend services
 
-**HealthPoller:**
-- Background task checking hostagent health every 5 seconds
-- Updates app state with current status
-- Handles connection failures gracefully
+**ServiceController:**
+- Manages Gateway API communication
+- Handles configuration loading and validation
+- Provides service health monitoring
 
-**HostAgentProcessManager:**
-- Manages hostagent as a child process
-- Handles process lifecycle (start/stop/monitor)
-- Configures logging and environment
-- Ensures clean shutdown on termination
+**Collector Controllers:**
+- Individual controllers for each collector type (IMessage, Email, LocalFS, Contacts)
+- Direct integration with collector handler modules
+- Progress reporting and state management
 
 **AppState:**
 - Observable state container
 - Tracks health, process state, collector status
-- Persists last run information to UserDefaults
+- Persists last run information
+
+**JobManager:**
+- Manages async collector job execution
+- Tracks job progress and completion
+- Provides job cancellation support
 
 ### Communication Flow
 
 ```
-HavenUI (SwiftUI)
+Haven App (SwiftUI)
     ↓
-AppState (Observable)
+HostAgentController (Orchestration)
     ↓
-HostAgentClient (HTTP)
+Collector Controllers (Direct Swift APIs)
     ↓
-hostagent (localhost:7090)
+Collector Handlers (Modules)
     ↓
-Gateway (host.docker.internal:8085)
+Gateway API (host.docker.internal:8085)
     ↓
 Haven Services (Docker)
 ```
+
+Unlike the previous architecture, there is no HTTP server running on localhost:7090. All collector operations happen via direct Swift API calls within the app.
 
 ## Development
 
 ### Building
 
 ```bash
-cd HavenUI
-swift build
+cd Haven
+xcodebuild -scheme Haven -configuration Debug
 ```
 
 ### Running in Debug Mode
 
 ```bash
-swift run
+# From Xcode: ⌘R
+# Or from command line:
+open build/Debug/Haven.app
 ```
 
-### Testing Process Management
+### Testing
 
 ```bash
-# Start HavenUI
-open HavenUI.app  # or swift run
+# Run unit tests
+xcodebuild test -scheme Haven
 
-# Check if hostagent is running
-ps aux | grep hostagent
-
-# Quit HavenUI and verify hostagent stops
-osascript -e 'tell application "HavenUI" to quit'
-sleep 2
-ps aux | grep hostagent  # should return nothing
+# Run UI tests
+xcodebuild test -scheme Haven -destination 'platform=macOS'
 ```
 
 ### Viewing Logs
 
-```bash
-# HavenUI is using console output - run from terminal to see logs
-swift run
+Haven logs to the standard macOS Console. To view logs:
 
-# hostagent logs
-tail -f ~/Library/Logs/Haven/hostagent.log
-tail -f ~/Library/Logs/Haven/hostagent-error.log
+```bash
+# Filter Haven logs
+log stream --predicate 'process == "Haven"' --level debug
+
+# Or use Console.app and filter for "Haven"
 ```
+
+## Migration from HavenUI + HostAgent
+
+If you were previously using the separate HavenUI and HostAgent applications:
+
+1. **Configuration**: Your existing `~/.haven/hostagent.yaml` configuration file is compatible
+2. **No HTTP server**: You no longer need to run HostAgent as a separate service
+3. **Single app**: Launch Haven.app instead of HavenUI
+4. **Same functionality**: All features from both apps are available in the unified interface
+
+The unified app maintains feature parity with both HavenUI and HostAgent while providing a simpler, more integrated experience.
 
 ## Related Documentation
 
-- [HostAgent README](../hostagent/hostagent-readme.md) - hostagent service documentation
-- [HostAgent Overview](../hostagent/index.md) - HostAgent architecture and API
-- [Agents Guide](AGENTS.md) - System architecture and agent responsibilities
+- [HostAgent Overview](../hostagent/index.md) - Collector architecture and API (legacy reference)
+- [Architecture Overview](../architecture/overview.md) - System architecture and data flow
 - [Local Development](../operations/local-dev.md) - Setting up Haven for development
+- [Agents Guide](AGENTS.md) - System architecture and agent responsibilities
