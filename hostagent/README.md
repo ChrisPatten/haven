@@ -434,7 +434,7 @@ swift test --filter OCRServiceTests
 - `Sources/OCR/` - Vision framework OCR service
 - `Sources/IMessages/` - Messages.app database collector
 - `Sources/FSWatch/` - File system monitoring
-- `Sources/HostHTTP/` - SwiftNIO HTTP server
+- `Sources/CollectorHandlers/` - Collector handler Swift APIs
 - `Sources/HostAgent/` - Main executable
 - `Tests/` - Unit and integration tests
 
@@ -443,7 +443,7 @@ swift test --filter OCRServiceTests
 1. Create module directory in `Sources/`
 2. Implement module protocol with health check
 3. Register in `ModulesConfig` (HavenCore/Config.swift)
-4. Add handler in `HostHTTP/Router.swift`
+4. Add handler in `CollectorHandlers/Handlers/`
 5. Add tests in `Tests/`
 
 ## Migration from Python Collectors

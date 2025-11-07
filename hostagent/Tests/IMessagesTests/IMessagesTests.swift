@@ -1,6 +1,6 @@
 import XCTest
 import Foundation
-@testable import HostHTTP
+@testable import CollectorHandlers
 
 final class IMessagesTests: XCTestCase {
     

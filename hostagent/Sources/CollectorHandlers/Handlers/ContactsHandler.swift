@@ -55,143 +55,6 @@ public actor ContactsHandler {
         self.gatewayClient = gatewayClient
     }
     
-    /// Handle POST /v1/collectors/contacts:run
-    public func handleRun(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        // Check if already running
-        guard !isRunning else {
-            logger.warning("Contacts collector already running")
-            return HTTPResponse(
-                statusCode: 409,
-                headers: ["Content-Type": "application/json"],
-                body: #"{"error":"Collector is already running"}"#.data(using: .utf8)
-            )
-        }
-        
-        // Parse request
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        
-        var runRequest: CollectorRunRequest?
-        var mode: CollectorRunRequest.Mode = .real
-        var limit: Int? = nil
-        
-        if let body = request.body, !body.isEmpty {
-            do {
-                runRequest = try decoder.decode(CollectorRunRequest.self, from: body)
-                mode = runRequest?.mode ?? .real
-                limit = runRequest?.limit
-            } catch {
-                logger.error("Failed to decode CollectorRunRequest", metadata: ["error": error.localizedDescription])
-                return HTTPResponse.badRequest(message: "Invalid request format: \(error.localizedDescription)")
-            }
-        }
-        
-        // Store request for access in collectContacts
-        self.runRequest = runRequest
-        
-        logger.info("Starting Contacts collector", metadata: [
-            "mode": mode.rawValue,
-            "limit": limit?.description ?? "unlimited"
-        ])
-        
-        // Run collection
-        isRunning = true
-        lastRunTime = Date()
-        lastRunStatus = "running"
-        lastRunError = nil
-        
-        let startTime = Date()
-        var stats = CollectorStats(
-            contactsScanned: 0,
-            contactsProcessed: 0,
-            contactsSubmitted: 0,
-            contactsSkipped: 0,
-            batchesSubmitted: 0,
-            startTime: startTime
-        )
-        
-        do {
-            let result = try await collectContacts(mode: mode, limit: limit, stats: &stats)
-            
-            let endTime = Date()
-            stats.endTime = endTime
-            stats.durationMs = Int((endTime.timeIntervalSince(startTime)) * 1000)
-            
-            isRunning = false
-            lastRunStatus = "ok"
-            lastRunStats = stats
-            
-            logger.info("Contacts collection completed", metadata: [
-                "scanned": String(stats.contactsScanned),
-                "submitted": String(stats.contactsSubmitted),
-                "batches": String(stats.batchesSubmitted),
-                "duration_ms": String(stats.durationMs ?? 0)
-            ])
-            
-            // Return adapter format that RunRouter expects
-            return encodeAdapterResponse(
-                scanned: stats.contactsScanned,
-                matched: stats.contactsProcessed,
-                submitted: stats.contactsSubmitted,
-                skipped: stats.contactsSkipped,
-                earliestTouched: nil,
-                latestTouched: nil,
-                warnings: result.warnings,
-                errors: result.errors
-            )
-            
-        } catch {
-            let endTime = Date()
-            stats.endTime = endTime
-            stats.durationMs = Int((endTime.timeIntervalSince(startTime)) * 1000)
-            
-            isRunning = false
-            lastRunStatus = "failed"
-            lastRunStats = stats
-            lastRunError = error.localizedDescription
-            
-            logger.error("Contacts collection failed", metadata: ["error": error.localizedDescription])
-            
-            return HTTPResponse.internalError(message: "Collection failed: \(error.localizedDescription)")
-        }
-    }
-    
-    /// Handle GET /v1/collectors/contacts/state
-    public func handleState(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        var state: [String: Any] = [
-            "is_running": isRunning,
-            "last_run_status": lastRunStatus
-        ]
-        
-        if let lastRunTime = lastRunTime {
-            state["last_run_time"] = ISO8601DateFormatter().string(from: lastRunTime)
-        }
-        
-        if let lastRunStats = lastRunStats {
-            state["last_run_stats"] = lastRunStats.toDict
-        }
-        
-        if let lastRunError = lastRunError {
-            state["last_run_error"] = lastRunError
-        }
-        
-        // Load persisted state from file
-        if let persistedState = loadPersistedState() {
-            state["persisted_state"] = persistedState
-        }
-        
-        do {
-            let data = try JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys])
-            return HTTPResponse(
-                statusCode: 200,
-                headers: ["Content-Type": "application/json"],
-                body: data
-            )
-        } catch {
-            return HTTPResponse.internalError(message: "Failed to encode state: \(error.localizedDescription)")
-        }
-    }
-    
     // MARK: - Direct Swift APIs
     
     /// Direct Swift API for running the Contacts collector
@@ -1085,111 +948,168 @@ public actor ContactsHandler {
         
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
+
+    // MARK: - Error Types
     
-    // MARK: - Adapter Response Encoding
-    
-    private func encodeAdapterResponse(
-        scanned: Int,
-        matched: Int,
-        submitted: Int,
-        skipped: Int,
-        earliestTouched: String?,
-        latestTouched: String?,
-        warnings: [String],
-        errors: [String]
-    ) -> HTTPResponse {
-        var payload: [String: Any] = [
-            "scanned": scanned,
-            "matched": matched,
-            "submitted": submitted,
-            "skipped": skipped,
-            "batches": 0,
-            "warnings": warnings,
-            "errors": errors
-        ]
+    public enum ContactsError: Error, LocalizedError {
+        case contactAccessFailed(String)
+        case contactAccessDenied(String)
+        case vcfLoadFailed(String)
+        case invalidGatewayResponse
+        case gatewayHttpError(Int, String)
         
-        if let earliest = earliestTouched {
-            payload["earliest_touched"] = earliest
-        }
-        if let latest = latestTouched {
-            payload["latest_touched"] = latest
-        }
-        
-        do {
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-            return HTTPResponse(
-                statusCode: 200,
-                headers: ["Content-Type": "application/json"],
-                body: data
-            )
-        } catch {
-            return HTTPResponse.internalError(message: "Failed to encode response: \(error.localizedDescription)")
+        public var errorDescription: String? {
+            switch self {
+            case .contactAccessFailed(let msg):
+                return "Contact access failed: \(msg)"
+            case .contactAccessDenied(let msg):
+                return "Contact access denied: \(msg)"
+            case .vcfLoadFailed(let msg):
+                return "VCF load failed: \(msg)"
+            case .invalidGatewayResponse:
+                return "Invalid response from gateway"
+            case .gatewayHttpError(let code, let body):
+                return "Gateway HTTP error \(code): \(body)"
+            }
         }
     }
 }
 
-// MARK: - Error Types
+// MARK: - Contact Payload Types
 
-enum ContactsError: Error, LocalizedError {
-    case contactAccessDenied(String)
-    case contactAccessFailed(String)
-    case vcfLoadFailed(String)
-    case invalidGatewayResponse
-    case gatewayHttpError(Int, String)
+public struct PersonPayloadModel: Codable, Equatable {
+    public let external_id: String
+    public let display_name: String
+    public let given_name: String?
+    public let family_name: String?
+    public let organization: String?
+    public let nicknames: [String]
+    public let notes: String?
+    public let photo_hash: String?
+    public let emails: [ContactValueModel]
+    public let phones: [ContactValueModel]
+    public let addresses: [ContactAddressModel]
+    public let urls: [ContactUrlModel]
+    public let change_token: String?
+    public let version: Int
+    public let deleted: Bool
     
-    var errorDescription: String? {
-        switch self {
-        case .contactAccessDenied(let message):
-            return "Contacts access denied: \(message)"
-        case .contactAccessFailed(let message):
-            return "Failed to access contacts: \(message)"
-        case .vcfLoadFailed(let message):
-            return "Failed to load VCF contacts: \(message)"
-        case .invalidGatewayResponse:
-            return "Invalid gateway response"
-        case .gatewayHttpError(let code, let body):
-            return "Gateway HTTP error \(code): \(body)"
-        }
+    enum CodingKeys: String, CodingKey {
+        case external_id
+        case display_name
+        case given_name
+        case family_name
+        case organization
+        case nicknames
+        case notes
+        case photo_hash
+        case emails
+        case phones
+        case addresses
+        case urls
+        case change_token
+        case version
+        case deleted
+    }
+    
+    public init(
+        external_id: String,
+        display_name: String,
+        given_name: String? = nil,
+        family_name: String? = nil,
+        organization: String? = nil,
+        nicknames: [String] = [],
+        notes: String? = nil,
+        photo_hash: String? = nil,
+        emails: [ContactValueModel] = [],
+        phones: [ContactValueModel] = [],
+        addresses: [ContactAddressModel] = [],
+        urls: [ContactUrlModel] = [],
+        change_token: String? = nil,
+        version: Int = 1,
+        deleted: Bool = false
+    ) {
+        self.external_id = external_id
+        self.display_name = display_name
+        self.given_name = given_name
+        self.family_name = family_name
+        self.organization = organization
+        self.nicknames = nicknames
+        self.notes = notes
+        self.photo_hash = photo_hash
+        self.emails = emails
+        self.phones = phones
+        self.addresses = addresses
+        self.urls = urls
+        self.change_token = change_token
+        self.version = version
+        self.deleted = deleted
     }
 }
 
-// MARK: - PersonPayloadModel
-
-// Note: These structs should match the gateway API schema
-// For now, we'll define them here. In the future, these could be generated from OpenAPI schema
-
-struct PersonPayloadModel {
-    let external_id: String
-    let display_name: String
-    let given_name: String?
-    let family_name: String?
-    let organization: String?
-    let nicknames: [String]
-    let notes: String?
-    let photo_hash: String?
-    let emails: [ContactValueModel]
-    let phones: [ContactValueModel]
-    let addresses: [ContactAddressModel]
-    let urls: [ContactUrlModel]
+public struct ContactValueModel: Codable, Equatable {
+    public let value: String
+    public let value_raw: String
+    public let label: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case value
+        case value_raw
+        case label
+    }
+    
+    public init(value: String, value_raw: String, label: String? = nil) {
+        self.value = value
+        self.value_raw = value_raw
+        self.label = label
+    }
 }
 
-struct ContactValueModel {
-    let value: String
-    let value_raw: String?
-    let label: String?
+public struct ContactUrlModel: Codable, Equatable {
+    public let label: String?
+    public let url: String
+    
+    enum CodingKeys: String, CodingKey {
+        case label
+        case url
+    }
+    
+    public init(label: String? = nil, url: String) {
+        self.label = label
+        self.url = url
+    }
 }
 
-struct ContactAddressModel {
-    let label: String?
-    let street: String?
-    let city: String?
-    let region: String?
-    let postal_code: String?
-    let country: String?
+public struct ContactAddressModel: Codable, Equatable {
+    public let label: String?
+    public let street: String?
+    public let city: String?
+    public let region: String?
+    public let postal_code: String?
+    public let country: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case label
+        case street
+        case city
+        case region
+        case postal_code
+        case country
+    }
+    
+    public init(
+        label: String? = nil,
+        street: String? = nil,
+        city: String? = nil,
+        region: String? = nil,
+        postal_code: String? = nil,
+        country: String? = nil
+    ) {
+        self.label = label
+        self.street = street
+        self.city = city
+        self.region = region
+        self.postal_code = postal_code
+        self.country = country
+    }
 }
-
-struct ContactUrlModel {
-    let label: String?
-    let url: String?
-}
-

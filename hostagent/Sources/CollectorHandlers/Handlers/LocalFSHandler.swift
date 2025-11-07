@@ -46,150 +46,6 @@ public actor LocalFSHandler {
         self.collector = LocalFSCollector(gatewayConfig: config.gateway, authToken: config.service.auth.secret)
     }
     
-    public func handleRun(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        
-        guard !isRunning else {
-            logger.warning("LocalFS collector already running")
-            return HTTPResponse(
-                statusCode: 409,
-                headers: ["Content-Type": "application/json"],
-                body: #"{"error":"Collector is already running"}"#.data(using: .utf8)
-            )
-        }
-        
-        let runRequest: CollectorRunRequest?
-        if let body = request.body, !body.isEmpty {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            do {
-                runRequest = try decoder.decode(CollectorRunRequest.self, from: body)
-            } catch {
-                logger.error("Failed to decode CollectorRunRequest", metadata: ["error": error.localizedDescription])
-                return HTTPResponse.badRequest(message: "Invalid request format: \(error.localizedDescription)")
-            }
-        } else {
-            runRequest = nil
-        }
-        
-        let options: LocalFSCollectorOptions
-        do {
-            options = try buildOptions(from: runRequest)
-        } catch let error as LocalFSCollectorError {
-            return mapCollectorError(error)
-        } catch {
-            logger.error("Failed to build collector options", metadata: ["error": error.localizedDescription])
-            return HTTPResponse.internalError(message: "Failed to build collector options: \(error.localizedDescription)")
-        }
-        
-        lastStateFileURL = options.stateFile
-        isRunning = true
-        lastRunTime = Date()
-        lastRunStatus = "running"
-        lastRunError = nil
-        
-        let startTime = Date()
-        var stats = CollectorStats(
-            scanned: 0,
-            matched: 0,
-            submitted: 0,
-            skipped: 0,
-            startTime: startTime,
-            endTime: nil,
-            durationMs: nil
-        )
-        
-        do {
-            logger.info("Starting LocalFS collector", metadata: [
-                "watch_dir": options.watchDirectory.path,
-                "limit": options.limit.map(String.init) ?? "unlimited",
-                "dry_run": options.dryRun ? "true" : "false"
-            ])
-            
-            let result = try await collector.run(options: options)
-            let endTime = Date()
-            
-            stats.scanned = result.scanned
-            stats.matched = result.matched
-            stats.submitted = result.submitted
-            stats.skipped = result.skipped
-            stats.endTime = endTime
-            stats.durationMs = Int(endTime.timeIntervalSince(startTime) * 1000)
-            
-            isRunning = false
-            lastRunStatus = "completed"
-            lastRunStats = stats
-            
-            logger.info("LocalFS collection completed", metadata: [
-                "scanned": String(result.scanned),
-                "submitted": String(result.submitted),
-                "skipped": String(result.skipped),
-                "warnings": String(result.warnings.count),
-                "errors": String(result.errors.count)
-            ])
-            
-            return encodeAdapterResponse(
-                scanned: result.scanned,
-                matched: result.matched,
-                submitted: result.submitted,
-                skipped: result.skipped,
-                warnings: result.warnings,
-                errors: result.errors
-            )
-        } catch let error as LocalFSCollectorError {
-            isRunning = false
-            lastRunStatus = "failed"
-            lastRunError = error.localizedDescription
-            logger.error("LocalFS collector failed", metadata: ["error": error.localizedDescription])
-            return mapCollectorError(error)
-        } catch {
-            isRunning = false
-            lastRunStatus = "failed"
-            lastRunError = error.localizedDescription
-            logger.error("LocalFS collector failed", metadata: ["error": error.localizedDescription])
-            return HTTPResponse.internalError(message: "Collection failed: \(error.localizedDescription)")
-        }
-    }
-    
-    public func handleState(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        var statePayload: [String: Any] = [
-            "is_running": isRunning,
-            "last_run_status": lastRunStatus
-        ]
-        
-        if let lastRunTime {
-            statePayload["last_run_time"] = ISO8601DateFormatter().string(from: lastRunTime)
-        }
-        if let lastRunStats {
-            statePayload["last_run_stats"] = lastRunStats.toDict()
-        }
-        if let lastRunError {
-            statePayload["last_run_error"] = lastRunError
-        }
-        
-        if let stateURL = lastStateFileURL ?? defaultStateFileURL(),
-           let state = collector.readState(at: stateURL) {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.sortedKeys]
-            if let data = try? encoder.encode(state),
-               let obj = try? JSONSerialization.jsonObject(with: data) {
-                statePayload["persisted_state"] = obj
-            }
-            statePayload["state_file_path"] = stateURL.path
-        }
-        
-        do {
-            let data = try JSONSerialization.data(withJSONObject: statePayload, options: [.prettyPrinted, .sortedKeys])
-            return HTTPResponse(
-                statusCode: 200,
-                headers: ["Content-Type": "application/json"],
-                body: data
-            )
-        } catch {
-            return HTTPResponse.internalError(message: "Failed to encode state: \(error.localizedDescription)")
-        }
-    }
-    
     // MARK: - Direct Swift APIs
     
     /// Direct Swift API for running the LocalFS collector
@@ -402,49 +258,13 @@ public actor LocalFSHandler {
         let statePath = "~/.haven/localfs_collector_state.json"
         return URL(fileURLWithPath: expandTilde(in: statePath))
     }
-    
-    private func encodeAdapterResponse(
-        scanned: Int,
-        matched: Int,
-        submitted: Int,
-        skipped: Int,
-        warnings: [String],
-        errors: [String]
-    ) -> HTTPResponse {
-        let payload: [String: Any] = [
-            "scanned": scanned,
-            "matched": matched,
-            "submitted": submitted,
-            "skipped": skipped,
-            "batches": 0,
-            "warnings": warnings,
-            "errors": errors
-        ]
-        
-        do {
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-            return HTTPResponse(
-                statusCode: 200,
-                headers: ["Content-Type": "application/json"],
-                body: data
-            )
-        } catch {
-            return HTTPResponse.internalError(message: "Failed to encode response: \(error.localizedDescription)")
+
+    private func resolveStateFileURL(from request: CollectorRunRequest?) -> URL {
+        if let scope = request?.getLocalfsScope(),
+           let statePath = scope.paths?.first {
+            let expanded = NSString(string: statePath).expandingTildeInPath
+            return URL(fileURLWithPath: expanded)
         }
-    }
-    
-    private func mapCollectorError(_ error: LocalFSCollectorError) -> HTTPResponse {
-        switch error {
-        case .watchDirectoryMissing:
-            return HTTPResponse.badRequest(message: error.localizedDescription)
-        case .watchDirectoryNotFound:
-            return HTTPResponse.notFound(message: error.localizedDescription)
-        case .watchDirectoryNotDirectory:
-            return HTTPResponse.badRequest(message: error.localizedDescription)
-        case .moveDirectoryCreationFailed:
-            return HTTPResponse.badRequest(message: error.localizedDescription)
-        case .statePersistenceFailed:
-            return HTTPResponse.internalError(message: error.localizedDescription)
-        }
+        return defaultStateFileURL() ?? URL(fileURLWithPath: "~/.haven/localfs_collector_state.json")
     }
 }

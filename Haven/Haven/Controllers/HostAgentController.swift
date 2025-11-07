@@ -9,7 +9,7 @@ import Foundation
 import SwiftUI
 import Combine
 import HavenCore
-import HostHTTP
+import CollectorHandlers
 import HostAgentEmail
 
 /// Main orchestration controller for HostAgent

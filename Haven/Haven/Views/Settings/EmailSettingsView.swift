@@ -7,7 +7,7 @@
 
 import SwiftUI
 import HavenCore
-import HostHTTP
+import CollectorHandlers
 import IMAP
 
 /// Email settings view for managing IMAP account instances

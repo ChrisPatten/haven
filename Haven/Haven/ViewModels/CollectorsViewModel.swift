@@ -73,12 +73,6 @@ class CollectorsViewModel: ObservableObject {
         let contactsInstances = await hostAgentController.getContactsInstances()
         let filesInstances = await hostAgentController.getFilesInstances()
         
-        // Debug logging
-        print("DEBUG: Loaded instances - IMAP: \(imapInstances.count), Contacts: \(contactsInstances.count), Files: \(filesInstances.count)")
-        for instance in imapInstances {
-            print("DEBUG: IMAP instance - id: \(instance.id), displayName: \(instance.displayName ?? "nil"), enabled: \(instance.enabled)")
-        }
-        
         // Load from supported collectors
         for (_, baseInfo) in CollectorInfo.supportedCollectors {
             // Handle iMessage (no instances)
@@ -107,14 +101,11 @@ class CollectorsViewModel: ObservableObject {
             }
             // Handle IMAP - create entry for each enabled instance
             else if baseInfo.id == "email_imap" {
-                print("DEBUG: Processing \(imapInstances.count) IMAP instances")
                 for instance in imapInstances {
                     // Create instance-specific collector ID
                     let instanceId = "email_imap:\(instance.id)"
                     // Set display name to instance name or fallback to account ID
                     let displayName = instance.displayName ?? instance.id
-                    
-                    print("DEBUG: Creating IMAP collector - instanceId: \(instanceId), displayName: \(displayName), enabled: \(instance.enabled)")
                     
                     var info = CollectorInfo(
                         id: instanceId,
@@ -240,10 +231,6 @@ class CollectorsViewModel: ObservableObject {
         }
         
         collectors = loadedCollectors.sorted { $0.displayName < $1.displayName }
-        print("DEBUG: Total collectors loaded: \(collectors.count)")
-        for collector in collectors {
-            print("DEBUG: Collector - id: \(collector.id), displayName: \(collector.displayName), enabled: \(collector.enabled), category: \(collector.category)")
-        }
         appState.updateCollectorsList(collectors)
         errorMessage = nil
     }

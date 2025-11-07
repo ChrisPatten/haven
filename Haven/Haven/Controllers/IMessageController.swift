@@ -7,7 +7,7 @@
 
 import Foundation
 import HavenCore
-import HostHTTP
+import CollectorHandlers
 import HostAgentEmail
 
 /// Controller for iMessage collector

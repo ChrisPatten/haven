@@ -277,28 +277,6 @@ public struct HavenLogger {
     }
 }
 
-// MARK: - Request Context
-
-public struct RequestContext {
-    public let requestId: String
-    public let startTime: Date
-    public var metadata: [String: Any]
-    
-    public init(requestId: String? = nil) {
-        self.requestId = requestId ?? UUID().uuidString
-        self.startTime = Date()
-        self.metadata = [:]
-    }
-    
-    public func elapsed() -> TimeInterval {
-        return Date().timeIntervalSince(startTime)
-    }
-    
-    public func elapsedMs() -> Int {
-        return Int(elapsed() * 1000)
-    }
-}
-
 // MARK: - Metrics Collection
 
 public actor MetricsCollector {

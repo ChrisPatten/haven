@@ -9,10 +9,13 @@ import SwiftUI
 import AppKit
 
 extension Notification.Name {
-    static let openCollectorsWindow = Notification.Name("openCollectorsWindow")
+    static let openCollectorsWindowOnLaunch = Notification.Name("openCollectorsWindowOnLaunch")
     static let openSettingsToSection = Notification.Name("openSettingsToSection")
     static let settingsConfigSaved = Notification.Name("settingsConfigSaved")
 }
+
+// Static flag to track if we've opened collectors window on launch
+private var hasOpenedCollectorsOnLaunch = false
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState?
@@ -29,12 +32,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.setActivationPolicy(.regular)
         
         // Check for full disk access on startup
-        Task {
+        Task { @MainActor in
             await checkFullDiskAccess()
         }
         
-        // Note: Collectors window opening is handled by the .task modifier in HavenApp
-        // No need to post notification here to avoid duplicate opening
+        // Open collectors window after delay using notification
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            NotificationCenter.default.post(name: .openCollectorsWindowOnLaunch, object: nil)
+        }
     }
     
     @MainActor
@@ -80,22 +85,22 @@ struct HavenApp: App {
                 stopAction: stopHostAgent,
                 runAllAction: runAllCollectors
             )
-            .task {
-                // Automatically open collectors window on launch (only once)
-                guard !hasOpenedCollectorsWindowOnLaunch else { return }
-                
-                // Use a small delay to ensure app is fully initialized
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-                
-                // Mark as opened and open the window
-                hasOpenedCollectorsWindowOnLaunch = true
-                openOrFocusCollectors()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .openCollectorsWindow)) { _ in
-                // Only open if we haven't already opened on launch, or if explicitly requested
-                // This allows manual opening via notification
-                openOrFocusCollectors()
-            }
+            .background(
+                // Hidden view that listens for launch notification
+                Color.clear
+                    .task {
+                        // Listen for the notification and open collectors window
+                        for await _ in NotificationCenter.default.notifications(named: .openCollectorsWindowOnLaunch) {
+                            guard !hasOpenedCollectorsOnLaunch else {
+                                continue
+                            }
+                            hasOpenedCollectorsOnLaunch = true
+                            openOrFocusCollectors()
+                            // Only open once, then break
+                            break
+                        }
+                    }
+            )
             .onReceive(NotificationCenter.default.publisher(for: .openSettingsToSection)) { notification in
                 if let section = notification.object as? SettingsWindow.SettingsSection {
                     openOrFocusSettings(to: section)

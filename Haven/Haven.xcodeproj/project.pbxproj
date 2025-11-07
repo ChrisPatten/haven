@@ -8,7 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A2CC177A2EBB93F500BA3D69 /* HavenCore in Frameworks */ = {isa = PBXBuildFile; productRef = A2CC17792EBB93F500BA3D69 /* HavenCore */; };
-		A2CC177C2EBB93F500BA3D72 /* HostHTTP in Frameworks */ = {isa = PBXBuildFile; productRef = A2CC177A2EBB93F500BA3D70 /* HostHTTP */; };
+		A2CC177C2EBB93F500BA3D72 /* CollectorHandlers in Frameworks */ = {isa = PBXBuildFile; productRef = A2CC177A2EBB93F500BA3D70 /* CollectorHandlers */; };
 		A2CC177D2EBB93F500BA3D73 /* HostAgentEmail in Frameworks */ = {isa = PBXBuildFile; productRef = A2CC177B2EBB93F500BA3D71 /* HostAgentEmail */; };
 /* End PBXBuildFile section */
 
@@ -59,7 +59,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A2CC177A2EBB93F500BA3D69 /* HavenCore in Frameworks */,
-				A2CC177C2EBB93F500BA3D72 /* HostHTTP in Frameworks */,
+				A2CC177C2EBB93F500BA3D72 /* CollectorHandlers in Frameworks */,
 				A2CC177D2EBB93F500BA3D73 /* HostAgentEmail in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -122,7 +122,7 @@
 			name = Haven;
 			packageProductDependencies = (
 				A2CC17792EBB93F500BA3D69 /* HavenCore */,
-				A2CC177A2EBB93F500BA3D70 /* HostHTTP */,
+				A2CC177A2EBB93F500BA3D70 /* CollectorHandlers */,
 				A2CC177B2EBB93F500BA3D71 /* HostAgentEmail */,
 			);
 			productName = Haven;
@@ -593,9 +593,9 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = HavenCore;
 		};
-		A2CC177A2EBB93F500BA3D70 /* HostHTTP */ = {
+		A2CC177A2EBB93F500BA3D70 /* CollectorHandlers */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = HostHTTP;
+			productName = CollectorHandlers;
 		};
 		A2CC177B2EBB93F500BA3D71 /* HostAgentEmail */ = {
 			isa = XCSwiftPackageProductDependency;
