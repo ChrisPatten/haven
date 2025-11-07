@@ -7,6 +7,8 @@
 
 import Foundation
 import HavenCore
+import HostHTTP
+import HostAgentEmail
 
 /// Controller for LocalFS collector
 public actor LocalFSController: CollectorController {
@@ -14,7 +16,7 @@ public actor LocalFSController: CollectorController {
     
     private let handler: LocalFSHandler
     private let baseState: BaseCollectorController
-    private let logger = StubLogger(category: "localfs-controller")
+    private let logger = HavenLogger(category: "localfs-controller")
     
     public init(config: HavenConfig, serviceController: ServiceController) async throws {
         self.baseState = BaseCollectorController()
@@ -23,7 +25,7 @@ public actor LocalFSController: CollectorController {
         self.handler = LocalFSHandler(config: config)
     }
     
-    public func run(request: CollectorRunRequest?) async throws -> RunResponse {
+    public func run(request: HostAgentEmail.CollectorRunRequest?, onProgress: ((JobProgress) -> Void)?) async throws -> HostAgentEmail.RunResponse {
         let currentlyRunning = await isRunning()
         guard !currentlyRunning else {
             throw CollectorError.alreadyRunning
@@ -33,8 +35,23 @@ public actor LocalFSController: CollectorController {
         baseState.isRunning = true
         
         do {
-            // Call handler's direct Swift API - types match, no conversion needed
-            let runResponse = try await handler.runCollector(request: request)
+            // Bridge handler's progress callback to JobProgress
+            let handlerProgress: ((Int, Int, Int, Int) -> Void)? = onProgress != nil ? { scanned, matched, submitted, skipped in
+                Task { @MainActor in
+                    let progress = JobProgress(
+                        scanned: scanned,
+                        matched: matched,
+                        submitted: submitted,
+                        skipped: skipped,
+                        currentPhase: "Processing files",
+                        phaseProgress: nil
+                    )
+                    onProgress?(progress)
+                }
+            } : nil
+            
+            // Call handler's direct Swift API with progress callback
+            let runResponse = try await handler.runCollector(request: request, onProgress: handlerProgress)
             
             // Update state
             baseState.updateState(from: runResponse)
@@ -57,11 +74,14 @@ public actor LocalFSController: CollectorController {
         formatter.formatOptions = [.withInternetDateTime]
         
         // Convert HavenCore.AnyCodable to Haven.AnyCodable
+        // Access lastRunStats in a nonisolated context
+        let stats = stateInfo.lastRunStats
         var lastRunStats: [String: AnyCodable]? = nil
-        if let stats = stateInfo.lastRunStats {
+        if let stats = stats {
             var dict: [String: AnyCodable] = [:]
             for (key, havenCoreValue) in stats {
-                switch havenCoreValue.value {
+                let value = havenCoreValue.value
+                switch value {
                 case let str as String:
                     dict[key] = .string(str)
                 case let int as Int:
@@ -88,5 +108,26 @@ public actor LocalFSController: CollectorController {
     
     public func isRunning() async -> Bool {
         return baseState.isRunning
+    }
+    
+    public func reset() async throws {
+        let fm = FileManager.default
+        
+        // Default state file path (same as LocalFSHandler default)
+        let defaultStatePath = "~/.haven/localfs_collector_state.json"
+        let expandedPath = NSString(string: defaultStatePath).expandingTildeInPath
+        let stateFile = URL(fileURLWithPath: expandedPath)
+        
+        // Delete state file if it exists
+        if fm.fileExists(atPath: stateFile.path) {
+            try fm.removeItem(at: stateFile)
+            logger.info("Deleted LocalFS state file", metadata: ["path": stateFile.path])
+        }
+        
+        // Reset in-memory state
+        baseState.lastRunTime = nil
+        baseState.lastRunStatus = nil
+        baseState.lastRunStats = nil
+        baseState.lastRunError = nil
     }
 }

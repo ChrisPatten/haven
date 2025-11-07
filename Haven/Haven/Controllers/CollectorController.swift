@@ -6,20 +6,24 @@
 //
 
 import Foundation
+import HostAgentEmail
 
 /// Protocol defining common collector interface
 public protocol CollectorController {
     /// Get the collector ID
     var collectorId: String { get }
     
-    /// Run the collector with optional request
-    func run(request: CollectorRunRequest?) async throws -> RunResponse
+    /// Run the collector with optional request and progress callback
+    func run(request: HostAgentEmail.CollectorRunRequest?, onProgress: ((JobProgress) -> Void)?) async throws -> HostAgentEmail.RunResponse
     
     /// Get current collector state
     func getState() async -> CollectorStateResponse?
     
     /// Check if collector is currently running
     func isRunning() async -> Bool
+    
+    /// Reset collector state - removes state files and fences to return to fresh state
+    func reset() async throws
 }
 
 /// Base implementation providing common functionality
@@ -54,7 +58,7 @@ public nonisolated class BaseCollectorController {
     
     /// Update state from run response
     /// Note: Uses snake_case properties to match real RunResponse from hostagent
-    public func updateState(from response: RunResponse) {
+    public func updateState(from response: HostAgentEmail.RunResponse) {
         isRunning = false
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]

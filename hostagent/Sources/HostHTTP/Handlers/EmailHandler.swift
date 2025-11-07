@@ -16,14 +16,6 @@ public actor EmailHandler {
     /// Handle POST /v1/email/parse
     /// Parse an .emlx file and return structured email data
     public func handleParse(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        guard config.modules.mail.enabled else {
-            logger.warning("Email utilities request rejected - module disabled")
-            return HTTPResponse(
-                statusCode: 503,
-                headers: ["Content-Type": "application/json"],
-                body: #"{"error":"Email module is disabled"}"#.data(using: .utf8)
-            )
-        }
         
         // Parse request body
         guard let body = request.body,

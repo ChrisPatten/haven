@@ -922,9 +922,7 @@
     // MARK: - Validation & Parsing
     
     private func validateModuleEnabled() throws {
-        guard config.modules.mail.enabled else {
-            throw HandlerError.moduleDisabled
-        }
+        // Module always enabled
     }
     
     private func ensureNotRunning() throws {

@@ -34,15 +34,6 @@ public struct OCRHandler {
     }
     
     public func handle(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        // Check if OCR is enabled
-        guard config.modules.ocr.enabled else {
-            logger.warning("OCR request rejected - module disabled")
-            return HTTPResponse(
-                statusCode: 503,
-                headers: ["Content-Type": "application/json"],
-                body: #"{"error":"OCR module is disabled"}"#.data(using: .utf8)
-            )
-        }
         
         // Parse request body
         guard let body = request.body,

@@ -119,6 +119,11 @@ struct SettingsWindow: View {
         .task {
             await loadAllConfigurations()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .openSettingsToSection)) { notification in
+            if let section = notification.object as? SettingsSection {
+                selectedSection = section
+            }
+        }
     }
     
     @ViewBuilder
@@ -212,6 +217,9 @@ struct SettingsWindow: View {
                     try await configManagerWrapper.configManager.saveSchedulesConfig(schedulesConfig)
                 }
                 errorMessage = nil
+                
+                // Post notification that config was saved so collectors view can refresh
+                NotificationCenter.default.post(name: .settingsConfigSaved, object: nil)
             } catch {
                 errorMessage = "Failed to save configuration: \(error.localizedDescription)"
             }

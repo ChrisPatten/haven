@@ -255,7 +255,8 @@ struct RunConfigurationView: View {
             ScopePanelView(
                 collector: viewModel.collector,
                 scopeData: $viewModel.scopeData,
-                modulesResponse: viewModel.modulesResponse
+                modulesResponse: viewModel.modulesResponse,
+                hostAgentController: viewModel.hostAgentController
             )
             .padding()
         }

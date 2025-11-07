@@ -91,7 +91,9 @@ public struct CapabilitiesHandler {
     
     private func checkFullDiskAccess() -> Bool {
         // Check if we can read the Messages database
-        let messagesPath = NSHomeDirectory() + "/Library/Messages/chat.db"
+        // Use homeDirectoryForCurrentUser for sandboxed apps (returns actual home, not container)
+        let messagesPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Messages/chat.db").path
         return FileManager.default.isReadableFile(atPath: messagesPath)
     }
     
@@ -102,20 +104,36 @@ public struct CapabilitiesHandler {
     }
 }
 
-struct CapabilitiesResponse: Codable {
-    let modules: ModulesCapabilities
+public struct CapabilitiesResponse: Codable {
+    public let modules: ModulesCapabilities
+    
+    public init(modules: ModulesCapabilities) {
+        self.modules = modules
+    }
 }
 
-struct ModulesCapabilities: Codable {
-    let imessage: ModuleCapability<IMessageConfigInfo>
-    let ocr: ModuleCapability<OCRConfigInfo>
-    let fswatch: ModuleCapability<FSWatchConfigInfo>
-    let contacts: StubModuleCapability
-    let calendar: StubModuleCapability
-    let reminders: StubModuleCapability
-    let mail: StubModuleCapability
-    let notes: StubModuleCapability
-    let face: FaceModuleCapability
+public struct ModulesCapabilities: Codable {
+    public let imessage: ModuleCapability<IMessageConfigInfo>
+    public let ocr: ModuleCapability<OCRConfigInfo>
+    public let fswatch: ModuleCapability<FSWatchConfigInfo>
+    public let contacts: StubModuleCapability
+    public let calendar: StubModuleCapability
+    public let reminders: StubModuleCapability
+    public let mail: StubModuleCapability
+    public let notes: StubModuleCapability
+    public let face: FaceModuleCapability
+    
+    public init(imessage: ModuleCapability<IMessageConfigInfo>, ocr: ModuleCapability<OCRConfigInfo>, fswatch: ModuleCapability<FSWatchConfigInfo>, contacts: StubModuleCapability, calendar: StubModuleCapability, reminders: StubModuleCapability, mail: StubModuleCapability, notes: StubModuleCapability, face: FaceModuleCapability) {
+        self.imessage = imessage
+        self.ocr = ocr
+        self.fswatch = fswatch
+        self.contacts = contacts
+        self.calendar = calendar
+        self.reminders = reminders
+        self.mail = mail
+        self.notes = notes
+        self.face = face
+    }
     
     enum CodingKeys: String, CodingKey {
         case imessage
@@ -130,23 +148,42 @@ struct ModulesCapabilities: Codable {
     }
 }
 
-struct ModuleCapability<T: Codable>: Codable {
-    let enabled: Bool
-    let permissions: [String: Bool]
-    let config: T
+public struct ModuleCapability<T: Codable>: Codable {
+    public let enabled: Bool
+    public let permissions: [String: Bool]
+    public let config: T
+    
+    public init(enabled: Bool, permissions: [String: Bool], config: T) {
+        self.enabled = enabled
+        self.permissions = permissions
+        self.config = config
+    }
 }
 
-struct StubModuleCapability: Codable {
-    let enabled: Bool
-    let permissions: [String: Bool]
-    let status: String
+public struct StubModuleCapability: Codable {
+    public let enabled: Bool
+    public let permissions: [String: Bool]
+    public let status: String
+    
+    public init(enabled: Bool, permissions: [String: Bool], status: String) {
+        self.enabled = enabled
+        self.permissions = permissions
+        self.status = status
+    }
 }
 
-struct FaceModuleCapability: Codable {
-    let enabled: Bool
-    let minFaceSize: Double
-    let minConfidence: Double
-    let includeLandmarks: Bool
+public struct FaceModuleCapability: Codable {
+    public let enabled: Bool
+    public let minFaceSize: Double
+    public let minConfidence: Double
+    public let includeLandmarks: Bool
+    
+    public init(enabled: Bool, minFaceSize: Double, minConfidence: Double, includeLandmarks: Bool) {
+        self.enabled = enabled
+        self.minFaceSize = minFaceSize
+        self.minConfidence = minConfidence
+        self.includeLandmarks = includeLandmarks
+    }
     
     enum CodingKeys: String, CodingKey {
         case enabled
@@ -156,17 +193,26 @@ struct FaceModuleCapability: Codable {
     }
 }
 
-struct IMessageConfigInfo: Codable {
-    let ocrEnabled: Bool
+public struct IMessageConfigInfo: Codable {
+    public let ocrEnabled: Bool
+    
+    public init(ocrEnabled: Bool) {
+        self.ocrEnabled = ocrEnabled
+    }
     
     enum CodingKeys: String, CodingKey {
         case ocrEnabled = "ocr_enabled"
     }
 }
 
-struct OCRConfigInfo: Codable {
-    let languages: [String]
-    let timeoutMs: Int
+public struct OCRConfigInfo: Codable {
+    public let languages: [String]
+    public let timeoutMs: Int
+    
+    public init(languages: [String], timeoutMs: Int) {
+        self.languages = languages
+        self.timeoutMs = timeoutMs
+    }
     
     enum CodingKeys: String, CodingKey {
         case languages
@@ -174,8 +220,12 @@ struct OCRConfigInfo: Codable {
     }
 }
 
-struct FSWatchConfigInfo: Codable {
-    let watchesCount: Int
+public struct FSWatchConfigInfo: Codable {
+    public let watchesCount: Int
+    
+    public init(watchesCount: Int) {
+        self.watchesCount = watchesCount
+    }
     
     enum CodingKeys: String, CodingKey {
         case watchesCount = "watches_count"

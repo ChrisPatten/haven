@@ -11,6 +11,7 @@ struct ScopePanelView: View {
     let collector: CollectorInfo
     @Binding var scopeData: [String: AnyCodable]
     let modulesResponse: ModulesResponse?
+    let hostAgentController: HostAgentController?
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -27,7 +28,8 @@ struct ScopePanelView: View {
             case "email_imap":
                 IMAPScopeView(
                     collector: collector,
-                    scopeData: $scopeData
+                    scopeData: $scopeData,
+                    hostAgentController: hostAgentController
                 )
                 
             case "localfs":

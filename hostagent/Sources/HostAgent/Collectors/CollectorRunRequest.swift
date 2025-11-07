@@ -24,6 +24,11 @@ public struct CollectorRunRequest: Codable {
             case since
             case until
         }
+        
+        public init(since: Date? = nil, until: Date? = nil) {
+            self.since = since
+            self.until = until
+        }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -57,11 +62,23 @@ public struct CollectorRunRequest: Codable {
             case files
             case environmentVariable = "environment_variable"
         }
+        
+        public init(combinationMode: String? = nil, defaultAction: String? = nil, inline: [AnyCodable]? = nil, files: [String]? = nil, environmentVariable: String? = nil) {
+            self.combinationMode = combinationMode
+            self.defaultAction = defaultAction
+            self.inline = inline
+            self.files = files
+            self.environmentVariable = environmentVariable
+        }
     }
 
     public struct RedactionOverride: Codable {
         // Dynamic structure to allow arbitrary PII type overrides
         public let raw: [String: Bool]
+
+        public init(raw: [String: Bool] = [:]) {
+            self.raw = raw
+        }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: DynamicKey.self)
@@ -183,6 +200,33 @@ public struct CollectorRunRequest: Codable {
         self.redactionOverride = try keyed.decodeIfPresent(RedactionOverride.self, forKey: .redactionOverride)
         self.filters = try keyed.decodeIfPresent(FiltersConfig.self, forKey: .filters)
         self.scope = try keyed.decodeIfPresent(AnyCodable.self, forKey: .scope)
+    }
+    
+    // Public memberwise initializer for programmatic creation
+    public init(
+        mode: Mode? = nil,
+        limit: Int? = nil,
+        order: Order? = nil,
+        concurrency: Int? = nil,
+        dateRange: DateRange? = nil,
+        timeWindow: String? = nil,
+        batch: Bool? = nil,
+        batchSize: Int? = nil,
+        redactionOverride: RedactionOverride? = nil,
+        filters: FiltersConfig? = nil,
+        scope: AnyCodable? = nil
+    ) {
+        self.mode = mode
+        self.limit = limit
+        self.order = order
+        self.concurrency = concurrency
+        self.dateRange = dateRange
+        self.timeWindow = timeWindow
+        self.batch = batch
+        self.batchSize = batchSize
+        self.redactionOverride = redactionOverride
+        self.filters = filters
+        self.scope = scope
     }
 
     public func encode(to encoder: Encoder) throws {

@@ -8,6 +8,7 @@
 import Foundation
 import Observation
 
+@MainActor
 @Observable
 public final class AppState {
     var status: AppStatus = .red
@@ -24,6 +25,16 @@ public final class AppState {
     // Collectors panel state
     var collectorsList: [CollectorInfo] = []
     var runningCollectors: Set<String> = []
+    
+    // Job tracking
+    var activeJobs: [String: CollectorJob] = [:]
+    var jobHistory: [CollectorJob] = []
+    
+    // Full disk access status
+    var fullDiskAccessGranted: Bool = true // Default to true, will be checked at startup
+    
+    // Contacts permission status
+    var contactsPermissionGranted: Bool = true // Default to true, will be checked when needed
     
     // MARK: - Initialization
     
@@ -106,6 +117,51 @@ public final class AppState {
     
     func isCollectorRunning(_ collectorId: String) -> Bool {
         return runningCollectors.contains(collectorId)
+    }
+    
+    // MARK: - Job Management
+    
+    @MainActor
+    func updateJobProgress(jobId: String, progress: JobProgress) {
+        // Update job progress if job exists
+        // Defensive checks to avoid EXC_BAD_ACCESS
+        guard !jobId.isEmpty else {
+            return
+        }
+        
+        // Safely access dictionary - defensive check
+        guard let existingJob = activeJobs[jobId] else {
+            return
+        }
+        
+        // Create updated job
+        var updatedJob = existingJob
+        updatedJob.progress = progress
+        
+        // Update dictionary atomically
+        activeJobs[jobId] = updatedJob
+    }
+    
+    @MainActor
+    func addJob(_ job: CollectorJob) {
+        activeJobs[job.id] = job
+    }
+    
+    @MainActor
+    func removeJob(_ jobId: String) {
+        activeJobs.removeValue(forKey: jobId)
+    }
+    
+    // MARK: - Full Disk Access
+    
+    func setFullDiskAccessGranted(_ granted: Bool) {
+        fullDiskAccessGranted = granted
+    }
+    
+    // MARK: - Contacts Permission
+    
+    func setContactsPermissionGranted(_ granted: Bool) {
+        contactsPermissionGranted = granted
     }
 }
 

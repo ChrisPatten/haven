@@ -100,12 +100,20 @@ public struct HealthHandler {
     }
 }
 
-struct HealthResponse: Codable {
-    let status: String
-    let startedAt: String
-    let version: String
-    let uptimeSeconds: Int
-    let modules: [ModuleSummary]
+public struct HealthResponse: Codable {
+    public let status: String
+    public let startedAt: String
+    public let version: String
+    public let uptimeSeconds: Int
+    public let modules: [ModuleSummary]
+    
+    public init(status: String, startedAt: String, version: String, uptimeSeconds: Int, modules: [ModuleSummary]) {
+        self.status = status
+        self.startedAt = startedAt
+        self.version = version
+        self.uptimeSeconds = uptimeSeconds
+        self.modules = modules
+    }
     
     enum CodingKeys: String, CodingKey {
         case status
@@ -116,11 +124,18 @@ struct HealthResponse: Codable {
     }
 }
 
-struct ModuleSummary: Codable {
-    let name: String
-    let enabled: Bool
-    let status: String
-    let extraInfo: [String: Int]?
+public struct ModuleSummary: Codable {
+    public let name: String
+    public let enabled: Bool
+    public let status: String
+    public let extraInfo: [String: Int]?
+    
+    public init(name: String, enabled: Bool, status: String, extraInfo: [String: Int]?) {
+        self.name = name
+        self.enabled = enabled
+        self.status = status
+        self.extraInfo = extraInfo
+    }
     
     enum CodingKeys: String, CodingKey {
         case name, enabled, status

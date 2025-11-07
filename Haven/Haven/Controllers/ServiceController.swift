@@ -6,6 +6,11 @@
 //
 
 import Foundation
+import HavenCore
+import HostAgentEmail
+import OCR
+import Entity
+import FSWatch
 
 /// Manages shared services and configuration for all collectors
 public actor ServiceController {
@@ -15,7 +20,7 @@ public actor ServiceController {
     private var ocrService: OCRService?
     private var entityService: EntityService?
     private var fsWatchService: FSWatchService?
-    private let logger = StubLogger(category: "service-controller")
+    private let logger = HavenLogger(category: "service-controller")
     
     public init(configManager: ConfigManager? = nil) {
         self.configManager = configManager ?? ConfigManager()
@@ -44,15 +49,24 @@ public actor ServiceController {
         self.config = config
         
         // Apply logging configuration
-        if let envLevel = ProcessInfo.processInfo.environment["HAVEN_LOG_LEVEL"] {
-            StubLogger.setMinimumLevel(envLevel)
-        }
+        // Environment variables take precedence over config file
+        let configLevel = config.logging.level
+        let envLevel = ProcessInfo.processInfo.environment["HAVEN_LOG_LEVEL"]
+        let finalLevel = envLevel ?? configLevel
+        
+        // Diagnostic: Log what we're setting (before setting it, so we can see it)
+        // Use print to bypass HavenLogger level check
+        print("DIAGNOSTIC: Setting log level - env: \(envLevel ?? "nil"), config: \(configLevel), final: \(finalLevel)")
+        
+        HavenLogger.setMinimumLevel(finalLevel)
+        
         if let envFormat = ProcessInfo.processInfo.environment["HAVEN_LOG_FORMAT"] {
-            StubLogger.setOutputFormat(envFormat)
+            HavenLogger.setOutputFormat(envFormat)
+        } else {
+            HavenLogger.setOutputFormat(config.logging.format)
         }
-        StubLogger.setMinimumLevel(config.logging.level)
-        StubLogger.setOutputFormat(config.logging.format)
-        StubLogger.enableDirectFileLogging()
+        // Enable file logging - HavenLogger uses hardcoded paths, but we can extend it if needed
+        HavenLogger.enableDirectFileLogging()
         
         logger.info("Configuration loaded from plist files", metadata: [
             "gateway_url": config.gateway.baseUrl
@@ -78,8 +92,13 @@ public actor ServiceController {
         logger.info("Gateway client initialized")
     }
     
-    /// Get gateway client
+    /// Get gateway client (auto-initializes if not already initialized)
     public func getGatewayClient() throws -> GatewayClient {
+        // Auto-initialize if not already initialized
+        if gatewayClient == nil {
+            try initializeGatewayClient()
+        }
+        
         guard let client = gatewayClient else {
             throw ServiceError.gatewayNotInitialized
         }
@@ -88,20 +107,15 @@ public actor ServiceController {
     
     // MARK: - OCR Service
     
-    /// Initialize OCR service if enabled
+    /// Initialize OCR service (always enabled)
     public func initializeOCRService() throws {
         let config = try getConfig()
-        guard config.modules.ocr.enabled else {
-            logger.info("OCR service disabled in configuration")
-            return
-        }
-        
+        // All modules are always enabled
         ocrService = OCRService(
             timeoutMs: config.modules.ocr.timeoutMs,
             languages: config.modules.ocr.languages,
             recognitionLevel: config.modules.ocr.recognitionLevel,
-            includeLayout: config.modules.ocr.includeLayout,
-            maxImageDimension: config.modules.ocr.maxImageDimension
+            includeLayout: config.modules.ocr.includeLayout
         )
         logger.info("OCR service initialized")
     }
@@ -113,14 +127,10 @@ public actor ServiceController {
     
     // MARK: - Entity Service
     
-    /// Initialize entity service if enabled
+    /// Initialize entity service (always enabled)
     public func initializeEntityService() throws {
         let config = try getConfig()
-        guard config.modules.entity.enabled else {
-            logger.info("Entity service disabled in configuration")
-            return
-        }
-        
+        // All modules are always enabled
         // Convert types array to EntityType array
         let enabledTypes = config.modules.entity.types.compactMap { typeString -> EntityType? in
             EntityType(rawValue: typeString)
@@ -139,14 +149,10 @@ public actor ServiceController {
     
     // MARK: - FSWatch Service
     
-    /// Initialize FSWatch service if enabled
+    /// Initialize FSWatch service (always enabled)
     public func initializeFSWatchService() throws {
         let config = try getConfig()
-        guard config.modules.fswatch.enabled else {
-            logger.info("FSWatch service disabled in configuration")
-            return
-        }
-        
+        // All modules are always enabled
         fsWatchService = FSWatchService(
             config: config.modules.fswatch,
             maxQueueSize: config.modules.fswatch.eventQueueSize

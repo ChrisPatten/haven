@@ -171,7 +171,27 @@ public struct HavenLogger {
 
     /// Set the global minimum level by name (e.g. "info", "warning").
     public static func setMinimumLevel(_ level: String) {
-        HavenLogger.minimumLevelPriority = HavenLogger.priority(for: level)
+        let priority = HavenLogger.priority(for: level)
+        HavenLogger.minimumLevelPriority = priority
+        // Diagnostic: Always log level changes (bypass level check)
+        let diagnosticLogger = HavenLogger(category: "logging-config")
+        let ts = iso8601Formatter.string(from: Date())
+        let diagnosticMsg = "Log level set to '\(level)' (priority: \(priority))"
+        let diagnosticOutput = "{\"ts\":\"\(ts)\",\"lvl\":\"info\",\"mod\":\"logging-config\",\"msg\":\"\(diagnosticMsg)\"}"
+        // Use os_log directly to bypass level check
+        let osLog = OSLog(subsystem: "com.haven.hostagent", category: "logging-config")
+        os_log("%{public}@", log: osLog, type: .info, diagnosticOutput)
+        // Also write to file if enabled
+        if directFileLoggingEnabled, let data = (diagnosticOutput + "\n").data(using: .utf8) {
+            if let fileHandle = stdoutLogFileHandle {
+                data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+                    if let baseAddress = ptr.baseAddress {
+                        Darwin.write(fileHandle.fileDescriptor, baseAddress, data.count)
+                        fsync(fileHandle.fileDescriptor)
+                    }
+                }
+            }
+        }
     }
 
     /// Set the global output format (json, text, logfmt)

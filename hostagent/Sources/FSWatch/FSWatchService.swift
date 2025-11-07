@@ -31,10 +31,7 @@ public actor FSWatchService {
     
     /// Start watching configured directories
     public func start() async throws {
-        guard config.enabled else {
-            logger.info("FSWatch module is disabled")
-            return
-        }
+        // Module always enabled
         
         logger.info("Starting file system watchers", metadata: ["count": config.watches.count])
         
@@ -147,9 +144,7 @@ public actor FSWatchService {
     
     /// Health check
     public func healthCheck() async -> String {
-        if !config.enabled {
-            return "disabled"
-        }
+        // Module always enabled
         return watchers.isEmpty ? "idle" : "watching"
     }
     

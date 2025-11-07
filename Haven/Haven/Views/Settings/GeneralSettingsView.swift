@@ -3,7 +3,7 @@
 //  Haven
 //
 //  General/system settings view
-//  Service, gateway, logging, and module enablement configuration
+//  Service, gateway, and logging configuration
 //
 
 import SwiftUI
@@ -29,15 +29,6 @@ struct GeneralSettingsView: View {
     @State private var logErrorPath: String = "~/.haven/hostagent_error.log"
     @State private var logAccessPath: String = "~/.haven/hostagent_access.log"
     
-    @State private var moduleIMessage: Bool = true
-    @State private var moduleOCR: Bool = true
-    @State private var moduleEntity: Bool = true
-    @State private var moduleFace: Bool = false
-    @State private var moduleFSWatch: Bool = false
-    @State private var moduleLocalFS: Bool = false
-    @State private var moduleContacts: Bool = false
-    @State private var moduleMail: Bool = false
-    
     var body: some View {
         ScrollView {
             mainContent
@@ -51,7 +42,7 @@ struct GeneralSettingsView: View {
     }
     
     private var combinedState: String {
-        "\(authHeader)|\(authSecret)|\(gatewayBaseUrl)|\(gatewayIngestPath)|\(gatewayIngestFilePath)|\(gatewayTimeoutMs)|\(logLevel)|\(logFormat)|\(logAppPath)|\(logErrorPath)|\(logAccessPath)|\(moduleIMessage)|\(moduleOCR)|\(moduleEntity)|\(moduleFace)|\(moduleFSWatch)|\(moduleLocalFS)|\(moduleContacts)|\(moduleMail)"
+        "\(authHeader)|\(authSecret)|\(gatewayBaseUrl)|\(gatewayIngestPath)|\(gatewayIngestFilePath)|\(gatewayTimeoutMs)|\(logLevel)|\(logFormat)|\(logAppPath)|\(logErrorPath)|\(logAccessPath)"
     }
     
     @ViewBuilder
@@ -59,7 +50,6 @@ struct GeneralSettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             gatewayConfigurationSection
             loggingConfigurationSection
-            moduleEnablementSection
             
             if let error = errorMessage {
                 Text(error)
@@ -184,34 +174,6 @@ struct GeneralSettingsView: View {
         }
     }
     
-    @ViewBuilder
-    private var moduleEnablementSection: some View {
-        GroupBox("Module Enablement") {
-            HStack(alignment: .top, spacing: 40) {
-                    VStack(alignment: .leading, spacing: 8) {
-                    Text("Collectors")
-                        .font(.headline)
-                        .padding(.bottom, 4)
-                        Toggle("iMessage", isOn: $moduleIMessage)
-                    Toggle("Contacts", isOn: $moduleContacts)
-                    Toggle("Local File System", isOn: $moduleLocalFS)
-                    Toggle("Mail", isOn: $moduleMail)
-                }
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Features")
-                        .font(.headline)
-                        .padding(.bottom, 4)
-                        Toggle("Entity Extraction", isOn: $moduleEntity)
-                        Toggle("Face Detection", isOn: $moduleFace)
-                        Toggle("File System Watch", isOn: $moduleFSWatch)
-                    Toggle("OCR", isOn: $moduleOCR)
-                }
-                    }
-                    .padding()
-        }
-    }
-    
     private func loadConfiguration() {
         guard let config = config else {
             // Use defaults
@@ -231,15 +193,6 @@ struct GeneralSettingsView: View {
         logAppPath = config.logging.paths.app
         logErrorPath = config.logging.paths.error
         logAccessPath = config.logging.paths.access
-        
-        moduleIMessage = config.modules.imessage
-        moduleOCR = config.modules.ocr
-        moduleEntity = config.modules.entity
-        moduleFace = config.modules.face
-        moduleFSWatch = config.modules.fswatch
-        moduleLocalFS = config.modules.localfs
-        moduleContacts = config.modules.contacts
-        moduleMail = config.modules.mail
     }
     
     private func updateConfiguration() {
@@ -275,14 +228,14 @@ struct GeneralSettingsView: View {
                 )
             ),
             modules: ModulesEnablementConfig(
-                imessage: moduleIMessage,
-                ocr: moduleOCR,
-                entity: moduleEntity,
-                face: moduleFace,
-                fswatch: moduleFSWatch,
-                localfs: moduleLocalFS,
-                contacts: moduleContacts,
-                mail: moduleMail
+                imessage: true,
+                ocr: true,
+                entity: true,
+                face: true,
+                fswatch: true,
+                localfs: true,
+                contacts: true,
+                mail: true
             ),
             advanced: advancedSettings  // Preserve advanced settings
         )

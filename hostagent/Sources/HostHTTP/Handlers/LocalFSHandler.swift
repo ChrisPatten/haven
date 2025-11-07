@@ -47,14 +47,6 @@ public actor LocalFSHandler {
     }
     
     public func handleRun(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        guard config.modules.localfs.enabled else {
-            logger.warning("LocalFS collector request rejected - module disabled")
-            return HTTPResponse(
-                statusCode: 503,
-                headers: ["Content-Type": "application/json"],
-                body: #"{"error":"LocalFS collector module is disabled"}"#.data(using: .utf8)
-            )
-        }
         
         guard !isRunning else {
             logger.warning("LocalFS collector already running")
@@ -202,10 +194,10 @@ public actor LocalFSHandler {
     
     /// Direct Swift API for running the LocalFS collector
     /// Replaces HTTP-based handleRun for in-app integration
-    public func runCollector(request: CollectorRunRequest?) async throws -> RunResponse {
-        guard config.modules.localfs.enabled else {
-            throw LocalFSCollectorError.watchDirectoryNotFound("LocalFS collector module is disabled")
-        }
+    public func runCollector(
+        request: CollectorRunRequest?,
+        onProgress: ((Int, Int, Int, Int) -> Void)? = nil
+    ) async throws -> RunResponse {
         
         guard !isRunning else {
             throw LocalFSCollectorError.watchDirectoryNotFound("Collector is already running")
@@ -284,6 +276,9 @@ public actor LocalFSHandler {
             response.warnings = result.warnings
             response.errors = result.errors
             
+            // Report final progress
+            onProgress?(result.scanned, result.matched, result.submitted, result.skipped)
+            
             return response
             
         } catch let error as LocalFSCollectorError {
@@ -314,13 +309,13 @@ public actor LocalFSHandler {
     /// Direct Swift API for getting collector state
     /// Replaces HTTP-based handleState for in-app integration
     public func getCollectorState() async -> CollectorStateInfo {
-        // Convert lastRunStats to [String: AnyCodable]
-        var statsDict: [String: AnyCodable]? = nil
+        // Convert lastRunStats to [String: HavenCore.AnyCodable]
+        var statsDict: [String: HavenCore.AnyCodable]? = nil
         if let stats = lastRunStats {
-            var dict: [String: AnyCodable] = [:]
+            var dict: [String: HavenCore.AnyCodable] = [:]
             let statsDictAny = stats.toDict()
             for (key, value) in statsDictAny {
-                dict[key] = AnyCodable(value)
+                dict[key] = HavenCore.AnyCodable(value)
             }
             statsDict = dict
         }

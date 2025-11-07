@@ -6,6 +6,9 @@
 //
 
 import SwiftUI
+import HavenCore
+import HostHTTP
+import IMAP
 
 /// Email settings view for managing IMAP account instances
 struct EmailSettingsView: View {
@@ -90,7 +93,8 @@ struct EmailSettingsView: View {
                 onSave: { instance in
                     instances.append(instance)
                     updateConfiguration()
-                }
+                },
+                configManager: configManager
             )
         }
         .sheet(isPresented: $showingEditSheet) {
@@ -103,7 +107,8 @@ struct EmailSettingsView: View {
                             instances[index] = updatedInstance
                             updateConfiguration()
                         }
-                    }
+                    },
+                    configManager: configManager
                 )
             }
         }
@@ -144,6 +149,7 @@ struct EmailSettingsView: View {
 struct EmailInstanceEditSheet: View {
     let instance: EmailInstance?
     let onSave: (EmailInstance) -> Void
+    var configManager: ConfigManager
     
     @Environment(\.dismiss) private var dismiss
     
@@ -156,6 +162,12 @@ struct EmailInstanceEditSheet: View {
     @State private var username: String = ""
     @State private var secretRef: String = ""
     @State private var folders: [String] = []
+    
+    // Connection test state
+    @State private var isTestingConnection = false
+    @State private var connectionTestError: String?
+    @State private var availableFolders: [ImapFolder] = []
+    @State private var showFolderTree = false
     
     var body: some View {
         NavigationStack {
@@ -192,44 +204,84 @@ struct EmailInstanceEditSheet: View {
                 
                 Section {
                     HStack {
-                        Button("Test Connection") {
-                            testConnection()
+                        Button(action: {
+                            Task {
+                                await testConnection()
+                            }
+                        }) {
+                            HStack {
+                                if isTestingConnection {
+                                    ProgressView()
+                                        .scaleEffect(0.7)
+                                    Text("Testing...")
+                                } else {
+                                    Image(systemName: "network")
+                                    Text("Test Connection")
+                                }
+                            }
                         }
-                        .disabled(true) // TODO: Backend endpoint not yet implemented
+                        .disabled(isTestingConnection || host.isEmpty || username.isEmpty || secretRef.isEmpty)
                         
                         Spacer()
                     }
                     
-                    HStack(spacing: 4) {
-                        Image(systemName: "info.circle")
-                            .foregroundColor(.orange)
-                            .font(.caption)
-                        Text("Connection testing not yet available. Backend endpoint implementation pending.")
-                            .foregroundColor(.secondary)
-                            .font(.caption)
+                    if let error = connectionTestError {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.red)
+                                .font(.caption)
+                            Text(error)
+                                .foregroundColor(.red)
+                                .font(.caption)
+                        }
+                        .padding(.top, 4)
+                    } else if showFolderTree && !availableFolders.isEmpty {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                                .font(.caption)
+                            Text("Connection successful! Select folders below.")
+                                .foregroundColor(.secondary)
+                                .font(.caption)
+                        }
+                        .padding(.top, 4)
                     }
-                    .padding(.top, 4)
                 } header: {
                     Text("Connection Test")
                 } footer: {
-                    Text("Manual folder entry is supported. Enter folder names separated by commas (e.g., INBOX, Sent, Drafts)")
+                    if !showFolderTree {
+                        Text("Click 'Test Connection' to verify settings and load available folders from the server.")
+                    }
                 }
                 
-                Section {
-                    TextField("Folders (comma-separated)", text: Binding(
-                        get: {
-                            folders.joined(separator: ", ")
-                        },
-                        set: { newValue in
-                            // Parse comma-separated string back to folders array
-                            folders = newValue.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-                        }
-                    ), prompt: Text("INBOX, Sent, Drafts"))
-                        .help("Enter folder names separated by commas")
-                } header: {
-                    Text("Folders")
-                } footer: {
-                    Text("Enter the IMAP folders to sync from this account (e.g., INBOX, Sent, Drafts). Connection testing will be available in a future update.")
+                if showFolderTree && !availableFolders.isEmpty {
+                    Section {
+                        IMAPFolderTreeView(
+                            selectedFolders: $folders,
+                            folders: availableFolders
+                        )
+                    } header: {
+                        Text("Select Folders")
+                    } footer: {
+                        Text("Select the folders you want to sync. Selected folders: \(folders.count)")
+                    }
+                } else {
+                    Section {
+                        TextField("Folders (comma-separated)", text: Binding(
+                            get: {
+                                folders.joined(separator: ", ")
+                            },
+                            set: { newValue in
+                                // Parse comma-separated string back to folders array
+                                folders = newValue.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                            }
+                        ), prompt: Text("INBOX, Sent, Drafts"))
+                            .help("Enter folder names separated by commas, or use 'Test Connection' to select from server")
+                    } header: {
+                        Text("Folders")
+                    } footer: {
+                        Text("Enter folder names manually, or use 'Test Connection' to browse and select folders from the server.")
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -277,16 +329,77 @@ struct EmailInstanceEditSheet: View {
                 if let existingFolders = instance.folders {
                     folders = existingFolders
                 }
+                // If folders exist, try to load them in the tree view
+                // User can click "Test Connection" again to refresh
             } else {
                 id = UUID().uuidString
             }
         }
     }
     
-    private func testConnection() {
-        // TODO: Implement actual IMAP connection test
-        // Backend endpoint: POST /v1/email/test-connection
-        // This function is disabled until backend implementation is complete
+    private func testConnection() async {
+        isTestingConnection = true
+        connectionTestError = nil
+        showFolderTree = false
+        availableFolders = []
+        
+        // Validate required fields
+        guard !host.isEmpty, !username.isEmpty, !secretRef.isEmpty else {
+            connectionTestError = "Please fill in all required fields (Host, Username, Secret Reference)"
+            isTestingConnection = false
+            return
+        }
+        
+        do {
+            // Load config and create EmailController
+            let systemConfig = try await configManager.loadSystemConfig()
+            let emailConfig = try await configManager.loadEmailConfig()
+            let filesConfig = try await configManager.loadFilesConfig()
+            let contactsConfig = try await configManager.loadContactsConfig()
+            let imessageConfig = try await configManager.loadIMessageConfig()
+            
+            let havenConfig = ConfigConverter.toHavenConfig(
+                systemConfig: systemConfig,
+                emailConfig: emailConfig,
+                filesConfig: filesConfig,
+                contactsConfig: contactsConfig,
+                imessageConfig: imessageConfig
+            )
+            
+            let serviceController = ServiceController(configManager: configManager)
+            let emailController = try await EmailController(config: havenConfig, serviceController: serviceController)
+            
+            // Call direct Swift API
+            let result = await emailController.testConnection(
+                host: host,
+                port: port,
+                tls: tls,
+                username: username,
+                authKind: "app_password",
+                secretRef: secretRef
+            )
+            
+            if result.success, let folders = result.folders {
+                // Convert IMAP.ImapFolder to Haven.ImapFolder
+                availableFolders = folders.map { folder in
+                    Haven.ImapFolder(
+                        path: folder.path,
+                        delimiter: folder.delimiter,
+                        flags: folder.flags
+                    )
+                }
+                showFolderTree = true
+                connectionTestError = nil
+            } else {
+                connectionTestError = result.error ?? "Connection test failed"
+                showFolderTree = false
+            }
+        } catch {
+            connectionTestError = "Failed to test connection: \(error.localizedDescription)"
+            showFolderTree = false
+        }
+        
+        isTestingConnection = false
     }
 }
 

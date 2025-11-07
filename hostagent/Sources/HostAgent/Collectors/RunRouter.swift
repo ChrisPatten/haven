@@ -20,28 +20,7 @@ public struct RunRouter {
         
         let scopeValue = scopeData.value as? [String: Any] ?? [:]
         
-        // For iMessage: check OCR and Entity capabilities if requested
-        if let useOcr = scopeValue["use_ocr_on_attachments"] as? Bool, useOcr {
-            if !config.modules.ocr.enabled {
-                let errorMsg = "OCR module is disabled but use_ocr_on_attachments=true. Enable modules.ocr in hostagent.yaml"
-                return HTTPResponse(
-                    statusCode: 412,
-                    headers: ["Content-Type": "application/json"],
-                    body: #"{"error":"Precondition Failed","message":"\#(errorMsg)"}"#.data(using: .utf8)
-                )
-            }
-        }
-        
-        if let extractEntities = scopeValue["extract_entities"] as? Bool, extractEntities {
-            if !config.modules.entity.enabled {
-                let errorMsg = "Entity module is disabled but extract_entities=true. Enable modules.entity in hostagent.yaml"
-                return HTTPResponse(
-                    statusCode: 412,
-                    headers: ["Content-Type": "application/json"],
-                    body: #"{"error":"Precondition Failed","message":"\#(errorMsg)"}"#.data(using: .utf8)
-                )
-            }
-        }
+        // OCR and Entity modules are always enabled
         
         return nil  // All checks passed
     }

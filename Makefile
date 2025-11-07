@@ -1,41 +1,22 @@
 # Makefile for common development tasks
 
-.PHONY: help rebuild purge local_setup start restart stop collector backup restore list-backups export-openapi docs build-ui run-ui
+.PHONY: help rebuild purge local_setup start restart stop collector backup restore list-backups export-openapi docs build-haven run-haven
 
 LIMIT ?= 1
 
+## Show available make targets and their descriptions
 help:
-	@echo "Available targets:"
-	@echo "  help                      Show this help"
-	@echo "  local_setup               Create/activate virtualenv and install local_requirements.txt"
-	@echo "  start                     Start docker compose services"
-	@echo "  stop                      Stop docker compose services"
-	@echo "  restart                   Restart docker compose services"
-	@echo "  rebuild [SERVICE]         Rebuild docker compose services (no-cache) and follow logs"
-	@echo "                            Optional: specify SERVICE to rebuild only that service"
-	@echo "  purge                     Stop compose and remove volumes; remove local caches"
-	@echo "  export-openapi            Export Gateway OpenAPI schema to openapi/gateway.yaml for Redoc"
-	@echo "  docs                      Serve MkDocs documentation at http://127.0.0.1:8000"
-	@echo "                            Optional: DOC_HOST, DOC_PORT, DOC_SITE_PATH, OPEN_BROWSER=false"
-	@echo "                            Example: DOC_PORT=8001 make docs"
-	@echo "  backup [NAME]             Create a backup of Docker volumes and state files"
-	@echo "                            Optional: specify NAME for custom backup name"
-	@echo "                            Example: make backup NAME=before-migration"
-	@echo "  restore <name>            Restore from a backup (prompts for confirmation)"
-	@echo "                            Example: make restore NAME=before-migration"
-	@echo "  list-backups              List all available backups with details"
-	@echo "  peek [TYPE=<type>] [LIMIT=<n>]  Show the last N records (default: 1)"
-	@echo "                           TYPE can be: email, imessage, contact (default: all documents)"
-	@echo "  logs					   Tail the docker compose logs"
-	@echo "  build-ui                  Build HavenUI.app for macOS"
-	@echo "  run-ui                    Run HavenUI menu bar app locally (requires hostagent running)"
-	@echo "  hostagent-fresh           Runs make purge, make start,and make -C hostagent run"
-	@echo "  hostagent-install          Installs hostagent binary to /usr/local/bin"
-	@echo "  hostagent-run              Runs hostagent binary"
+	@echo "Haven Make targets:"
+	@awk -F':' ' \
+		/^[a-zA-Z0-9_.-]+:/ { \
+			gsub(/:.*/, "", $$1); tgt=$$1; \
+			if (prev ~ /^##/) { \
+				gsub(/^##[ ]?/, "", prev); \
+				printf "  %-20s %s\n", tgt, prev; \
+			} \
+		} { prev=$$0 }' $(MAKEFILE_LIST)
 	
-# Rebuild docker compose services from scratch, start detached, and follow logs
-# Usage: make rebuild [SERVICE]
-# Example: make rebuild gateway (rebuilds only gateway service)
+## Rebuild docker compose services from scratch, start detached, and follow logs. Optional: specify SERVICE to rebuild only that service
 rebuild:
 	@if [ -n "$(filter-out rebuild,$(MAKECMDGOALS))" ]; then \
 		SERVICE="$(filter-out rebuild,$(MAKECMDGOALS))"; \
@@ -56,7 +37,7 @@ rebuild:
 %:
 	@:
 
-# Remove containers, networks, volumes created by compose and clear ~/.haven
+## Stop compose and remove volumes; remove local caches
 purge:
 	@echo "Removing all data from the database..."
 	@docker compose down -v
@@ -69,8 +50,7 @@ purge:
 		rm -rf ~/Library/Caches/Haven/remote_mail/; \
 	fi
 
-# Create or activate local Python virtualenv in ./env and install local_requirements.txt
-# Usage: make local_setup
+## Create or activate local Python virtualenv in ./env and install local_requirements.txt
 local_setup:
 	@if [ -x ./env/bin/python ]; then \
 		echo "Using existing virtualenv at ./env"; \
@@ -80,25 +60,27 @@ local_setup:
 	@./env/bin/pip install -U pip setuptools wheel
 	@./env/bin/pip install -r local_requirements.txt
 
-# Start docker compose in detached mode and follow logs
+## Start docker compose services
 start:
 	@docker compose up -d
 
-logs:
+## Tail the docker compose logs
+docker-logs:
 	@docker compose logs -f
 
-# Stop docker compose services
+## Tail the Haven.app logs
+haven-logs:
+	@tail -f ~/Library/Logs/Haven/hostagent.log
+
+## Stop docker compose services
 stop:
 	@docker compose stop
 
-# Restart running compose services
+## Restart docker compose services
 restart:
 	@docker compose restart
 
-# Create a backup of Docker volumes and state files
-# Usage: make backup [NAME=<name>]
-# Example: make backup
-# Example: make backup NAME=before-migration
+## Create a backup of Docker volumes and state files. Optional: specify NAME for custom backup name
 backup:
 	@if [ -n "$(NAME)" ]; then \
 		./scripts/backup.sh "$(NAME)"; \
@@ -106,9 +88,7 @@ backup:
 		./scripts/backup.sh; \
 	fi
 
-# Restore from a backup (prompts for confirmation)
-# Usage: make restore NAME=<backup_name>
-# Example: make restore NAME=before-migration
+## Restore from a backup (prompts for confirmation). Usage: make restore NAME=<backup_name>
 restore:
 	@if [ -z "$(NAME)" ]; then \
 		echo "Error: Please specify a backup name"; \
@@ -120,13 +100,11 @@ restore:
 	fi
 	@./scripts/restore.sh "$(NAME)"
 
-# List all available backups with details
+## List all available backups with details
 list-backups:
 	@./scripts/list-backups.sh
 
-# Export Gateway OpenAPI schema to openapi/gateway.yaml for Redoc
-# This extracts the live schema from the FastAPI app so all routes are documented
-# Tries running container first, falls back to transient container
+## Export Gateway OpenAPI schema to openapi/gateway.yaml for Redoc. Extracts live schema from FastAPI app
 export-openapi:
 	@echo "Exporting Gateway OpenAPI schema..."
 	@if docker compose ps gateway | grep -q "Up"; then \
@@ -138,21 +116,21 @@ export-openapi:
 	fi
 	@echo "✓ OpenAPI schema exported to openapi/gateway.yaml"
 
-# Serve the MkDocs documentation locally. Prefers ./env/bin/mkdocs (virtualenv),
-# falls back to system `mkdocs`. Opens the default browser on macOS unless
-# OPEN_BROWSER=false is specified. Example: make docs OPEN_BROWSER=false
+## Serve MkDocs documentation locally. Optional: DOC_HOST, DOC_PORT, DOC_SITE_PATH, OPEN_BROWSER=false
 docs:
 	@./scripts/serve_docs.sh
 
-# Install git hooks from .githooks directory into .git/hooks
+## Install git hooks from .githooks directory into .git/hooks
 .githooks/install-hooks:
 	@echo "Installing git hooks from .githooks to .git/hooks"
 	@mkdir -p .git/hooks
 	@cp -R .githooks/* .git/hooks/
 	@chmod +x .git/hooks/* || true
 
+## Install git hooks from .githooks directory into .git/hooks
 install-hooks: .githooks/install-hooks
 
+## Show the last N records. Optional: TYPE=<type> LIMIT=<n>. TYPE can be: email, imessage, contact
 peek:
 	@if [ -z "$(TYPE)" ]; then \
 		docker compose exec postgres psql -U postgres -d haven -t -c "SELECT text FROM documents ORDER BY ingested_at DESC LIMIT $(LIMIT);"; \
@@ -167,27 +145,33 @@ peek:
 		exit 1; \
 	fi
 
-hostagent-fresh:
-	@make purge
-	@make start
-	@make -C hostagent run
-
+## Update Beads and beads-mcp tools
 upgrade-beads:
 	@echo "Updating Beads and beads-mcp"
 	@brew upgrade bd
 	@uv tool upgrade beads-mcp
 	@bd migrate
 
-build-ui:
-	@echo "Building HavenUI..."
-	@cd HavenUI && swift build -c release
+## Build Haven.app using AppleScript to tell Xcode to build
+build-haven:
+	@echo "Building Haven.app with Xcode..."
+	@osascript -e 'tell application "Xcode"' \
+		-e 'set projectPath to POSIX file "$(PWD)/Haven/Haven.xcodeproj"' \
+		-e 'open projectPath' \
+		-e 'delay 2' \
+		-e 'tell workspace document 1' \
+		-e 'build' \
+		-e 'end tell' \
+		-e 'end tell'
 
-run-ui:
-	@echo "Running HavenUI menu bar app..."
-	@cd HavenUI && swift run -c debug HavenUI
-
-hostagent-install:
-	@make -C hostagent install
-
-hostagent-run:
-	@make -C hostagent run
+## Find the built Haven.app in DerivedData, and open it
+run-haven:
+	@echo "Finding Haven.app bundle..."
+	@APP_PATH=$$(find ~/Library/Developer/Xcode/DerivedData -name "Haven" -path "*/Haven.app/Contents/MacOS/Haven" 2>/dev/null | head -1); \
+	if [ -z "$$APP_PATH" ]; then \
+		echo "Error: Could not find Haven.app bundle"; \
+		exit 1; \
+	fi; \
+	APP_BUNDLE=$$(dirname $$(dirname $$(dirname $$APP_PATH))); \
+	echo "Opening $$APP_BUNDLE"; \
+	open "$$APP_BUNDLE"

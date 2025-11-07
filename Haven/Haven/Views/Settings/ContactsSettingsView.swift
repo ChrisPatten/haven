@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AppKit
+import Contacts
 
 /// Contacts settings view for managing contact source instances
 struct ContactsSettingsView: View {
@@ -18,17 +19,12 @@ struct ContactsSettingsView: View {
     @State private var selectedInstance: ContactsInstance.ID?
     @State private var showingAddSheet = false
     @State private var showingEditSheet = false
+    @State private var contactsPermissionGranted: Bool = true
     
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
             HStack {
-                Button("Validate Contacts Access") {
-                    validateContactsAccess()
-                }
-                .buttonStyle(.bordered)
-                .disabled(true) // TODO: Backend endpoint not yet implemented
-                
                 Button("Add vcard Source") {
                     showingAddSheet = true
                 }
@@ -43,21 +39,14 @@ struct ContactsSettingsView: View {
             }
             .padding()
             
-            // Info banner for disabled validation
-            HStack(spacing: 8) {
-                Image(systemName: "info.circle")
-                    .foregroundColor(.orange)
-                    .font(.caption)
-                Text("Contacts access validation not yet available. Backend endpoint implementation pending.")
-                    .foregroundColor(.secondary)
-                    .font(.caption)
-                Spacer()
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .background(Color.orange.opacity(0.1))
-            
             Divider()
+            
+            // Contacts permission banner
+            if !contactsPermissionGranted {
+                ContactsPermissionBanner(contactsPermissionGranted: $contactsPermissionGranted)
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+            }
             
             // Table view
             if instances.isEmpty {
@@ -88,6 +77,13 @@ struct ContactsSettingsView: View {
                                 if let index = instances.firstIndex(where: { $0.id == instance.id }) {
                                     instances[index].enabled = newValue
                                     updateConfiguration()
+                                    
+                                    // Check contacts permission when macOS Contacts instance is enabled
+                                    if instance.sourceType == .macOSContacts && newValue {
+                                        Task {
+                                            await checkContactsPermission()
+                                        }
+                                    }
                                 }
                             }
                         ))
@@ -124,6 +120,13 @@ struct ContactsSettingsView: View {
                         if let index = instances.firstIndex(where: { $0.id == updatedInstance.id }) {
                             instances[index] = updatedInstance
                             updateConfiguration()
+                            
+                            // Check contacts permission when macOS Contacts instance is enabled
+                            if updatedInstance.sourceType == .macOSContacts && updatedInstance.enabled {
+                                Task {
+                                    await checkContactsPermission()
+                                }
+                            }
                         }
                     }
                 )
@@ -131,6 +134,12 @@ struct ContactsSettingsView: View {
         }
         .onAppear {
             loadConfiguration()
+            // Check permission on appear if macOS Contacts instance is enabled
+            if instances.contains(where: { $0.sourceType == .macOSContacts && $0.enabled }) {
+                Task {
+                    await checkContactsPermission()
+                }
+            }
         }
         .onChange(of: selectedInstance) { _, newValue in
             // Only auto-open edit sheet if selected from table row click, not from pencil button
@@ -138,10 +147,11 @@ struct ContactsSettingsView: View {
         }
     }
     
-    private func validateContactsAccess() {
-        // TODO: Implement actual Contacts access validation
-        // Backend endpoint: GET /v1/contacts/validate-access
-        // This function is disabled until backend implementation is complete
+    private func checkContactsPermission() async {
+        let hasPermission = ContactsPermissionChecker.checkContactsPermission()
+        await MainActor.run {
+            contactsPermissionGranted = hasPermission
+        }
     }
     
     private func loadConfiguration() {
@@ -186,6 +196,105 @@ struct ContactsSettingsView: View {
         instances.removeAll { $0.id == selectedId }
         selectedInstance = nil
         updateConfiguration()
+    }
+}
+
+// MARK: - Contacts Permission Banner
+
+struct ContactsPermissionBanner: View {
+    @Binding var contactsPermissionGranted: Bool
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.title3)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Contacts Permission Required")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                
+                Text("Haven needs access to your contacts to sync them. Click the button below to request access.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            
+            Spacer()
+            
+            Button(action: {
+                Task { @MainActor in
+                    await requestContactsPermission()
+                }
+            }) {
+                Label("Request Access", systemImage: "hand.raised.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background {
+            Color.orange.opacity(0.1)
+        }
+    }
+    
+    @MainActor
+    private func requestContactsPermission() async {
+        // Check current status
+        let authStatus = CNContactStore.authorizationStatus(for: .contacts)
+        
+        // Handle different authorization states
+        switch authStatus {
+        case .authorized:
+            // Already authorized
+            contactsPermissionGranted = true
+            return
+            
+        case .notDetermined:
+            // Request permission - this will show the native dialog
+            let store = CNContactStore()
+            do {
+                let granted = try await store.requestAccess(for: .contacts)
+                contactsPermissionGranted = granted
+                
+                // Re-check status after request to ensure it's updated
+                let newStatus = CNContactStore.authorizationStatus(for: .contacts)
+                contactsPermissionGranted = (newStatus == .authorized)
+            } catch {
+                // If request fails, check if we need to open System Settings
+                let currentStatus = CNContactStore.authorizationStatus(for: .contacts)
+                if currentStatus == .denied || currentStatus == .restricted {
+                    openSystemSettings()
+                }
+                contactsPermissionGranted = false
+            }
+            
+        case .denied, .restricted:
+            // Permission was previously denied or restricted - must go to System Settings
+            openSystemSettings()
+            
+        @unknown default:
+            contactsPermissionGranted = false
+        }
+    }
+    
+    private func openSystemSettings() {
+        // Deep link to Contacts privacy settings pane
+        // This URL scheme works for both System Preferences (macOS Monterey and earlier)
+        // and System Settings (macOS Ventura+)
+        let urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_Contacts"
+        
+        guard let url = URL(string: urlString) else {
+            // Fallback: try to open System Settings app directly
+            if let settingsURL = URL(string: "x-apple.systempreferences:") {
+                NSWorkspace.shared.open(settingsURL)
+            }
+            return
+        }
+        
+        // Open the deep link to Contacts privacy settings
+        NSWorkspace.shared.open(url)
     }
 }
 

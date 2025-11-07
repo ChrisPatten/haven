@@ -72,8 +72,27 @@ struct CollectorListSidebar: View {
     }
     
     private func collectorsInCategory(_ categoryId: String) -> [CollectorInfo] {
-        collectors.filter { $0.category == categoryId }
-            .sorted { $0.displayName < $1.displayName }
+        collectors.filter { collector in
+            // Only show collectors that match the category
+            guard collector.category == categoryId else { return false }
+            
+            // For IMAP, files, and contacts collectors (including instance-specific ones),
+            // only show if they're enabled (configured)
+            // iMessage should always be shown regardless of enabled state
+            if collector.id == "email_imap" || collector.id.hasPrefix("email_imap:") {
+                return collector.enabled
+            }
+            if collector.id == "localfs" || collector.id.hasPrefix("localfs:") {
+                return collector.enabled
+            }
+            if collector.id == "contacts" || collector.id.hasPrefix("contacts:") {
+                return collector.enabled
+            }
+            
+            // Show all other collectors (including iMessage)
+            return true
+        }
+        .sorted { $0.displayName < $1.displayName }
     }
 }
 

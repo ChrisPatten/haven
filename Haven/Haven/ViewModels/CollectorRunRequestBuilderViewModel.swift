@@ -7,12 +7,13 @@
 
 import Foundation
 import Combine
+import HostAgentEmail
 
 /// View model for managing collector run request configuration state
 @MainActor
 class CollectorRunRequestBuilderViewModel: ObservableObject {
     let collector: CollectorInfo
-    private let hostAgentController: HostAgentController
+    let hostAgentController: HostAgentController
     
     // Run settings
     @Published var mode: RunMode = .real
@@ -59,6 +60,13 @@ class CollectorRunRequestBuilderViewModel: ObservableObject {
     init(collector: CollectorInfo, hostAgentController: HostAgentController) {
         self.collector = collector
         self.hostAgentController = hostAgentController
+        
+        // Set collector-specific defaults
+        if collector.id == "imessage" || collector.id == "email_imap" {
+            batch = true
+            batchSize = "200"
+            order = .desc
+        }
     }
     
     // MARK: - Load Settings
@@ -77,6 +85,7 @@ class CollectorRunRequestBuilderViewModel: ObservableObject {
         
         guard let data = UserDefaults.standard.data(forKey: key),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // No persisted settings - use collector-specific defaults (already set in init)
             return
         }
         
@@ -194,73 +203,94 @@ class CollectorRunRequestBuilderViewModel: ObservableObject {
     
     // MARK: - Build Payload
     
-    func buildPayload() -> CollectorRunRequest {
-        var request = CollectorRunRequest()
+    func buildPayload() -> HostAgentEmail.CollectorRunRequest {
+        // Convert to HostAgentEmail.CollectorRunRequest using initializer
         
-        request.mode = mode.rawValue
-        request.order = order.rawValue
-        request.limit = Int(limit).flatMap { $0 > 0 ? $0 : nil }
-        request.concurrency = Int(concurrency).flatMap { $0 > 0 ? min(max($0, 1), 12) : nil }
+        // Mode
+        let modeEnum: HostAgentEmail.CollectorRunRequest.Mode? = HostAgentEmail.CollectorRunRequest.Mode(rawValue: mode.rawValue)
+        
+        // Order
+        let orderEnum: HostAgentEmail.CollectorRunRequest.Order? = HostAgentEmail.CollectorRunRequest.Order(rawValue: order.rawValue)
+        
+        // Limit and concurrency
+        let limitValue = Int(limit).flatMap { $0 > 0 ? $0 : nil }
+        let concurrencyValue = Int(concurrency).flatMap { $0 > 0 ? min(max($0, 1), 12) : nil }
         
         // Date range or time window
+        var dateRangeValue: HostAgentEmail.CollectorRunRequest.DateRange? = nil
+        var timeWindowValue: String? = nil
         if useDateRange {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            
-            var dateRange = CollectorRunRequest.DateRange()
-            if let since = sinceDate {
-                dateRange.since = formatter.string(from: since)
-            }
-            if let until = untilDate {
-                dateRange.until = formatter.string(from: until)
-            }
-            if dateRange.since != nil || dateRange.until != nil {
-                request.date_range = dateRange
-            }
+            dateRangeValue = HostAgentEmail.CollectorRunRequest.DateRange(since: sinceDate, until: untilDate)
         } else if useTimeWindow, !timeWindow.isEmpty {
-            request.time_window = timeWindow
+            timeWindowValue = timeWindow
         }
         
         // Filters
+        var filterConfigValue: HostAgentEmail.CollectorRunRequest.FiltersConfig? = nil
         if showFilters {
-            var filterConfig = CollectorRunRequest.FilterConfig()
-            filterConfig.combination_mode = filterCombinationMode
-            filterConfig.default_action = filterDefaultAction
+            var inlineArray: [HostAgentEmail.AnyCodable]? = nil
             if !filterInline.isEmpty {
-                filterConfig.inline = filterInline
+                // Convert inline filter string to AnyCodable array
+                if let data = filterInline.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data),
+                   let array = json as? [Any] {
+                    inlineArray = array.map { HostAgentEmail.AnyCodable($0) }
+                }
             }
-            if !filterFiles.isEmpty {
-                filterConfig.files = filterFiles
-            }
-            if !filterEnvVar.isEmpty {
-                filterConfig.environment_variable = filterEnvVar
-            }
-            request.filters = filterConfig
+            filterConfigValue = HostAgentEmail.CollectorRunRequest.FiltersConfig(
+                combinationMode: filterCombinationMode,
+                defaultAction: filterDefaultAction,
+                inline: inlineArray,
+                files: filterFiles.isEmpty ? nil : filterFiles,
+                environmentVariable: filterEnvVar.isEmpty ? nil : filterEnvVar
+            )
         }
         
         // Redaction override
-        if showRedaction, !redactionOverrides.isEmpty {
-            request.redaction_override = redactionOverrides
-        }
+        let redactionOverrideValue: HostAgentEmail.CollectorRunRequest.RedactionOverride? = showRedaction && !redactionOverrides.isEmpty ? HostAgentEmail.CollectorRunRequest.RedactionOverride(raw: redactionOverrides) : nil
         
-        // Scope
+        // Scope - convert from Haven.AnyCodable to HostAgentEmail.AnyCodable
+        var scopeValue: HostAgentEmail.AnyCodable? = nil
         if !scopeData.isEmpty {
-            request.scope = scopeData
+            var scopeDict: [String: HostAgentEmail.AnyCodable] = [:]
+            for (key, value) in scopeData {
+                switch value {
+                case .string(let s):
+                    scopeDict[key] = HostAgentEmail.AnyCodable(s)
+                case .int(let i):
+                    scopeDict[key] = HostAgentEmail.AnyCodable(i)
+                case .double(let d):
+                    scopeDict[key] = HostAgentEmail.AnyCodable(d)
+                case .bool(let b):
+                    scopeDict[key] = HostAgentEmail.AnyCodable(b)
+                case .null:
+                    scopeDict[key] = HostAgentEmail.AnyCodable(NSNull())
+                }
+            }
+            scopeValue = HostAgentEmail.AnyCodable(scopeDict)
         }
         
-        // Response settings
-        request.wait_for_completion = waitForCompletion
-        if let timeoutInt = Int(timeoutMs), timeoutInt > 0 {
-            request.timeout_ms = timeoutInt
-        }
-        
-        return request
+        // Build request using initializer
+        return HostAgentEmail.CollectorRunRequest(
+            mode: modeEnum,
+            limit: limitValue,
+            order: orderEnum,
+            concurrency: concurrencyValue,
+            dateRange: dateRangeValue,
+            timeWindow: timeWindowValue,
+            batch: batch ? batch : nil,
+            batchSize: Int(batchSize).flatMap { $0 > 0 ? $0 : nil },
+            redactionOverride: redactionOverrideValue,
+            filters: filterConfigValue,
+            scope: scopeValue
+        )
     }
     
     func updatePreview() {
         let request = buildPayload()
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
+        encoder.dateEncodingStrategy = .iso8601
         if let data = try? encoder.encode(request),
            let jsonString = String(data: data, encoding: .utf8) {
             previewJSON = jsonString
@@ -271,7 +301,7 @@ class CollectorRunRequestBuilderViewModel: ObservableObject {
     
     // MARK: - Run Collector
     
-    func runCollector() async throws -> RunResponse {
+    func runCollector() async throws -> HostAgentEmail.RunResponse {
         let request = buildPayload()
         return try await hostAgentController.runCollector(id: collector.id, request: request)
     }

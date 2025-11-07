@@ -11,9 +11,12 @@ struct CollectorDetailView: View {
     let collector: CollectorInfo?
     let isRunning: Bool
     let lastRunStats: CollectorStateResponse?
+    let jobProgress: JobProgress?
     let onRunNow: () -> Void
     let onRunWithOptions: () -> Void
     let onViewHistory: () -> Void
+    let onCancel: (() -> Void)?
+    let onReset: (() -> Void)?
     
     var body: some View {
         if let collector = collector {
@@ -116,37 +119,110 @@ struct CollectorDetailView: View {
             Text("Quick Actions")
                 .font(.headline)
             
-            HStack(spacing: 12) {
-                Button(action: onRunNow) {
-                    Label("Run Now", systemImage: "play.fill")
+            if isRunning {
+                // Show cancel button when running
+                Button(action: {
+                    onCancel?()
+                }) {
+                    Label("Cancel", systemImage: "stop.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isRunning)
+                .tint(.red)
                 
-                Button(action: onRunWithOptions) {
-                    Label("Run with Options...", systemImage: "slider.horizontal.3")
-                        .frame(maxWidth: .infinity)
+                // Progress bar section
+                if let progress = jobProgress, progress.total != nil && progress.total! > 0 {
+                    VStack(alignment: .leading, spacing: 8) {
+                        // Progress bar
+                        ProgressView(value: progress.overallProgress ?? 0.0)
+                            .progressViewStyle(.linear)
+                        
+                        // Progress text
+                        HStack {
+                            Text("Processing messages...")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            
+                            Spacer()
+                            
+                            if let total = progress.total {
+                                Text("\(progress.submitted) / \(total)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                
+                                if let overallProgress = progress.overallProgress {
+                                    Text("(\(Int(overallProgress * 100))%)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.top, 8)
+                } else {
+                    // Fallback progress indicator when total is not available
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Collector is running...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 4)
                 }
-                .buttonStyle(.bordered)
-                .disabled(isRunning)
-                
-                Button(action: onViewHistory) {
-                    Label("View History", systemImage: "clock.arrow.circlepath")
-                        .frame(maxWidth: .infinity)
+            } else {
+                // Show run buttons when not running
+                VStack(spacing: 12) {
+                    // Show message if collector is disabled
+                    if let collector = collector, !collector.enabled {
+                        HStack(spacing: 8) {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundStyle(.orange)
+                            Text(disabledMessage(for: collector))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(Color.orange.opacity(0.1))
+                        .cornerRadius(8)
+                    }
+                    
+                    HStack(spacing: 12) {
+                        Button(action: onRunNow) {
+                            Label("Run Now", systemImage: "play.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(collector?.enabled == false)
+                        
+                        Button(action: onRunWithOptions) {
+                            Label("Run with Options...", systemImage: "slider.horizontal.3")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(collector?.enabled == false)
+                        
+                        Button(action: onViewHistory) {
+                            Label("View History", systemImage: "clock.arrow.circlepath")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(collector?.enabled == false)
+                    }
+                    
+                    // Reset button
+                    if let onReset = onReset {
+                        Button(action: onReset) {
+                            Label("Reset Collector", systemImage: "arrow.counterclockwise")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.orange)
+                        .disabled(collector?.enabled == false)
+                    }
                 }
-                .buttonStyle(.bordered)
-            }
-            
-            if isRunning {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                    Text("Collector is running...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.top, 4)
             }
         }
     }
@@ -180,6 +256,19 @@ struct CollectorDetailView: View {
             return "Partial"
         default:
             return "Never Run"
+        }
+    }
+    
+    private func disabledMessage(for collector: CollectorInfo) -> String {
+        switch collector.id {
+        case "email_imap":
+            return "No IMAP collector instances configured"
+        case "contacts":
+            return "No contacts collector instances configured"
+        case "localfs":
+            return "No files collector instances configured"
+        default:
+            return "Collector is disabled"
         }
     }
 }

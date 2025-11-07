@@ -108,13 +108,22 @@ public struct ModulesHandler {
 
 // MARK: - Response Models
 
-struct ModulesListResponse: Codable {
-    let imessage: IMessageModuleInfo
-    let ocr: OCRModuleInfo
-    let fswatch: FSWatchModuleInfo
-    let contacts: SimpleModuleInfo
-    let mail: SimpleModuleInfo
-    let face: SimpleModuleInfo
+public struct ModulesListResponse: Codable {
+    public let imessage: IMessageModuleInfo
+    public let ocr: OCRModuleInfo
+    public let fswatch: FSWatchModuleInfo
+    public let contacts: SimpleModuleInfo
+    public let mail: SimpleModuleInfo
+    public let face: SimpleModuleInfo
+    
+    public init(imessage: IMessageModuleInfo, ocr: OCRModuleInfo, fswatch: FSWatchModuleInfo, contacts: SimpleModuleInfo, mail: SimpleModuleInfo, face: SimpleModuleInfo) {
+        self.imessage = imessage
+        self.ocr = ocr
+        self.fswatch = fswatch
+        self.contacts = contacts
+        self.mail = mail
+        self.face = face
+    }
     
     enum CodingKeys: String, CodingKey {
         case imessage
@@ -126,27 +135,46 @@ struct ModulesListResponse: Codable {
     }
 }
 
-struct IMessageModuleInfo: Codable {
-    let enabled: Bool
-    let config: IMessageModuleConfig
+public struct IMessageModuleInfo: Codable {
+    public let enabled: Bool
+    public let config: IMessageModuleConfig
+    
+    public init(enabled: Bool, config: IMessageModuleConfig) {
+        self.enabled = enabled
+        self.config = config
+    }
 }
 
-struct IMessageModuleConfig: Codable {
-    let ocrEnabled: Bool
+public struct IMessageModuleConfig: Codable {
+    public let ocrEnabled: Bool
+    
+    public init(ocrEnabled: Bool) {
+        self.ocrEnabled = ocrEnabled
+    }
     
     enum CodingKeys: String, CodingKey {
         case ocrEnabled = "ocr_enabled"
     }
 }
 
-struct OCRModuleInfo: Codable {
-    let enabled: Bool
-    let config: OCRModuleConfigInfo
+public struct OCRModuleInfo: Codable {
+    public let enabled: Bool
+    public let config: OCRModuleConfigInfo
+    
+    public init(enabled: Bool, config: OCRModuleConfigInfo) {
+        self.enabled = enabled
+        self.config = config
+    }
 }
 
-struct OCRModuleConfigInfo: Codable {
-    let languages: [String]
-    let timeoutMs: Int
+public struct OCRModuleConfigInfo: Codable {
+    public let languages: [String]
+    public let timeoutMs: Int
+    
+    public init(languages: [String], timeoutMs: Int) {
+        self.languages = languages
+        self.timeoutMs = timeoutMs
+    }
     
     enum CodingKeys: String, CodingKey {
         case languages
@@ -154,31 +182,54 @@ struct OCRModuleConfigInfo: Codable {
     }
 }
 
-struct FSWatchModuleInfo: Codable {
-    let enabled: Bool
-    let config: FSWatchModuleConfigInfo
+public struct FSWatchModuleInfo: Codable {
+    public let enabled: Bool
+    public let config: FSWatchModuleConfigInfo
+    
+    public init(enabled: Bool, config: FSWatchModuleConfigInfo) {
+        self.enabled = enabled
+        self.config = config
+    }
 }
 
-struct FSWatchModuleConfigInfo: Codable {
-    let watches: [WatchInfo]
+public struct FSWatchModuleConfigInfo: Codable {
+    public let watches: [WatchInfo]
+    
+    public init(watches: [WatchInfo]) {
+        self.watches = watches
+    }
 }
 
-struct WatchInfo: Codable {
-    let id: String
-    let path: String
-    let glob: String
-    let target: String
-    let handoff: String
+public struct WatchInfo: Codable {
+    public let id: String
+    public let path: String
+    public let glob: String
+    public let target: String
+    public let handoff: String
+    
+    public init(id: String, path: String, glob: String, target: String, handoff: String) {
+        self.id = id
+        self.path = path
+        self.glob = glob
+        self.target = target
+        self.handoff = handoff
+    }
 }
 
-struct SimpleModuleInfo: Codable {
-    let enabled: Bool
+public struct SimpleModuleInfo: Codable {
+    public let enabled: Bool
+    
+    public init(enabled: Bool) {
+        self.enabled = enabled
+    }
 }
 
 // MARK: - Helper Types
 
 // Helper for decoding arbitrary JSON
-struct AnyCodable: Codable {
+// Note: This is a local helper for ModulesHandler only.
+// For public APIs, use HavenCore.AnyCodable instead.
+private struct AnyCodable: Codable {
     let value: Any
     
     init(_ value: Any) {

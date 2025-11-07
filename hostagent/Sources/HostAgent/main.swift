@@ -318,6 +318,9 @@ struct HavenHostAgent: AsyncParsableCommand {
             PatternRouteHandler(method: "POST", pattern: "/v1/email/is-noise") { req, ctx in
                 await emailHandler.handleIsNoise(request: req, context: ctx)
             },
+            PatternRouteHandler(method: "POST", pattern: "/v1/email/test-connection") { req, ctx in
+                await emailImapHandler.handleTestConnection(request: req, context: ctx)
+            },
         ]
         
         return Router(handlers: handlers)

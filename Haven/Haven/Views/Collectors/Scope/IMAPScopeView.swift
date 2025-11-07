@@ -10,6 +10,7 @@ import SwiftUI
 struct IMAPScopeView: View {
     let collector: CollectorInfo
     @Binding var scopeData: [String: AnyCodable]
+    let hostAgentController: HostAgentController?
     
     @State private var accountInfo: IMAPAccountInfo?
     @State private var selectedFolders: Set<String> = []
@@ -18,41 +19,77 @@ struct IMAPScopeView: View {
     @State private var folderError: String?
     @State private var testConnectionError: String?
     @State private var isTestingConnection = false
+    @State private var hasAccountsConfigured = false
+    @State private var isLoadingAccountCheck = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Account Info
-            if let accountId = collector.imapAccountId {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Account")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
+            // Show Add Account button if no accounts configured
+            if !hasAccountsConfigured && !isLoadingAccountCheck {
+                VStack(spacing: 12) {
+                    Image(systemName: "envelope.badge")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
                     
-                    if let account = accountInfo {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Account ID: \(account.id)")
+                    Text("No IMAP Accounts Configured")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    
+                    Text("Configure an IMAP account to start collecting email")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    
+                    Button(action: openEmailSettings) {
+                        Label("Add Account", systemImage: "plus.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 32)
+            } else if isLoadingAccountCheck {
+                VStack(spacing: 8) {
+                    ProgressView()
+                    Text("Checking account configuration...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 32)
+            } else {
+                // Account Info
+                if let accountId = collector.imapAccountId {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Account")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                        
+                        if let account = accountInfo {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Account ID: \(account.id)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                
+                                if let host = account.host {
+                                    Text("Host: \(host)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                
+                                if let username = account.username {
+                                    Text("Username: \(username)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        } else {
+                            Text("Account ID: \(accountId)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            
-                            if let host = account.host {
-                                Text("Host: \(host)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            
-                            if let username = account.username {
-                                Text("Username: \(username)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
                         }
-                    } else {
-                        Text("Account ID: \(accountId)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
-            }
             
             Divider()
             
@@ -146,11 +183,39 @@ struct IMAPScopeView: View {
                 .buttonStyle(.bordered)
                 .disabled(isTestingConnection)
             }
+            }
         }
         .onAppear {
+            checkAccountConfiguration()
             loadAccountInfo()
             loadSelectedFolders()
         }
+    }
+    
+    private func checkAccountConfiguration() {
+        guard let controller = hostAgentController else {
+            // If no controller provided, assume accounts are configured
+            hasAccountsConfigured = true
+            return
+        }
+        
+        isLoadingAccountCheck = true
+        Task {
+            let hasAccounts = await controller.hasImapSourcesConfigured()
+            await MainActor.run {
+                hasAccountsConfigured = hasAccounts
+                isLoadingAccountCheck = false
+            }
+        }
+    }
+    
+    private func openEmailSettings() {
+        // Post notification to open settings to Email section
+        // HavenApp will listen for this and open the settings window
+        NotificationCenter.default.post(
+            name: .openSettingsToSection,
+            object: SettingsWindow.SettingsSection.email
+        )
     }
     
     private func loadAccountInfo() {

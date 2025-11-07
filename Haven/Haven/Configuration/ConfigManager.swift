@@ -7,12 +7,13 @@
 //
 
 import Foundation
+import HavenCore
 
 /// Main configuration manager actor
 /// Handles loading and saving all configuration files atomically
 public actor ConfigManager {
     private let configDirectory: URL
-    private let logger = StubLogger(category: "config-manager")
+    private let logger = HavenLogger(category: "config-manager")
     
     // Cached configurations
     private var systemConfig: SystemConfig?

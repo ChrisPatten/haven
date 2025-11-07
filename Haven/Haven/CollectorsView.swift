@@ -9,6 +9,7 @@ import SwiftUI
 import AppKit
 import Combine
 import UserNotifications
+import HostAgentEmail
 
 struct CollectorsView: View {
     var appState: AppState
@@ -19,6 +20,8 @@ struct CollectorsView: View {
     @State private var runBuilderViewModel: CollectorRunRequestBuilderViewModel?
     @State private var showingRunConfiguration = false
     @State private var errorMessage: String?
+    @State private var collectorToReset: CollectorInfo?
+    @State private var showingResetConfirmation = false
     
     init(appState: AppState, hostAgentController: HostAgentController) {
         self.appState = appState
@@ -29,58 +32,77 @@ struct CollectorsView: View {
     }
     
     var body: some View {
-        NavigationSplitView {
-            // Sidebar
-            CollectorListSidebar(
-                collectors: $viewModel.collectors,
-                selectedCollectorId: $viewModel.selectedCollectorId,
-                isCollectorRunning: { collectorId in
-                    appState.isCollectorRunning(collectorId)
-                },
-                onRunAll: {
-                    Task {
-                        await runAllCollectors()
-                    }
-                },
-                isLoading: viewModel.isLoading
-            )
-            .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 300)
-        } detail: {
-            // Detail panel
-            if let collector = viewModel.getSelectedCollector() {
-                CollectorDetailView(
-                    collector: collector,
-                    isRunning: appState.isCollectorRunning(collector.id),
-                    lastRunStats: viewModel.collectorStates[collector.id],
-                    onRunNow: {
-                        runCollectorNow(collector)
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                // Sidebar
+                CollectorListSidebar(
+                    collectors: $viewModel.collectors,
+                    selectedCollectorId: $viewModel.selectedCollectorId,
+                    isCollectorRunning: { collectorId in
+                        appState.isCollectorRunning(collectorId)
                     },
-                    onRunWithOptions: {
-                        showRunConfiguration(collector)
+                    onRunAll: {
+                        Task {
+                            await runAllCollectors()
+                        }
                     },
-                    onViewHistory: {
-                        // TODO: Implement history view
-                        errorMessage = "History view not yet implemented"
-                    }
+                    isLoading: viewModel.isLoading
                 )
-            } else {
-                // Empty state
-                VStack(spacing: 16) {
-                    Image(systemName: "tray.and.arrow.down")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.secondary)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 300)
+            } detail: {
+                // Detail panel
+                if let collector = viewModel.getSelectedCollector() {
+                    // Get active job progress for this collector
+                    let activeJob = appState.activeJobs.values.first { $0.collectorId == collector.id && $0.status == .running }
+                    let jobProgress = activeJob?.progress
                     
-                    Text("Select a collector")
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                    
-                    Text("Choose a collector from the sidebar to view details and run configuration")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 300)
+                    CollectorDetailView(
+                        collector: collector,
+                        isRunning: appState.isCollectorRunning(collector.id),
+                        lastRunStats: viewModel.collectorStates[collector.id],
+                        jobProgress: jobProgress,
+                        onRunNow: {
+                            runCollectorNow(collector)
+                        },
+                        onRunWithOptions: {
+                            showRunConfiguration(collector)
+                        },
+                        onViewHistory: {
+                            // TODO: Implement history view
+                            errorMessage = "History view not yet implemented"
+                        },
+                        onCancel: {
+                            cancelCollector(collector)
+                        },
+                        onReset: {
+                            collectorToReset = collector
+                            showingResetConfirmation = true
+                        }
+                    )
+                } else {
+                    // Empty state
+                    VStack(spacing: 16) {
+                        Image(systemName: "tray.and.arrow.down")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.secondary)
+                        
+                        Text("Select a collector")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                        
+                        Text("Choose a collector from the sidebar to view details and run configuration")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 300)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            
+            // Full disk access banner
+            if !appState.fullDiskAccessGranted {
+                FullDiskAccessBanner()
             }
         }
         .toolbar {
@@ -109,6 +131,9 @@ struct CollectorsView: View {
                     collector: collector,
                     viewModel: runBuilderVM,
                     onRun: {
+                        // Dismiss modal immediately when run button is clicked
+                        showingRunConfiguration = false
+                        runBuilderViewModel = nil
                         runCollectorWithConfiguration(collector, viewModel: runBuilderVM)
                     },
                     onCancel: {
@@ -125,20 +150,73 @@ struct CollectorsView: View {
         } message: { message in
             Text(message)
         }
+        .confirmationDialog(
+            "Reset Collector",
+            isPresented: $showingResetConfirmation,
+            presenting: collectorToReset
+        ) { collector in
+            Button("Reset", role: .destructive) {
+                resetCollector(collector)
+            }
+            Button("Cancel", role: .cancel) {
+                collectorToReset = nil
+            }
+        } message: { collector in
+            Text("This will remove all state files and fences for \(collector.displayName). The collector will return to a fresh, never-run state. This action cannot be undone.")
+        }
         .onAppear {
             viewModel.startPolling()
         }
         .onDisappear {
             viewModel.stopPolling()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .settingsConfigSaved)) { _ in
+            // Refresh collectors immediately when settings are saved
+            viewModel.refreshCollectors()
+        }
     }
     
     // MARK: - Actions
     
     private func runCollectorNow(_ collector: CollectorInfo) {
+        // Prevent running disabled collectors
+        guard collector.enabled else {
+            let message: String
+            switch collector.id {
+            case "email_imap":
+                message = "IMAP collector is disabled. Please configure at least one IMAP source to enable it."
+            case "contacts":
+                message = "Contacts collector is disabled. Please configure at least one contacts instance to enable it."
+            case "localfs":
+                message = "Files collector is disabled. Please configure at least one files instance to enable it."
+            default:
+                message = "Collector is disabled and cannot be run."
+            }
+            errorMessage = message
+            return
+        }
+        
         Task {
             do {
-                let response = try await hostAgentController.runCollector(id: collector.id, request: nil)
+                // Create default request with collector-specific defaults
+                var request: HostAgentEmail.CollectorRunRequest? = nil
+                if collector.id == "imessage" || collector.id == "email_imap" {
+                    request = HostAgentEmail.CollectorRunRequest(
+                        mode: nil,
+                        limit: nil,
+                        order: .desc,
+                        concurrency: nil,
+                        dateRange: nil,
+                        timeWindow: nil,
+                        batch: true,
+                        batchSize: 200,
+                        redactionOverride: nil,
+                        filters: nil,
+                        scope: nil
+                    )
+                }
+                
+                let response = try await hostAgentController.runCollector(id: collector.id, request: request)
                 
                 // Save last run information
                 let lastRunTime = ISO8601DateFormatter().date(from: response.started_at) ?? Date()
@@ -176,6 +254,23 @@ struct CollectorsView: View {
     }
     
     private func showRunConfiguration(_ collector: CollectorInfo) {
+        // Prevent showing configuration for disabled collectors
+        guard collector.enabled else {
+            let message: String
+            switch collector.id {
+            case "email_imap":
+                message = "IMAP collector is disabled. Please configure at least one IMAP source to enable it."
+            case "contacts":
+                message = "Contacts collector is disabled. Please configure at least one contacts instance to enable it."
+            case "localfs":
+                message = "Files collector is disabled. Please configure at least one files instance to enable it."
+            default:
+                message = "Collector is disabled and cannot be run."
+            }
+            errorMessage = message
+            return
+        }
+        
         let vm = CollectorRunRequestBuilderViewModel(
             collector: collector,
             hostAgentController: hostAgentController
@@ -209,9 +304,6 @@ struct CollectorsView: View {
                 // Refresh collectors list
                 await self.viewModel.loadCollectors()
                 
-                // Close sheet
-                showingRunConfiguration = false
-                
                 // Show notification
                 showNotification(
                     title: collector.displayName,
@@ -231,6 +323,37 @@ struct CollectorsView: View {
         } catch {
             errorMessage = "Failed to run all collectors: \(error.localizedDescription)"
             appState.setError(error.localizedDescription)
+        }
+    }
+    
+    private func cancelCollector(_ collector: CollectorInfo) {
+        Task {
+            await hostAgentController.cancelCollector(id: collector.id)
+            await viewModel.loadCollectors()
+            
+            // Show notification
+            showNotification(
+                title: collector.displayName,
+                message: "Collector run cancelled"
+            )
+        }
+    }
+    
+    private func resetCollector(_ collector: CollectorInfo) {
+        Task {
+            do {
+                try await hostAgentController.resetCollector(id: collector.id)
+                await viewModel.loadCollectors()
+                
+                // Show notification
+                showNotification(
+                    title: collector.displayName,
+                    message: "Collector reset successfully"
+                )
+            } catch {
+                errorMessage = "Failed to reset collector: \(error.localizedDescription)"
+                appState.setError(error.localizedDescription)
+            }
         }
     }
     
@@ -290,6 +413,66 @@ struct CollectorsView: View {
                 print("📣 \(title): \(message)")
             }
         }
+    }
+}
+
+// MARK: - Full Disk Access Banner
+
+struct FullDiskAccessBanner: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.title3)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Full Disk Access Required")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                
+                Text("Haven needs Full Disk Access to collect data from your Mac. Click the button below to open System Settings and grant access.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            
+            Spacer()
+            
+            Button(action: {
+                openSystemSettings()
+            }) {
+                Label("Open Full Disk Access Settings", systemImage: "arrow.right.circle.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background {
+            Color.orange.opacity(0.1)
+        }
+        .overlay(alignment: .top) {
+            Divider()
+        }
+    }
+    
+    private func openSystemSettings() {
+        // Deep link to Full Disk Access settings pane
+        // This URL scheme works for both System Preferences (macOS Monterey and earlier)
+        // and System Settings (macOS Ventura+)
+        // The Privacy_AllFiles parameter opens directly to the Full Disk Access section
+        
+        let urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+        
+        guard let url = URL(string: urlString) else {
+            // Fallback: try to open System Settings app directly
+            if let settingsURL = URL(string: "x-apple.systempreferences:") {
+                NSWorkspace.shared.open(settingsURL)
+            }
+            return
+        }
+        
+        // Open the deep link to Full Disk Access settings
+        NSWorkspace.shared.open(url)
     }
 }
 

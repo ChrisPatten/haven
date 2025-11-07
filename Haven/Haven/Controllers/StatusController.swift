@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import HavenCore
 
 /// Response structure for status information
 public struct StatusResponse: Codable {
@@ -28,7 +29,7 @@ public struct StatusResponse: Codable {
 public actor StatusController {
     private let config: HavenConfig
     private let startTime: Date
-    private let logger = StubLogger(category: "status-controller")
+    private let logger = HavenLogger(category: "status-controller")
     
     public init(config: HavenConfig, startTime: Date = Date()) {
         self.config = config
@@ -72,47 +73,45 @@ public actor StatusController {
     private func buildModuleSummaries() -> [ModuleSummary] {
         var summaries: [ModuleSummary] = []
         
+        // All modules are always enabled - collectors are conditionally enabled based on instances
         // iMessage
         summaries.append(ModuleSummary(
             name: "imessage",
-            enabled: config.modules.imessage.enabled,
-            status: config.modules.imessage.enabled ? "ready" : "disabled",
+            enabled: true,
+            status: "ready",
             extraInfo: nil
         ))
         
         // OCR
         summaries.append(ModuleSummary(
             name: "ocr",
-            enabled: config.modules.ocr.enabled,
-            status: config.modules.ocr.enabled ? "ready" : "disabled",
+            enabled: true,
+            status: "ready",
             extraInfo: nil
         ))
         
         // FSWatch
         summaries.append(ModuleSummary(
             name: "fswatch",
-            enabled: config.modules.fswatch.enabled,
-            status: config.modules.fswatch.enabled ? "ready" : "disabled",
+            enabled: true,
+            status: "ready",
             extraInfo: ["watches_count": config.modules.fswatch.watches.count]
         ))
         
         // Face detection module
         summaries.append(ModuleSummary(
             name: "face",
-            enabled: config.modules.face.enabled,
-            status: config.modules.face.enabled ? "ready" : "disabled",
+            enabled: true,
+            status: "ready",
             extraInfo: nil
         ))
         
         // Stub and simple modules
-        for (name, enabled) in [
-            ("contacts", config.modules.contacts.enabled),
-            ("mail", config.modules.mail.enabled)
-        ] {
+        for name in ["contacts", "mail"] {
             summaries.append(ModuleSummary(
                 name: name,
-                enabled: enabled,
-                status: enabled ? "stub" : "disabled",
+                enabled: true,
+                status: "ready",
                 extraInfo: nil
             ))
         }

@@ -14,15 +14,6 @@ public struct FaceHandler {
     
     /// Handle face detection request
     public func handle(request: HTTPRequest) async -> HTTPResponse {
-        // Check if module is enabled
-        guard config.enabled else {
-            return HTTPResponse(
-                statusCode: 501,
-                headers: ["Content-Type": "application/json"],
-                body: formatError("Face detection module is disabled")
-            )
-        }
-        
         // Parse request body
         guard let body = request.body else {
             return HTTPResponse(

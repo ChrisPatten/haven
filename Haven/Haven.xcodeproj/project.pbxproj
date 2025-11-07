@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		A2CC177A2EBB93F500BA3D69 /* HavenCore in Frameworks */ = {isa = PBXBuildFile; productRef = A2CC17792EBB93F500BA3D69 /* HavenCore */; };
+		A2CC177C2EBB93F500BA3D72 /* HostHTTP in Frameworks */ = {isa = PBXBuildFile; productRef = A2CC177A2EBB93F500BA3D70 /* HostHTTP */; };
+		A2CC177D2EBB93F500BA3D73 /* HostAgentEmail in Frameworks */ = {isa = PBXBuildFile; productRef = A2CC177B2EBB93F500BA3D71 /* HostAgentEmail */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +59,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A2CC177A2EBB93F500BA3D69 /* HavenCore in Frameworks */,
+				A2CC177C2EBB93F500BA3D72 /* HostHTTP in Frameworks */,
+				A2CC177D2EBB93F500BA3D73 /* HostAgentEmail in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -118,6 +122,8 @@
 			name = Haven;
 			packageProductDependencies = (
 				A2CC17792EBB93F500BA3D69 /* HavenCore */,
+				A2CC177A2EBB93F500BA3D70 /* HostHTTP */,
+				A2CC177B2EBB93F500BA3D71 /* HostAgentEmail */,
 			);
 			productName = Haven;
 			productReference = A2CC17262EBAD71500BA3D69 /* Haven.app */;
@@ -404,10 +410,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSContactsUsageDescription = "Haven needs access to your contacts to sync them with your knowledge base.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -434,10 +441,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSContactsUsageDescription = "Haven needs access to your contacts to sync them with your knowledge base.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -584,6 +592,14 @@
 		A2CC17792EBB93F500BA3D69 /* HavenCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = HavenCore;
+		};
+		A2CC177A2EBB93F500BA3D70 /* HostHTTP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = HostHTTP;
+		};
+		A2CC177B2EBB93F500BA3D71 /* HostAgentEmail */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = HostAgentEmail;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

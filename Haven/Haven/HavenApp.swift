@@ -8,6 +8,12 @@
 import SwiftUI
 import AppKit
 
+extension Notification.Name {
+    static let openCollectorsWindow = Notification.Name("openCollectorsWindow")
+    static let openSettingsToSection = Notification.Name("openSettingsToSection")
+    static let settingsConfigSaved = Notification.Name("settingsConfigSaved")
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState?
     private var initialized = false
@@ -21,6 +27,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Set activation policy to regular so app appears in dock
         NSApplication.shared.setActivationPolicy(.regular)
+        
+        // Check for full disk access on startup
+        Task {
+            await checkFullDiskAccess()
+        }
+        
+        // Note: Collectors window opening is handled by the .task modifier in HavenApp
+        // No need to post notification here to avoid duplicate opening
+    }
+    
+    @MainActor
+    private func checkFullDiskAccess() async {
+        // Run the check on a background queue to avoid blocking
+        let hasAccess = await Task.detached(priority: .userInitiated) {
+            FullDiskAccessChecker.checkFullDiskAccess()
+        }.value
+        
+        appState?.setFullDiskAccessGranted(hasAccess)
     }
     
     func applicationWillTerminate(_ notification: Notification) {
@@ -34,6 +58,7 @@ struct HavenApp: App {
     @StateObject private var hostAgentController: HostAgentController
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
+    @State private var hasOpenedCollectorsWindowOnLaunch = false
 
     init() {
         let appState = AppState()
@@ -55,6 +80,27 @@ struct HavenApp: App {
                 stopAction: stopHostAgent,
                 runAllAction: runAllCollectors
             )
+            .task {
+                // Automatically open collectors window on launch (only once)
+                guard !hasOpenedCollectorsWindowOnLaunch else { return }
+                
+                // Use a small delay to ensure app is fully initialized
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                
+                // Mark as opened and open the window
+                hasOpenedCollectorsWindowOnLaunch = true
+                openOrFocusCollectors()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openCollectorsWindow)) { _ in
+                // Only open if we haven't already opened on launch, or if explicitly requested
+                // This allows manual opening via notification
+                openOrFocusCollectors()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openSettingsToSection)) { notification in
+                if let section = notification.object as? SettingsWindow.SettingsSection {
+                    openOrFocusSettings(to: section)
+                }
+            }
         } label: {
             // Custom colored icon instead of systemImage
             Image(systemName: "circle.fill")
@@ -210,9 +256,14 @@ struct HavenApp: App {
         }
     }
     
-    private func openOrFocusSettings() {
+    private func openOrFocusSettings(to section: SettingsWindow.SettingsSection? = nil) {
         // Activate the app first to ensure it comes to foreground
         NSApplication.shared.activate(ignoringOtherApps: true)
+        
+        // Post notification if a specific section is requested
+        if let section = section {
+            NotificationCenter.default.post(name: .openSettingsToSection, object: section)
+        }
         
         // Check if settings window already exists
         if let existingWindow = NSApplication.shared.windows.first(where: { window in

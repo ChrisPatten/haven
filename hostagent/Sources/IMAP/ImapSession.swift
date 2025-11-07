@@ -2,6 +2,18 @@ import Foundation
 import MailCore
 import HavenCore
 
+public struct ImapFolder: Sendable, Codable {
+    public let path: String
+    public let delimiter: String
+    public let flags: [String]
+    
+    public init(path: String, delimiter: String, flags: [String]) {
+        self.path = path
+        self.delimiter = delimiter
+        self.flags = flags
+    }
+}
+
 public enum ImapSessionError: Error, LocalizedError {
     case invalidSecretReference(String)
     case secretNotFound(String)
@@ -183,6 +195,39 @@ public actor ImapSession {
         }
     }
     
+    /// Fetch multiple RFC822 messages concurrently in a batch operation
+    /// Returns a dictionary mapping UID to message data
+    /// Each individual fetch respects the semaphore concurrency limits
+    public func fetchRFC822Batch(folder: String, uids: [UInt32]) async throws -> [UInt32: Data] {
+        guard !uids.isEmpty else { return [:] }
+        
+        return try await retryPolicy.execute { [self] attempt in
+            logger.debug("Fetching RFC822 messages batch", metadata: [
+                "folder": folder,
+                "count": "\(uids.count)",
+                "attempt": "\(attempt)"
+            ])
+            return try await performFetchBatch(folder: folder, uids: uids)
+        }
+    }
+    
+    public func listFolders() async throws -> [ImapFolder] {
+        logger.debug("Listing IMAP folders")
+        
+        return try await retryPolicy.execute { [self] attempt in
+            guard let operation = session.fetchAllFoldersOperation() else {
+                throw ImapSessionError.fetchFailed("Failed to create folder list operation", code: nil, domain: "client")
+            }
+            
+            let folders = try await startFolderListOperation(operation)
+            logger.debug("IMAP folder list completed", metadata: [
+                "attempt": "\(attempt)",
+                "found": "\(folders.count)"
+            ])
+            return folders
+        }
+    }
+    
     // MARK: - Private
 
     private func performSearch(folder: String, expression: MCOIMAPSearchExpression) async throws -> MCOIndexSet {
@@ -203,6 +248,37 @@ public actor ImapSession {
             throw ImapSessionError.fetchFailed("Failed to create fetch operation", code: nil, domain: "client")
         }
         return try await startFetchOperation(operation)
+    }
+    
+    private func performFetchBatch(folder: String, uids: [UInt32]) async throws -> [UInt32: Data] {
+        // Fetch all messages concurrently (respecting semaphore limits)
+        // This allows multiple IMAP FETCH commands to run in parallel
+        // rather than sequentially, which is more efficient than one-at-a-time
+        return try await withThrowingTaskGroup(of: (UInt32, Data?).self) { group in
+            var results: [UInt32: Data] = [:]
+            
+            // Start concurrent fetch tasks for all UIDs
+            for uid in uids {
+                group.addTask { [self] in
+                    do {
+                        let data = try await self.performFetch(folder: folder, uid: uid)
+                        return (uid, data)
+                    } catch {
+                        // Return nil for failed fetches - caller will handle
+                        return (uid, nil)
+                    }
+                }
+            }
+            
+            // Collect results as they complete
+            for try await (uid, data) in group {
+                if let data = data {
+                    results[uid] = data
+                }
+            }
+            
+            return results
+        }
     }
     
     private static func resolveSecret(ref: String, resolver: SecretResolving, logger: HavenLogger) throws -> String {
@@ -289,12 +365,54 @@ public actor ImapSession {
         }
     }
     
+    private func startFolderListOperation(_ operation: MCOIMAPFetchFoldersOperation) async throws -> [ImapFolder] {
+        try await withCheckedThrowingContinuation { continuation in
+            operation.start { error, folders in
+                if let error = error as NSError? {
+                    continuation.resume(throwing: self.wrap(error: error, context: .listFolders))
+                    return
+                }
+                guard let folders = folders else {
+                    continuation.resume(returning: [])
+                    return
+                }
+                let imapFolders = folders.map { folder -> ImapFolder in
+                    // Convert delimiter from CChar (Int8) to String
+                    let delimiterChar = folder.delimiter
+                    let delimiterString = delimiterChar != 0 ? String(Character(UnicodeScalar(Int(delimiterChar))!)) : "/"
+                    
+                    // Convert flags to string array
+                    var flagStrings: [String] = []
+                    if folder.flags.contains(.noSelect) {
+                        flagStrings.append("noSelect")
+                    }
+                    if folder.flags.contains(.noInferiors) {
+                        flagStrings.append("noInferiors")
+                    }
+                    if folder.flags.contains(.marked) {
+                        flagStrings.append("marked")
+                    }
+                    if folder.flags.contains(.unmarked) {
+                        flagStrings.append("unmarked")
+                    }
+                    
+                    return ImapFolder(
+                        path: folder.path ?? "",
+                        delimiter: delimiterString,
+                        flags: flagStrings
+                    )
+                }
+                continuation.resume(returning: imapFolders)
+            }
+        }
+    }
+    
     nonisolated private func wrap(error: NSError, context: OperationContext) -> Error {
         if error.domain == MCOErrorDomain {
             switch context {
             case .search:
                 return ImapSessionError.searchFailed(error.localizedDescription, code: error.code, domain: error.domain)
-            case .fetch:
+            case .fetch, .listFolders:
                 return ImapSessionError.fetchFailed(error.localizedDescription, code: error.code, domain: error.domain)
             }
         }
@@ -302,7 +420,7 @@ public actor ImapSession {
             switch context {
             case .search:
                 return ImapSessionError.searchFailed(error.localizedDescription, code: error.code, domain: error.domain)
-            case .fetch:
+            case .fetch, .listFolders:
                 return ImapSessionError.fetchFailed(error.localizedDescription, code: error.code, domain: error.domain)
             }
         }
@@ -315,6 +433,7 @@ public actor ImapSession {
 private enum OperationContext {
     case search
     case fetch
+    case listFolders
 }
 
 public struct RetryPolicy: Sendable {

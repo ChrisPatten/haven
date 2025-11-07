@@ -23,15 +23,6 @@ public struct EntityHandler {
     }
     
     public func handle(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        // Check if entity module is enabled
-        guard config.modules.entity.enabled else {
-            logger.warning("Entity extraction request rejected - module disabled")
-            return HTTPResponse(
-                statusCode: 503,
-                headers: ["Content-Type": "application/json"],
-                body: #"{"error":"Entity extraction module is disabled"}"#.data(using: .utf8)
-            )
-        }
         
         // Parse request body
         guard let body = request.body,

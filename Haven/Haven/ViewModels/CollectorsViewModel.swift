@@ -62,37 +62,188 @@ class CollectorsViewModel: ObservableObject {
         
         var loadedCollectors: [CollectorInfo] = []
         
+        // Check if instances are configured for collectors that require them
+        let hasImapSources = await hostAgentController.hasImapSourcesConfigured()
+        let hasContactsInstances = await hostAgentController.hasContactsInstancesConfigured()
+        let hasFilesInstances = await hostAgentController.hasFilesInstancesConfigured()
+        let isIMessageEnabled = await hostAgentController.isIMessageModuleEnabled()
+        
+        // Load instances for collectors that support them
+        let imapInstances = await hostAgentController.getImapInstances()
+        let contactsInstances = await hostAgentController.getContactsInstances()
+        let filesInstances = await hostAgentController.getFilesInstances()
+        
+        // Debug logging
+        print("DEBUG: Loaded instances - IMAP: \(imapInstances.count), Contacts: \(contactsInstances.count), Files: \(filesInstances.count)")
+        for instance in imapInstances {
+            print("DEBUG: IMAP instance - id: \(instance.id), displayName: \(instance.displayName ?? "nil"), enabled: \(instance.enabled)")
+        }
+        
         // Load from supported collectors
         for (_, baseInfo) in CollectorInfo.supportedCollectors {
-            var info = baseInfo
-            
-            // Load persisted last run info
-            loadPersistedLastRunInfo(for: &info)
-            
-            // Load state from API if available
-            if CollectorInfo.hasStateEndpoint(info.id) {
-                if let state = await hostAgentController.getCollectorState(id: info.id) {
-                    collectorStates[info.id] = state
-                    
-                    // Update info from state
-                    if let lastRunTimeStr = state.lastRunTime {
-                        let formatter = ISO8601DateFormatter()
-                        formatter.formatOptions = [.withInternetDateTime]
-                        info.lastRunTime = formatter.date(from: lastRunTimeStr)
+            // Handle iMessage (no instances)
+            if baseInfo.id == "imessage" {
+                var info = baseInfo
+                info.enabled = isIMessageEnabled
+                loadPersistedLastRunInfo(for: &info)
+                
+                // Load state from API if available
+                if CollectorInfo.hasStateEndpoint(info.id) {
+                    if let state = await hostAgentController.getCollectorState(id: info.id) {
+                        collectorStates[info.id] = state
+                        if let lastRunTimeStr = state.lastRunTime {
+                            let formatter = ISO8601DateFormatter()
+                            formatter.formatOptions = [.withInternetDateTime]
+                            info.lastRunTime = formatter.date(from: lastRunTimeStr)
+                        }
+                        info.lastRunStatus = state.lastRunStatus
+                        info.isRunning = state.isRunning ?? false
+                        info.lastError = state.lastRunError
                     }
-                    info.lastRunStatus = state.lastRunStatus
-                    info.isRunning = state.isRunning ?? false
-                    info.lastError = state.lastRunError
+                }
+                
+                info.isRunning = appState.isCollectorRunning(info.id)
+                loadedCollectors.append(info)
+            }
+            // Handle IMAP - create entry for each enabled instance
+            else if baseInfo.id == "email_imap" {
+                print("DEBUG: Processing \(imapInstances.count) IMAP instances")
+                for instance in imapInstances {
+                    // Create instance-specific collector ID
+                    let instanceId = "email_imap:\(instance.id)"
+                    // Set display name to instance name or fallback to account ID
+                    let displayName = instance.displayName ?? instance.id
+                    
+                    print("DEBUG: Creating IMAP collector - instanceId: \(instanceId), displayName: \(displayName), enabled: \(instance.enabled)")
+                    
+                    var info = CollectorInfo(
+                        id: instanceId,
+                        displayName: displayName,
+                        description: baseInfo.description,
+                        category: baseInfo.category,
+                        enabled: instance.enabled,
+                        lastRunTime: nil,
+                        lastRunStatus: nil,
+                        isRunning: false,
+                        lastError: nil,
+                        payload: baseInfo.payload,
+                        imapAccountId: instance.id
+                    )
+                    
+                    loadPersistedLastRunInfo(for: &info)
+                    
+                    // Load state from API if available (use base collector ID for state)
+                    if CollectorInfo.hasStateEndpoint(baseInfo.id) {
+                        if let state = await hostAgentController.getCollectorState(id: baseInfo.id) {
+                            collectorStates[info.id] = state
+                            if let lastRunTimeStr = state.lastRunTime {
+                                let formatter = ISO8601DateFormatter()
+                                formatter.formatOptions = [.withInternetDateTime]
+                                info.lastRunTime = formatter.date(from: lastRunTimeStr)
+                            }
+                            info.lastRunStatus = state.lastRunStatus
+                            info.isRunning = state.isRunning ?? false
+                            info.lastError = state.lastRunError
+                        }
+                    }
+                    
+                    info.isRunning = appState.isCollectorRunning(info.id)
+                    loadedCollectors.append(info)
                 }
             }
-            
-            // Check if collector is running from app state
-            info.isRunning = appState.isCollectorRunning(info.id)
-            
-            loadedCollectors.append(info)
+            // Handle Contacts - create entry for each enabled instance
+            else if baseInfo.id == "contacts" {
+                for instance in contactsInstances {
+                    // Create instance-specific collector ID
+                    let instanceId = "contacts:\(instance.id)"
+                    // Set display name to instance name
+                    let displayName = instance.name.isEmpty ? "Contacts (\(instance.id))" : instance.name
+                    
+                    var info = CollectorInfo(
+                        id: instanceId,
+                        displayName: displayName,
+                        description: baseInfo.description,
+                        category: baseInfo.category,
+                        enabled: instance.enabled,
+                        lastRunTime: nil,
+                        lastRunStatus: nil,
+                        isRunning: false,
+                        lastError: nil,
+                        payload: baseInfo.payload,
+                        imapAccountId: nil
+                    )
+                    
+                    loadPersistedLastRunInfo(for: &info)
+                    
+                    // Load state from API if available (use base collector ID for state)
+                    if CollectorInfo.hasStateEndpoint(baseInfo.id) {
+                        if let state = await hostAgentController.getCollectorState(id: baseInfo.id) {
+                            collectorStates[info.id] = state
+                            if let lastRunTimeStr = state.lastRunTime {
+                                let formatter = ISO8601DateFormatter()
+                                formatter.formatOptions = [.withInternetDateTime]
+                                info.lastRunTime = formatter.date(from: lastRunTimeStr)
+                            }
+                            info.lastRunStatus = state.lastRunStatus
+                            info.isRunning = state.isRunning ?? false
+                            info.lastError = state.lastRunError
+                        }
+                    }
+                    
+                    info.isRunning = appState.isCollectorRunning(info.id)
+                    loadedCollectors.append(info)
+                }
+            }
+            // Handle Files - create entry for each enabled instance
+            else if baseInfo.id == "localfs" {
+                for instance in filesInstances {
+                    // Create instance-specific collector ID
+                    let instanceId = "localfs:\(instance.id)"
+                    // Set display name to instance name
+                    let displayName = instance.name.isEmpty ? "Local Files (\(instance.id))" : instance.name
+                    
+                    var info = CollectorInfo(
+                        id: instanceId,
+                        displayName: displayName,
+                        description: baseInfo.description,
+                        category: baseInfo.category,
+                        enabled: instance.enabled,
+                        lastRunTime: nil,
+                        lastRunStatus: nil,
+                        isRunning: false,
+                        lastError: nil,
+                        payload: baseInfo.payload,
+                        imapAccountId: nil
+                    )
+                    
+                    loadPersistedLastRunInfo(for: &info)
+                    
+                    // Load state from API if available (use base collector ID for state)
+                    if CollectorInfo.hasStateEndpoint(baseInfo.id) {
+                        if let state = await hostAgentController.getCollectorState(id: baseInfo.id) {
+                            collectorStates[info.id] = state
+                            if let lastRunTimeStr = state.lastRunTime {
+                                let formatter = ISO8601DateFormatter()
+                                formatter.formatOptions = [.withInternetDateTime]
+                                info.lastRunTime = formatter.date(from: lastRunTimeStr)
+                            }
+                            info.lastRunStatus = state.lastRunStatus
+                            info.isRunning = state.isRunning ?? false
+                            info.lastError = state.lastRunError
+                        }
+                    }
+                    
+                    info.isRunning = appState.isCollectorRunning(info.id)
+                    loadedCollectors.append(info)
+                }
+            }
         }
         
         collectors = loadedCollectors.sorted { $0.displayName < $1.displayName }
+        print("DEBUG: Total collectors loaded: \(collectors.count)")
+        for collector in collectors {
+            print("DEBUG: Collector - id: \(collector.id), displayName: \(collector.displayName), enabled: \(collector.enabled), category: \(collector.category)")
+        }
         appState.updateCollectorsList(collectors)
         errorMessage = nil
     }

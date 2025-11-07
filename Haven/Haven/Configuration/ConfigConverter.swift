@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import HavenCore
 
 /// Converter between plist configuration models and HavenCore HavenConfig
 public struct ConfigConverter {
@@ -29,13 +30,13 @@ public struct ConfigConverter {
                     enabled: instance.enabled,
                     host: instance.host,
                     port: instance.port,
-                    username: instance.username,
                     tls: instance.tls,
-                    folders: instance.folders,
+                    username: instance.username,
                     auth: instance.auth != nil ? MailSourceAuthConfig(
-                        kind: instance.auth?.kind,
-                        secretRef: instance.auth?.secretRef
-                    ) : nil
+                        kind: instance.auth?.kind ?? "app_password",
+                        secretRef: instance.auth?.secretRef ?? ""
+                    ) : nil,
+                    folders: instance.folders
                 )
             }
         }
@@ -75,24 +76,24 @@ public struct ConfigConverter {
                 level: systemConfig.logging.level,
                 format: systemConfig.logging.format,
                 paths: LoggingPathsConfig(
-                    output: systemConfig.logging.paths.app,
-                    error: systemConfig.logging.paths.error
+                    app: systemConfig.logging.paths.app,
+                    error: systemConfig.logging.paths.error,
+                    access: systemConfig.logging.paths.access
                 )
             ),
             modules: ModulesConfig(
                 imessage: IMessageModuleConfig(
                     enabled: systemConfig.modules.imessage,
-                    chatDbPath: imessageConfig.chatDbPath,
                     ocrEnabled: imessageConfig.ocrEnabled,
+                    chatDbPath: imessageConfig.chatDbPath,
                     attachmentsPath: imessageConfig.attachmentsPath
                 ),
                 ocr: OCRModuleConfig(
                     enabled: systemConfig.modules.ocr,
-                    timeoutMs: systemConfig.advanced.ocr.timeoutMs,
                     languages: systemConfig.advanced.ocr.languages,
+                    timeoutMs: systemConfig.advanced.ocr.timeoutMs,
                     recognitionLevel: systemConfig.advanced.ocr.recognitionLevel,
-                    includeLayout: systemConfig.advanced.ocr.includeLayout,
-                    maxImageDimension: 1600  // Default
+                    includeLayout: systemConfig.advanced.ocr.includeLayout
                 ),
                 entity: EntityModuleConfig(
                     enabled: systemConfig.modules.entity,
@@ -119,8 +120,8 @@ public struct ConfigConverter {
                 ),
                 mail: MailModuleConfig(
                     enabled: systemConfig.modules.mail,
-                    sources: mailSources,
-                    redactPii: mailRedactPii
+                    redactPii: mailRedactPii ? .boolean(true) : .boolean(false),
+                    sources: mailSources
                 )
             )
         )
@@ -150,20 +151,20 @@ public struct ConfigConverter {
                 level: config.logging.level,
                 format: config.logging.format,
                 paths: SystemLoggingPathsConfig(
-                    app: config.logging.paths.output,
+                    app: config.logging.paths.app,
                     error: config.logging.paths.error,
-                    access: "~/.haven/hostagent_access.log"
+                    access: config.logging.paths.access
                 )
             ),
             modules: ModulesEnablementConfig(
-                imessage: config.modules.imessage.enabled,
-                ocr: config.modules.ocr.enabled,
-                entity: config.modules.entity.enabled,
-                face: config.modules.face.enabled,
-                fswatch: config.modules.fswatch.enabled,
-                localfs: config.modules.localfs.enabled,
-                contacts: config.modules.contacts.enabled,
-                mail: config.modules.mail.enabled
+                imessage: true,
+                ocr: true,
+                entity: true,
+                face: true,
+                fswatch: true,
+                localfs: true,
+                contacts: true,
+                mail: true
             ),
             advanced: AdvancedModuleSettings(
                 ocr: OCRModuleSettings(
@@ -218,7 +219,7 @@ public struct ConfigConverter {
             }
         }
         
-        let moduleRedactPii: RedactionConfig? = config.modules.mail.redactPii ? .boolean(true) : nil
+        let moduleRedactPii: RedactionConfig? = config.modules.mail.redactPii != nil ? .boolean(true) : nil
         
         return EmailInstancesConfig(
             instances: instances,

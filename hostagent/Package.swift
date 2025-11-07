@@ -15,6 +15,26 @@ let package = Package(
             name: "HavenCore",
             targets: ["HavenCore"]
         ),
+        .library(
+            name: "HostHTTP",
+            targets: ["HostHTTP"]
+        ),
+        .library(
+            name: "HostAgentEmail",
+            targets: ["HostAgentEmail"]
+        ),
+        .library(
+            name: "OCR",
+            targets: ["OCR"]
+        ),
+        .library(
+            name: "Entity",
+            targets: ["Entity"]
+        ),
+        .library(
+            name: "FSWatch",
+            targets: ["FSWatch"]
+        ),
         .plugin(
             name: "GenerateBuildInfo",
             targets: ["GenerateBuildInfo"]

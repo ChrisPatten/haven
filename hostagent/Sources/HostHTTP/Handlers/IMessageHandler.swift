@@ -1,5 +1,6 @@
 import Foundation
 import HavenCore
+import HostAgentEmail
 @_spi(Generated) import OpenAPIRuntime
 import OCR
 import Entity
@@ -120,14 +121,6 @@ public actor IMessageHandler {
     
     /// Handle POST /v1/collectors/imessage:run
     public func handleRun(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        guard config.modules.imessage.enabled else {
-            logger.warning("iMessage collector request rejected - module disabled")
-            return HTTPResponse(
-                statusCode: 503,
-                headers: ["Content-Type": "application/json"],
-                body: #"{"error":"iMessage collector module is disabled"}"#.data(using: .utf8)
-            )
-        }
         
         // Check if already running
         guard !isRunning else {
@@ -154,10 +147,9 @@ public actor IMessageHandler {
                 // Extract parameters from RunRequest
                 params.limit = runRequest!.limit  // Use provided limit or nil for unlimited
                 params.order = runRequest!.order?.rawValue ?? "desc"
-                params.batchMode = runRequest!.batch ?? false
-                if let providedBatchSize = runRequest!.batchSize {
-                    params.batchSize = providedBatchSize
-                }
+                // Default to batch mode enabled with batch size 200 for iMessage
+                params.batchMode = runRequest!.batch ?? true
+                params.batchSize = runRequest!.batchSize ?? 200
                 if let dateRange = runRequest!.dateRange {
                     params.since = dateRange.since
                     params.until = dateRange.until
@@ -168,6 +160,11 @@ public actor IMessageHandler {
                 logger.error("Failed to decode RunRequest", metadata: ["error": error.localizedDescription])
                 return HTTPResponse.badRequest(message: "Invalid request format: \(error.localizedDescription)")
             }
+        } else {
+            // No request body provided - use defaults for iMessage
+            params.order = "desc"
+            params.batchMode = true
+            params.batchSize = 200
         }
         
         // Validate parameters (no mode validation needed)
@@ -242,6 +239,9 @@ public actor IMessageHandler {
             lastRunStats = stats
             lastRunError = error.localizedDescription
             
+            // Persist state
+            await savePersistedState()
+            
             logger.error("iMessage collection failed", metadata: ["error": error.localizedDescription])
             
             return HTTPResponse.internalError(message: "Collection failed: \(error.localizedDescription)")
@@ -283,10 +283,10 @@ public actor IMessageHandler {
     
     /// Direct Swift API for running the iMessage collector
     /// Replaces HTTP-based handleRun for in-app integration
-    public func runCollector(request: CollectorRunRequest?) async throws -> RunResponse {
-        guard config.modules.imessage.enabled else {
-            throw CollectorError.moduleDisabled("iMessage collector module is disabled")
-        }
+    public func runCollector(
+        request: CollectorRunRequest?,
+        onProgress: ((Int, Int, Int, Int, Int?) -> Void)? = nil
+    ) async throws -> RunResponse {
         
         // Check if already running
         guard !isRunning else {
@@ -326,10 +326,21 @@ public actor IMessageHandler {
         )
         
         do {
-            let result = try await collectMessages(params: params, stats: &stats)
+            // Create progress callback that reports stats with total
+            let progressCallback: ((Int, Int, Int, Int, Int?) -> Void)? = onProgress != nil ? { scanned, matched, submitted, skipped, total in
+                onProgress?(scanned, matched, submitted, skipped, total)
+            } : nil
+            
+            let result = try await collectMessages(params: params, stats: &stats, onProgress: progressCallback)
             
             // Documents are posted to gateway in batches during collection
             let successCount = result.submittedCount
+            let finalFences = result.fences
+            let pendingTimestamps = result.pendingBatchTimestamps
+            
+            // Report final progress (total will be included from collectMessages callback)
+            // Note: This final call may not have total if collectMessages didn't report it, but that's okay
+            onProgress?(stats.messagesProcessed, stats.messagesProcessed, successCount, max(0, stats.messagesProcessed - successCount), nil)
             
             let endTime = Date()
             stats.endTime = endTime
@@ -362,8 +373,66 @@ public actor IMessageHandler {
             response.warnings = []
             response.errors = []
             
+            // Update state and persist
+            isRunning = false
+            lastRunTime = endTime
+            lastRunStatus = "ok"
+            lastRunStats = stats
+            lastRunError = nil
+            await savePersistedState()
+            
             return response
             
+        } catch let cancellationError as CancellationError {
+            // Handle cancellation gracefully
+            let endTime = Date()
+            stats.endTime = endTime
+            stats.durationMs = Int((endTime.timeIntervalSince(startTime)) * 1000)
+            
+            // Save fences on cancellation to preserve progress
+            // IMPORTANT: Gap handling on cancellation
+            // When processing in descending order (newest first, default):
+            // - Messages in pending batch (not yet posted) are older than the latest fence
+            // - These messages are NOT in any fence, so they will be processed on the next run
+            // - The fence system only skips messages WITHIN fences, not messages between fences
+            // - Therefore, gaps from cancelled batches are automatically handled correctly
+            //
+            // Example scenario:
+            // - Batch 1 (T1, newest): Posted, fence saved
+            // - Batch 2 (T2, newer): Posted, fence saved  
+            // - Batch 3 (T3, older): In currentBatch, NOT posted, cancelled
+            // - Next run: Starts from latest fence (T2), processes backwards
+            // - Messages at T3 are not in any fence, so they WILL be processed
+            do {
+                // Load current fences (they may have been updated during processing via periodic saves)
+                var currentFences = try loadIMessageState()
+                try saveIMessageState(fences: currentFences)
+                logger.info("Saved fences on cancellation", metadata: [
+                    "fence_count": String(currentFences.count),
+                    "note": "Pending batch messages (if any) will be processed on next run - they're not in fences"
+                ])
+            } catch {
+                logger.warning("Failed to save fences on cancellation", metadata: ["error": error.localizedDescription])
+            }
+            
+            isRunning = false
+            lastRunStatus = "cancelled"
+            lastRunStats = stats
+            lastRunError = "Collection was cancelled"
+            
+            // Persist state
+            await savePersistedState()
+            
+            logger.info("iMessage collection cancelled", metadata: [
+                "submitted": String(stats.documentsCreated),
+                "duration_ms": String(stats.durationMs ?? 0)
+            ])
+            
+            response.finish(status: .error, finishedAt: endTime)
+            response.errors = ["Collection was cancelled"]
+            
+            // Re-throw cancellation error so JobManager can handle it
+            throw cancellationError
         } catch {
             let endTime = Date()
             stats.endTime = endTime
@@ -373,6 +442,9 @@ public actor IMessageHandler {
             lastRunStatus = "failed"
             lastRunStats = stats
             lastRunError = error.localizedDescription
+            
+            // Persist state
+            await savePersistedState()
             
             logger.error("iMessage collection failed", metadata: ["error": error.localizedDescription])
             
@@ -386,13 +458,18 @@ public actor IMessageHandler {
     /// Direct Swift API for getting collector state
     /// Replaces HTTP-based handleState for in-app integration
     public func getCollectorState() async -> CollectorStateInfo {
-        // Convert lastRunStats to [String: AnyCodable]
-        var statsDict: [String: AnyCodable]? = nil
+        // Load persisted state if not already loaded (lazy loading)
+        if lastRunTime == nil && lastRunStatus == "idle" {
+            await loadPersistedState()
+        }
+        
+        // Convert lastRunStats to [String: HavenCore.AnyCodable]
+        var statsDict: [String: HavenCore.AnyCodable]? = nil
         if let stats = lastRunStats {
-            var dict: [String: AnyCodable] = [:]
+            var dict: [String: HavenCore.AnyCodable] = [:]
             let statsDictAny = stats.toDict
             for (key, value) in statsDictAny {
-                dict[key] = AnyCodable(value)
+                dict[key] = HavenCore.AnyCodable(value)
             }
             statsDict = dict
         }
@@ -452,18 +529,86 @@ public actor IMessageHandler {
         var batchSize: Int? = nil
         
         var resolvedChatDbPath: String {
+            // Helper to get real home directory (works in sandboxed apps)
+            func getRealHomeDirectory() -> String {
+                // In sandboxed apps, both HOME and homeDirectoryForCurrentUser may point to container
+                // Extract the actual username from the container path and construct real home
+                let homeURL = FileManager.default.homeDirectoryForCurrentUser
+                var homePath = homeURL.path
+                
+                // Check if we're in a container directory
+                // Container paths look like: /Users/username/Library/Containers/app.bundle/Data
+                if homePath.contains("/Library/Containers/") {
+                    // Extract username from container path: /Users/username/Library/Containers/...
+                    let components = homePath.components(separatedBy: "/")
+                    // components will be: ["", "Users", "username", "Library", "Containers", ...]
+                    if let usersIndex = components.firstIndex(of: "Users"),
+                       usersIndex + 1 < components.count {
+                        let username = components[usersIndex + 1]
+                        // Construct real home: /Users/username
+                        homePath = "/Users/\(username)"
+                        return homePath
+                    }
+                    // Fallback: use NSUserName() which should work even in sandboxed apps
+                    let username = NSUserName()
+                    homePath = "/Users/\(username)"
+                    return homePath
+                }
+                
+                // Not in container, check environment variable
+                if let homeEnv = ProcessInfo.processInfo.environment["HOME"],
+                   !homeEnv.isEmpty,
+                   !homeEnv.contains("Containers") {
+                    return homeEnv
+                }
+                
+                // Final fallback: use as-is (might already be correct)
+                return homePath
+            }
+            
+            // Helper to expand tilde paths correctly in sandboxed apps
+            func expandPath(_ path: String) -> String {
+                if path.hasPrefix("~/") {
+                    let homeDir = getRealHomeDirectory()
+                    let relativePath = String(path.dropFirst(2)) // Remove "~/"
+                    return (homeDir as NSString).appendingPathComponent(relativePath)
+                } else if path.hasPrefix("~") {
+                    // Handle ~username paths (unlikely but possible)
+                    return NSString(string: path).expandingTildeInPath
+                } else {
+                    // Already absolute or relative path
+                    return path
+                }
+            }
+            
             if !configChatDbPath.isEmpty {
-                return NSString(string: configChatDbPath).expandingTildeInPath
+                return expandPath(configChatDbPath)
             }
             if !chatDbPath.isEmpty {
-                return chatDbPath
+                return expandPath(chatDbPath)
             }
-            return NSString(string: "~/Library/Messages/chat.db").expandingTildeInPath
+            // Default: Use real home directory
+            let homeDir = getRealHomeDirectory()
+            return (homeDir as NSString).appendingPathComponent("Library/Messages/chat.db")
         }
     }
     
-    private func collectMessages(params: CollectorParams, stats: inout CollectorStats) async throws -> (documents: [[String: Any]], submittedCount: Int) {
+    private func collectMessages(
+        params: CollectorParams,
+        stats: inout CollectorStats,
+        onProgress: ((Int, Int, Int, Int, Int?) -> Void)? = nil
+    ) async throws -> (documents: [[String: Any]], submittedCount: Int, fences: [FenceRange], pendingBatchTimestamps: [Date]) {
         let chatDbPath = params.resolvedChatDbPath
+        
+        // Log path resolution for debugging
+        let rawHomeURL = FileManager.default.homeDirectoryForCurrentUser.path
+        logger.info("Resolved chat.db path", metadata: [
+            "path": chatDbPath,
+            "configChatDbPath": params.configChatDbPath.isEmpty ? "(empty)" : params.configChatDbPath,
+            "chatDbPath": params.chatDbPath.isEmpty ? "(empty)" : params.chatDbPath,
+            "rawHomeURL": rawHomeURL,
+            "homeEnv": ProcessInfo.processInfo.environment["HOME"] ?? "(not set)"
+        ])
         
         // Check if chat.db exists
         guard FileManager.default.fileExists(atPath: chatDbPath) else {
@@ -578,8 +723,25 @@ public actor IMessageHandler {
             logger.warning("Failed to load iMessage collector state", metadata: ["error": error.localizedDescription])
         }
 
+        // Detect gaps between fences that need to be processed
+        // Gaps can occur when a run is cancelled mid-way, leaving messages between fences unprocessed
+        let gaps = detectGapsBetweenFences(fences: fences)
+        if !gaps.isEmpty {
+            logger.info("Detected gaps between fences that need processing", metadata: [
+                "gap_count": String(gaps.count),
+                "gaps": gaps.map { "\(ISO8601DateFormatter().string(from: $0.earliest)) to \(ISO8601DateFormatter().string(from: $0.latest))" }.joined(separator: ", ")
+            ])
+        }
+        
+        // Get total count of messages since latest fence for progress tracking
+        // This includes messages in gaps between fences
+        let totalCount = try countMessagesSinceLatestFence(db: db!, params: params, fences: fences)
+        logger.info("Total messages to process", metadata: ["total_count": String(totalCount), "fence_count": String(fences.count), "gap_count": String(gaps.count)])
+
         // Retrieve candidate message ROWIDs chronologically ordered (respects params.order)
-        let rowIds = try fetchMessageRowIds(db: db!, params: params)
+        // Default behavior: Fetches messages from newest until latest fence (when no since/until provided)
+        // Also includes messages in gaps between fences
+        let rowIds = try fetchMessageRowIds(db: db!, params: params, fences: fences, gaps: gaps)
         // Track total candidates
         stats.messagesProcessed = rowIds.count
 
@@ -603,6 +765,10 @@ public actor IMessageHandler {
         var submittedCount = 0  // Only count successfully submitted messages toward limit
         var currentBatch: [[String: Any]] = []
         var currentBatchTimestamps: [Date] = []  // Track timestamps for fence updates
+        
+        // Track last fence save time for periodic updates (every 5 seconds)
+        var lastFenceSaveTime: Date? = nil
+        let fenceSaveInterval: TimeInterval = 5.0  // Save fences every 5 seconds
         
         logger.info("Processing messages in batches of \(batchSize)", metadata: [
             "total_rows": String(orderedRowIds.count),
@@ -745,6 +911,9 @@ public actor IMessageHandler {
             }
             
             if shouldFlushBatch {
+                // Check for cancellation before posting batch (graceful checkpoint)
+                try Task.checkCancellation()
+                
                 // If we have a limit, truncate batch to only submit what we need
                 var batchToSubmit = currentBatch
                 var timestampsToSubmit = currentBatchTimestamps
@@ -764,7 +933,7 @@ public actor IMessageHandler {
                 
                 logger.info("Processing batch of \(batchToSubmit.count) documents")
                 
-                // Post batch to gateway
+                // Post batch to gateway (URLSession will respect cancellation automatically)
                 let batchSuccessCount = try await postDocumentsToGateway(batchToSubmit, batchMode: params.batchMode)
                 logger.info("Posted batch to gateway", metadata: [
                     "batch_size": String(batchToSubmit.count),
@@ -775,6 +944,9 @@ public actor IMessageHandler {
                 // Update submitted count (only successful submissions count toward limit)
                 submittedCount += batchSuccessCount
                 
+                // Report progress after batch submission
+                onProgress?(stats.messagesProcessed, stats.messagesProcessed, submittedCount, max(0, stats.messagesProcessed - submittedCount), totalCount > 0 ? totalCount : nil)
+                
                 // Update fences with successfully submitted timestamps
                 let successfulTimestamps = Array(timestampsToSubmit.prefix(batchSuccessCount))
                 if !successfulTimestamps.isEmpty {
@@ -782,11 +954,21 @@ public actor IMessageHandler {
                     let maxTimestamp = successfulTimestamps.max()!
                     fences = FenceManager.addFence(newEarliest: minTimestamp, newLatest: maxTimestamp, existingFences: fences)
                     
-                    // Save updated fences
-                    do {
-                        try saveIMessageState(fences: fences)
-                    } catch {
-                        logger.warning("Failed to save iMessage collector state", metadata: ["error": error.localizedDescription])
+                    // Save fences periodically (every 5 seconds) or if this is the first save
+                    let now = Date()
+                    let shouldSave = lastFenceSaveTime == nil || now.timeIntervalSince(lastFenceSaveTime!) >= fenceSaveInterval
+                    
+                    if shouldSave {
+                        do {
+                            try saveIMessageState(fences: fences)
+                            lastFenceSaveTime = now
+                            logger.debug("Saved fences to disk", metadata: [
+                                "fence_count": String(fences.count),
+                                "elapsed_since_last_save": lastFenceSaveTime == nil ? "N/A" : String(format: "%.2f", now.timeIntervalSince(lastFenceSaveTime!))
+                            ])
+                        } catch {
+                            logger.warning("Failed to save iMessage collector state", metadata: ["error": error.localizedDescription])
+                        }
                     }
                     
                     // Update earliest/latest timestamps for successfully posted docs using the same timestamps
@@ -849,6 +1031,9 @@ public actor IMessageHandler {
                 }
             }
             
+            // Check for cancellation before posting final batch (graceful checkpoint)
+            try Task.checkCancellation()
+            
             logger.info("Processing final batch of \(finalBatch.count) documents")
             let batchSuccessCount = try await postDocumentsToGateway(finalBatch, batchMode: params.batchMode)
             logger.info("Posted final batch to gateway", metadata: [
@@ -860,19 +1045,15 @@ public actor IMessageHandler {
             // Update submitted count
             submittedCount += batchSuccessCount
             
+            // Report progress after final batch submission
+            onProgress?(stats.messagesProcessed, stats.messagesProcessed, submittedCount, max(0, stats.messagesProcessed - submittedCount), totalCount > 0 ? totalCount : nil)
+            
             // Update fences with successfully submitted timestamps
             let successfulTimestamps = Array(finalTimestamps.prefix(batchSuccessCount))
             if !successfulTimestamps.isEmpty {
                 let minTimestamp = successfulTimestamps.min()!
                 let maxTimestamp = successfulTimestamps.max()!
                 fences = FenceManager.addFence(newEarliest: minTimestamp, newLatest: maxTimestamp, existingFences: fences)
-                
-                // Save updated fences
-                do {
-                    try saveIMessageState(fences: fences)
-                } catch {
-                    logger.warning("Failed to save iMessage collector state", metadata: ["error": error.localizedDescription])
-                }
                 
                 // Update earliest/latest timestamps for successfully posted docs using the same timestamps
                 // These represent messages actually submitted in THIS run only
@@ -891,6 +1072,14 @@ public actor IMessageHandler {
                 }
             }
         }
+        
+        // Always save fences at the end of processing (final save)
+        do {
+            try saveIMessageState(fences: fences)
+            logger.debug("Saved fences to disk (final save)", metadata: ["fence_count": String(fences.count)])
+        } catch {
+            logger.warning("Failed to save iMessage collector state (final save)", metadata: ["error": error.localizedDescription])
+        }
 
         // After collection completes, attempt to detect and store self_person_id
         if let detectedAccount = detectSelfPersonFromIMessage(db: db!) {
@@ -900,7 +1089,12 @@ public actor IMessageHandler {
             }
         }
 
-        return (documents: allDocuments, submittedCount: submittedCount)
+        // Return pending batch timestamps so caller can handle gaps on cancellation
+        // Note: In descending order (default), pending batch messages are older than the latest fence,
+        // so they will be processed on the next run. The fence system handles gaps correctly because
+        // it only skips messages that are WITHIN fences, not messages between fences.
+        let pendingTimestamps = currentBatchTimestamps
+        return (documents: allDocuments, submittedCount: submittedCount, fences: fences, pendingBatchTimestamps: pendingTimestamps)
     }
     
     private func createChatDbSnapshot(sourcePath: String) throws -> String {
@@ -1163,17 +1357,81 @@ public actor IMessageHandler {
         
         return messages
     }
+    
+    /// Detect gaps between fences that need to be processed
+    /// Gaps occur when there are non-contiguous fences (e.g., from cancelled batches)
+    private func detectGapsBetweenFences(fences: [FenceRange]) -> [FenceRange] {
+        guard fences.count > 1 else { return [] }
+        
+        // Sort fences by earliest timestamp
+        let sortedFences = fences.sorted { $0.earliest < $1.earliest }
+        var gaps: [FenceRange] = []
+        
+        // Check for gaps between consecutive fences
+        for i in 0..<sortedFences.count - 1 {
+            let current = sortedFences[i]
+            let next = sortedFences[i + 1]
+            
+            // If fences are not contiguous, there's a gap
+            if !current.isContiguous(with: next) {
+                // Gap is from current.latest to next.earliest
+                // But we need to be careful: if current.latest > next.earliest, they overlap (no gap)
+                if current.latest < next.earliest {
+                    let gapEarliest = current.latest
+                    let gapLatest = next.earliest
+                    gaps.append(FenceRange(earliest: gapEarliest, latest: gapLatest))
+                }
+            }
+        }
+        
+        return gaps
+    }
 
-    private func fetchMessageRowIds(db: OpaquePointer, params: CollectorParams) throws -> [Int64] {
+    private func fetchMessageRowIds(db: OpaquePointer, params: CollectorParams, fences: [FenceRange], gaps: [FenceRange] = []) throws -> [Int64] {
         var ids: [Int64] = []
         // Use canonical timestamp: message.date (not date_read or date_delivered)
         // This is the message's primary timestamp used for all processing, fences, and ordering
         
-        // Determine effective lower-bound (explicit since preferred)
+        // Determine effective lower-bound
+        // Default behavior: If no explicit since/until is provided, start from newest and stop at latest fence
+        // BUT: Also include messages in gaps between fences (from cancelled batches)
         var lowerBoundEpoch: Int64? = nil
+        let latestFenceTimestamp: Date? = fences.isEmpty ? nil : fences.map { $0.latest }.max()
+        
+        // Find the oldest gap timestamp (if any) - we need to process gaps too
+        let oldestGapEarliest: Date? = gaps.isEmpty ? nil : gaps.map { $0.earliest }.min()
+        
         if let since = params.since {
+            // Explicit since takes precedence
             lowerBoundEpoch = dateToAppleEpoch(since)
+            // If we have a latest fence and since is older, use the max (process from latest fence)
+            if let latestFence = latestFenceTimestamp {
+                let sinceEpoch = dateToAppleEpoch(since)
+                let latestFenceEpoch = dateToAppleEpoch(latestFence)
+                lowerBoundEpoch = max(sinceEpoch, latestFenceEpoch)
+            }
+            // Also consider gaps - if oldest gap is older than since, we need to include it
+            if let oldestGap = oldestGapEarliest {
+                let sinceEpoch = lowerBoundEpoch ?? 0
+                let oldestGapEpoch = dateToAppleEpoch(oldestGap)
+                lowerBoundEpoch = min(sinceEpoch, oldestGapEpoch)  // Use the older one to include gaps
+            }
+        } else if let latestFence = latestFenceTimestamp {
+            // Default: Use latest fence as lower bound (stop at latest fence)
+            // BUT: If there are gaps older than the latest fence, we need to include them
+            if let oldestGap = oldestGapEarliest, oldestGap < latestFence {
+                // Gaps exist that are older than latest fence - we need to process from oldest gap
+                lowerBoundEpoch = dateToAppleEpoch(oldestGap)
+                logger.info("Including gaps in processing", metadata: [
+                    "latest_fence": ISO8601DateFormatter().string(from: latestFence),
+                    "oldest_gap": ISO8601DateFormatter().string(from: oldestGap)
+                ])
+            } else {
+                // No gaps or gaps are newer than latest fence - normal behavior
+                lowerBoundEpoch = dateToAppleEpoch(latestFence)
+            }
         } else if params.messageLookbackDays > 0 {
+            // Fallback: Use messageLookbackDays if no fences exist
             let lookbackDate = Date().addingTimeInterval(-Double(params.messageLookbackDays) * 24 * 3600)
             lowerBoundEpoch = dateToAppleEpoch(lookbackDate)
         }
@@ -1232,6 +1490,98 @@ public actor IMessageHandler {
         }
 
         return ids
+    }
+    
+    /// Count messages since the latest fence timestamp
+    /// - Parameters:
+    ///   - db: Database connection
+    ///   - params: Collector parameters
+    ///   - fences: Array of fence ranges
+    /// - Returns: Count of messages that would be processed (not in fences)
+    private func countMessagesSinceLatestFence(db: OpaquePointer, params: CollectorParams, fences: [FenceRange]) throws -> Int {
+        // Find the latest fence timestamp (maximum latest date from all fences)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fenceTimestamps = fences.map { formatter.string(from: $0.latest) }
+        logger.debug("Counting messages since latest fence", metadata: [
+            "fence_count": String(fences.count),
+            "fence_latest_timestamps": fenceTimestamps.joined(separator: ", ")
+        ])
+        let latestFenceTimestamp: Date? = fences.isEmpty ? nil : fences.map { $0.latest }.max()
+        
+        if let latestFence = latestFenceTimestamp {
+            logger.debug("Using latest fence timestamp as lower bound", metadata: [
+                "latest_fence_timestamp": formatter.string(from: latestFence)
+            ])
+        } else {
+            logger.debug("No fences found, using params for lower bound")
+        }
+        
+        // Determine effective lower-bound
+        // If we have a latest fence, use that as the minimum since date
+        // Otherwise, use the params.since or messageLookbackDays
+        var lowerBoundEpoch: Int64? = nil
+        if let since = params.since {
+            let sinceEpoch = dateToAppleEpoch(since)
+            // If we have a latest fence, use the maximum of since and latest fence
+            if let latestFence = latestFenceTimestamp {
+                let latestFenceEpoch = dateToAppleEpoch(latestFence)
+                lowerBoundEpoch = max(sinceEpoch, latestFenceEpoch)
+            } else {
+                lowerBoundEpoch = sinceEpoch
+            }
+        } else if let latestFence = latestFenceTimestamp {
+            // Use latest fence as the lower bound
+            lowerBoundEpoch = dateToAppleEpoch(latestFence)
+        } else if params.messageLookbackDays > 0 {
+            let lookbackDate = Date().addingTimeInterval(-Double(params.messageLookbackDays) * 24 * 3600)
+            lowerBoundEpoch = dateToAppleEpoch(lookbackDate)
+        }
+        
+        // Determine upper-bound (until constraint)
+        let upperBoundEpoch: Int64? = params.until != nil ? dateToAppleEpoch(params.until!) : nil
+        
+        // Build COUNT query
+        var query = "SELECT COUNT(*) FROM message m"
+        var whereClauses: [String] = []
+        
+        if lowerBoundEpoch != nil {
+            whereClauses.append("m.date >= ?")
+        }
+        if upperBoundEpoch != nil {
+            whereClauses.append("m.date <= ?")
+        }
+        if !whereClauses.isEmpty {
+            query += " WHERE " + whereClauses.joined(separator: " AND ")
+        }
+        
+        var stmt: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
+        guard prepareResult == SQLITE_OK else {
+            let errorMsg = String(cString: sqlite3_errmsg(db))
+            logger.error("Failed to prepare message count query", metadata: ["error": errorMsg, "code": String(prepareResult)])
+            throw CollectorError.queryFailed("Failed to prepare message count query: \(errorMsg) (code: \(prepareResult))")
+        }
+        defer { sqlite3_finalize(stmt) }
+        
+        // Bind parameters
+        var paramIndex: Int32 = 1
+        if let lb = lowerBoundEpoch {
+            sqlite3_bind_int64(stmt, paramIndex, lb)
+            paramIndex += 1
+        }
+        if let ub = upperBoundEpoch {
+            sqlite3_bind_int64(stmt, paramIndex, ub)
+            paramIndex += 1
+        }
+        
+        // Execute query and get count
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            let count = sqlite3_column_int(stmt, 0)
+            return Int(count)
+        }
+        
+        return 0
     }
 
     private func fetchMessageByRowId(db: OpaquePointer, rowId: Int64) throws -> MessageData? {
@@ -1433,6 +1783,72 @@ public actor IMessageHandler {
         }
         let data = try FenceManager.saveFences(fences)
         try data.write(to: url, options: .atomic)
+    }
+    
+    // MARK: - Handler State Persistence
+    
+    private func handlerStateFileURL() -> URL {
+        let dir = iMessageCacheDirURL()
+        return dir.appendingPathComponent("imessage_handler_state.json")
+    }
+    
+    private struct PersistedHandlerState: Codable {
+        var lastRunTime: Date?
+        var lastRunStatus: String
+        var lastRunError: String?
+        var lastRunStats: CollectorStats?
+    }
+    
+    private func loadPersistedState() async {
+        let url = handlerStateFileURL()
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return }
+        
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let persisted = try decoder.decode(PersistedHandlerState.self, from: data)
+            
+            lastRunTime = persisted.lastRunTime
+            lastRunStatus = persisted.lastRunStatus
+            lastRunError = persisted.lastRunError
+            lastRunStats = persisted.lastRunStats
+            
+            logger.info("Loaded persisted iMessage handler state", metadata: [
+                "lastRunStatus": lastRunStatus,
+                "hasLastRunTime": lastRunTime != nil ? "true" : "false"
+            ])
+        } catch {
+            logger.warning("Failed to load persisted iMessage handler state", metadata: ["error": error.localizedDescription])
+        }
+    }
+    
+    private func savePersistedState() async {
+        let url = handlerStateFileURL()
+        let dir = url.deletingLastPathComponent()
+        let fm = FileManager.default
+        
+        do {
+            if !fm.fileExists(atPath: dir.path) {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            
+            let persisted = PersistedHandlerState(
+                lastRunTime: lastRunTime,
+                lastRunStatus: lastRunStatus,
+                lastRunError: lastRunError,
+                lastRunStats: lastRunStats
+            )
+            
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(persisted)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            logger.warning("Failed to save persisted iMessage handler state", metadata: ["error": error.localizedDescription])
+        }
     }
 
     // Compose processing order for message ROWIDs (ascending list input)
@@ -2438,16 +2854,21 @@ public actor IMessageHandler {
         var successCount = 0
 
         // Post each document individually since gateway batch submission may be unavailable.
+        // URLSession operations will automatically respect task cancellation.
         for document in documents {
             do {
                 try await postDocumentToGateway(document)
                 successCount += 1
+            } catch let cancellationError as CancellationError {
+                // Re-throw cancellation errors to stop processing gracefully
+                logger.info("Document posting cancelled")
+                throw cancellationError
             } catch {
                 logger.error("Failed to post document to gateway", metadata: [
                     "error": error.localizedDescription,
                     "external_id": document["external_id"] as? String ?? "unknown"
                 ])
-                // Continue processing other documents even if one fails
+                // Continue processing other documents even if one fails (unless cancelled)
             }
         }
         

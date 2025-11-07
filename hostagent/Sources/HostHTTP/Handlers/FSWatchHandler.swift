@@ -16,14 +16,6 @@ public struct FSWatchHandler {
     
     /// Handle GET /v1/fs-watches/events - Poll events from queue
     public func handlePollEvents(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        guard config.enabled else {
-            return HTTPResponse(
-                statusCode: 501,
-                headers: ["Content-Type": "application/json"],
-                body: formatError("FSWatch module is disabled")
-            )
-        }
-        
         // Parse query parameters
         let queryParams = request.queryParameters
         let limit = queryParams["limit"].flatMap { Int($0) } ?? 100
@@ -53,14 +45,6 @@ public struct FSWatchHandler {
     
     /// Handle GET /v1/fs-watches - List all active watches
     public func handleListWatches(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        guard config.enabled else {
-            return HTTPResponse(
-                statusCode: 501,
-                headers: ["Content-Type": "application/json"],
-                body: formatError("FSWatch module is disabled")
-            )
-        }
-        
         let watches = await fsWatchService.listWatches()
         let stats = await fsWatchService.getStats()
         
@@ -77,14 +61,6 @@ public struct FSWatchHandler {
     
     /// Handle POST /v1/fs-watches - Add a new watch
     public func handleAddWatch(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        guard config.enabled else {
-            return HTTPResponse(
-                statusCode: 501,
-                headers: ["Content-Type": "application/json"],
-                body: formatError("FSWatch module is disabled")
-            )
-        }
-        
         // Parse request body
         guard let body = request.body else {
             return HTTPResponse(
@@ -142,14 +118,6 @@ public struct FSWatchHandler {
     
     /// Handle DELETE /v1/fs-watches/{id} - Remove a watch
     public func handleRemoveWatch(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        guard config.enabled else {
-            return HTTPResponse(
-                statusCode: 501,
-                headers: ["Content-Type": "application/json"],
-                body: formatError("FSWatch module is disabled")
-            )
-        }
-        
         // Extract watch ID from path
         guard let watchId = extractWatchId(from: request.path) else {
             return HTTPResponse(
@@ -187,14 +155,6 @@ public struct FSWatchHandler {
     
     /// Handle POST /v1/fs-watches/events:clear - Clear all events
     public func handleClearEvents(request: HTTPRequest, context: RequestContext) async -> HTTPResponse {
-        guard config.enabled else {
-            return HTTPResponse(
-                statusCode: 501,
-                headers: ["Content-Type": "application/json"],
-                body: formatError("FSWatch module is disabled")
-            )
-        }
-        
         await fsWatchService.clearEvents()
         
         let response = GenericResponse(

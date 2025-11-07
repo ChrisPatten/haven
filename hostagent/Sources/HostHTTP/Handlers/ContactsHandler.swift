@@ -118,7 +118,7 @@ public actor ContactsHandler {
             stats.durationMs = Int((endTime.timeIntervalSince(startTime)) * 1000)
             
             isRunning = false
-            lastRunStatus = "completed"
+            lastRunStatus = "ok"
             lastRunStats = stats
             
             logger.info("Contacts collection completed", metadata: [
@@ -196,7 +196,10 @@ public actor ContactsHandler {
     
     /// Direct Swift API for running the Contacts collector
     /// Replaces HTTP-based handleRun for in-app integration
-    public func runCollector(request: CollectorRunRequest?) async throws -> RunResponse {
+    public func runCollector(
+        request: CollectorRunRequest?,
+        onProgress: ((Int, Int, Int, Int) -> Void)? = nil
+    ) async throws -> RunResponse {
         // Check if already running
         guard !isRunning else {
             throw ContactsError.contactAccessFailed("Collector is already running")
@@ -242,7 +245,7 @@ public actor ContactsHandler {
             stats.durationMs = Int((endTime.timeIntervalSince(startTime)) * 1000)
             
             isRunning = false
-            lastRunStatus = "completed"
+            lastRunStatus = "ok"
             lastRunStats = stats
             
             logger.info("Contacts collection completed", metadata: [
@@ -265,6 +268,9 @@ public actor ContactsHandler {
             )
             response.warnings = result.warnings
             response.errors = result.errors
+            
+            // Report final progress
+            onProgress?(stats.contactsScanned, stats.contactsProcessed, stats.contactsSubmitted, stats.contactsSkipped)
             
             return response
             
@@ -290,13 +296,13 @@ public actor ContactsHandler {
     /// Direct Swift API for getting collector state
     /// Replaces HTTP-based handleState for in-app integration
     public func getCollectorState() async -> CollectorStateInfo {
-        // Convert lastRunStats to [String: AnyCodable]
-        var statsDict: [String: AnyCodable]? = nil
+        // Convert lastRunStats to [String: HavenCore.AnyCodable]
+        var statsDict: [String: HavenCore.AnyCodable]? = nil
         if let stats = lastRunStats {
-            var dict: [String: AnyCodable] = [:]
+            var dict: [String: HavenCore.AnyCodable] = [:]
             let statsDictAny = stats.toDict
             for (key, value) in statsDictAny {
-                dict[key] = AnyCodable(value)
+                dict[key] = HavenCore.AnyCodable(value)
             }
             statsDict = dict
         }

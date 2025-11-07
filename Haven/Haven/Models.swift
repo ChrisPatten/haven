@@ -39,8 +39,9 @@ public struct ModuleSummary: Codable {
 
 // MARK: - Collector Run Models
 
-// RunResponse matches the real type from hostagent.RunResponse
-// Uses snake_case properties to match the real type structure
+// RunResponse is now available from HostAgentEmail
+// Keep local definition for backward compatibility with existing code that uses snake_case
+// TODO: Migrate to use RunResponse from HostAgentEmail directly
 public struct RunResponse: Codable {
     public enum Status: String, Codable {
         case ok
@@ -109,20 +110,19 @@ public struct CollectorStateResponse: Codable {
 }
 
 // MARK: - HostAgent Types
-// Using real types from HavenCore package where available
+// Using real types from HavenCore and HostAgentEmail packages
 import HavenCore
+import HostAgentEmail
 
 // CollectorStateInfo is available directly from HavenCore after import
 // No typealias needed - use CollectorStateInfo directly
 
-// Note: RunResponse and CollectorRunRequest are in HostAgentEmail which is not exported
-// as a library. These local definitions match the real types from hostagent.
-// TODO: Move RunResponse and CollectorRunRequest to HavenCore or export HostAgentEmail
+// RunResponse and CollectorRunRequest are now available from HostAgentEmail
+// No local definitions needed - use types from HostAgentEmail directly
 
 // MARK: - CollectorRunRequest (API-compatible version with snake_case)
-
-/// API-compatible CollectorRunRequest for HTTP requests
-/// Uses snake_case properties to match the actual API
+// Note: This is a compatibility layer that converts between snake_case API format
+// and camelCase HostAgentEmail format. This can be removed once we fully migrate to HostAgentEmail types.
 public struct CollectorRunRequest: Codable {
     public var mode: String?
     public var order: String?
