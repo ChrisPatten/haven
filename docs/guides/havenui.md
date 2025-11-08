@@ -56,8 +56,9 @@ Access via the menu bar or `⌘,`:
 
 - **General Settings**: Gateway URL, API timeouts, status TTL
 - **Collector Configuration**: Configure each collector type (iMessage, Email, Files, Contacts)
+- **Enrichment Settings**: Per-collector enrichment control (skip enrichment per collector)
 - **Schedules**: Set up automatic collector runs
-- **Advanced**: System-level configuration options
+- **Advanced**: System-level enrichment module configuration (OCR, Entity Extraction, Face Detection, Captioning)
 
 ## Installation
 
@@ -102,10 +103,39 @@ The app provides a comprehensive settings interface accessible via `⌘,`:
 
 - **General**: Gateway URL, API configuration
 - **Collectors**: Per-collector settings (iMessage, Email IMAP, Local Files, Contacts)
+- **Enrichment**: Per-collector enrichment control (enable/disable enrichment per collector)
 - **Schedules**: Automatic collector run schedules
-- **Advanced**: System-level options
+- **Advanced**: System-level enrichment module configuration (OCR, Entity Extraction, Face Detection, Captioning)
 
 Changes made in the settings UI are automatically saved to the configuration file.
+
+#### Enrichment Settings
+
+The **Enrichment Settings** view allows you to control enrichment behavior on a per-collector basis:
+
+- **Skip Enrichment**: Toggle to skip enrichment (OCR, face detection, entity extraction, captioning) for specific collectors
+- **Per-Collector Control**: Configure enrichment independently for Email, Files, iMessage, and Contacts
+- **Contacts**: Always skips enrichment (contacts don't require OCR or captioning)
+
+When enrichment is skipped for a collector, documents are submitted without:
+- OCR text extraction from images
+- Face detection in images
+- Named entity extraction (people, organizations, places, etc.)
+- Image captioning
+
+**Note**: Global enrichment service settings (OCR quality, entity types, face detection parameters, captioning models) are configured in **Advanced Settings**. The Enrichment Settings view controls whether enrichment is applied per collector.
+
+#### Advanced Settings
+
+The **Advanced Settings** view provides fine-grained control over enrichment modules:
+
+- **OCR Settings**: Languages, timeout, recognition level (fast/accurate), layout inclusion
+- **Entity Extraction**: Entity types (person, organization, place, date, money, email, phone, url), minimum confidence threshold
+- **Face Detection**: Minimum face size, confidence threshold, landmark inclusion
+- **Caption Settings**: Enable/disable captioning, method (Ollama/Vision), timeout, model selection
+- **File System Watch**: Event queue size, debounce timing
+- **Local Files**: Maximum file size limits
+- **Debug Mode**: Enable debug output to JSONL files instead of gateway submission
 
 ### Health Monitoring
 

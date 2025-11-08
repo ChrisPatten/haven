@@ -187,6 +187,66 @@ Configure via Settings (`⌘,`) → Email Collector:
 - **IMAP**: Server, port, username, password, folders
 - **Local Mail.app**: Mail data directory, account selection
 
+## Enrichment Configuration
+
+Haven's enrichment system adds OCR, captions, face detection, and entity extraction to documents and images. Enrichment is controlled at two levels:
+
+1. **Per-Collector Settings**: Enable/disable enrichment per collector (Email, Files, iMessage, Contacts)
+2. **Module Settings**: Configure enrichment service parameters (OCR quality, entity types, face detection, captioning)
+
+### Per-Collector Enrichment Control
+
+Haven.app stores per-collector enrichment settings in `~/.haven/collector_enrichment.plist`. Configure via:
+
+- **Haven.app Settings UI**: Settings (`⌘,`) → Enrichment Settings
+- **Config File**: Edit `~/.haven/collector_enrichment.plist` directly
+
+**Collector IDs:**
+- `email_imap` - Email (IMAP) collector
+- `localfs` - Local Files collector
+- `imessage` - iMessage collector
+- `contacts` - Contacts collector (always skips enrichment)
+
+**Configuration Format:**
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>email_imap</key>
+    <dict>
+        <key>skipEnrichment</key>
+        <false/>
+    </dict>
+    <key>localfs</key>
+    <dict>
+        <key>skipEnrichment</key>
+        <false/>
+    </dict>
+    <key>imessage</key>
+    <dict>
+        <key>skipEnrichment</key>
+        <false/>
+    </dict>
+</dict>
+</plist>
+```
+
+When `skipEnrichment` is `true` for a collector, documents from that collector are submitted without any enrichment processing (OCR, face detection, entity extraction, captioning).
+
+### Enrichment Architecture
+
+Haven uses an `EnrichmentOrchestrator` that coordinates multiple enrichment services:
+
+- **ImageExtractor**: Extracts images from HTML content (email, documents)
+- **TextExtractor**: Extracts and cleans text from HTML/rich text content
+- **OCR Service**: macOS Vision framework OCR
+- **Face Service**: Face detection in images
+- **Entity Service**: Named entity extraction (people, organizations, places, etc.)
+- **Caption Service**: Image captioning via Ollama or Vision API
+
+The orchestrator processes each image attachment independently, then enriches the document text with OCR results for entity extraction.
+
 ## Image Enrichment Configuration
 
 Image enrichment adds OCR, captions, and entity detection to image attachments.
@@ -334,9 +394,11 @@ MINIO_BUCKET=haven-production
 MINIO_SECURE=true
 ```
 
-## Haven.app Configuration File
+## Haven.app Configuration Files
 
-Haven.app uses `~/.haven/hostagent.yaml`:
+Haven.app uses multiple configuration files:
+
+### Main Configuration: `~/.haven/hostagent.yaml`
 
 ```yaml
 gateway:
@@ -374,9 +436,40 @@ collectors:
     local:
       enabled: false
       mail_directory: "~/Library/Mail"
+
+advanced:
+  ocr:
+    languages: ["en"]
+    timeoutMs: 15000
+    recognitionLevel: "accurate"
+    includeLayout: false
+  entity:
+    types: ["person", "organization", "place"]
+    minConfidence: 0.6
+  face:
+    minFaceSize: 0.01
+    minConfidence: 0.7
+    includeLandmarks: false
+  caption:
+    enabled: false
+    method: "ollama"
+    timeoutMs: 10000
+    model: null
+  fswatch:
+    eventQueueSize: 1024
+    debounceMs: 500
+  localfs:
+    maxFileBytes: 104857600
+  debug:
+    enabled: false
+    outputPath: "~/.haven/debug_documents.jsonl"
 ```
 
-Edit via Settings UI (`⌘,`) or edit the file directly.
+### Per-Collector Enrichment: `~/.haven/collector_enrichment.plist`
+
+Controls whether enrichment is skipped per collector. See [Per-Collector Enrichment Control](#per-collector-enrichment-control) above.
+
+Edit via Settings UI (`⌘,`) or edit the files directly.
 
 ## Troubleshooting Configuration
 

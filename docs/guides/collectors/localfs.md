@@ -184,6 +184,15 @@ collectors:
     tags: ["inbox"]
 ```
 
+**Per-Collector Enrichment:**
+
+Control enrichment behavior for Local Files collector via Settings (`⌘,`) → Enrichment Settings:
+
+- **Skip Enrichment**: When enabled, file documents are submitted without OCR, face detection, entity extraction, or captioning
+- **Default**: Enrichment is enabled (skipEnrichment: false)
+
+Global enrichment module settings (OCR quality, entity types, captioning models) are configured in Advanced Settings. See [Configuration Reference](../reference/configuration.md#enrichment-configuration) for details.
+
 ### File Patterns
 
 Use glob patterns for include/exclude:

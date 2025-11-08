@@ -203,6 +203,17 @@ See [Configuration Reference](../reference/configuration.md) for complete list. 
 - `OLLAMA_ENABLED` - Enable image captioning
 - `OLLAMA_API_URL` - Ollama server URL
 
+### Haven.app Configuration
+
+**Per-Collector Enrichment:**
+
+Control enrichment behavior for Email collector via Settings (`⌘,`) → Enrichment Settings:
+
+- **Skip Enrichment**: When enabled, email documents are submitted without OCR, face detection, entity extraction, or captioning
+- **Default**: Enrichment is enabled (skipEnrichment: false)
+
+Global enrichment module settings (OCR quality, entity types, captioning models) are configured in Advanced Settings. See [Configuration Reference](../reference/configuration.md#enrichment-configuration) for details.
+
 ### IMAP Configuration
 
 **Server Settings:**

@@ -40,10 +40,15 @@ Each Haven service plays a specific role in the ingestion → enrichment → sea
   - Contacts collection from macOS Contacts.app
   - Local filesystem watching and ingestion
   - Email collection (IMAP and Mail.app)
-  - Vision OCR and image enrichment
-- **Architecture**: Collectors run directly within the app via Swift APIs (no HTTP server required).
+  - Vision OCR and image enrichment via `EnrichmentOrchestrator`
+- **Architecture**: Collectors run directly within the app via Swift APIs (no HTTP server required). Uses `EnrichmentOrchestrator` to coordinate enrichment services (OCR, face detection, entity extraction, captioning).
+- **Enrichment**: 
+  - `ImageExtractor` and `TextExtractor` modules extract content from HTML/rich text
+  - `EnrichmentOrchestrator` coordinates OCR, face detection, entity extraction, and captioning
+  - Per-collector enrichment control via `~/.haven/collector_enrichment.plist`
+  - Module-level configuration (OCR quality, entity types, etc.) via `hostagent.yaml` advanced settings
 - **Security**: Requires Full Disk Access (Messages database), Contacts permission (for contacts collector).
-- **Deployment**: Built as macOS app bundle; configuration at `~/.haven/hostagent.yaml`.
+- **Deployment**: Built as macOS app bundle; configuration at `~/.haven/hostagent.yaml` and `~/.haven/collector_enrichment.plist`.
 - **Extensibility**: Modular collector configuration; native macOS integration for best performance.
 
 ## Collectors and Utilities

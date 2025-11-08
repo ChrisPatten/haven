@@ -203,6 +203,10 @@ collectors:
     sync_mode: "incremental"  # or "full"
 ```
 
+**Enrichment:**
+
+The Contacts collector always skips enrichment (OCR, face detection, entity extraction, captioning) as contacts don't require these processing steps. This is automatically configured and cannot be changed.
+
 ### VCF Directory Structure
 
 Place VCF files in the configured directory:

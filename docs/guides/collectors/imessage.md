@@ -179,6 +179,15 @@ collectors:
       captioning: false
 ```
 
+**Per-Collector Enrichment:**
+
+Control enrichment behavior for iMessage collector via Settings (`⌘,`) → Enrichment Settings:
+
+- **Skip Enrichment**: When enabled, iMessage documents are submitted without OCR, face detection, entity extraction, or captioning
+- **Default**: Enrichment is enabled (skipEnrichment: false)
+
+Global enrichment module settings (OCR quality, entity types, captioning models) are configured in Advanced Settings. See [Configuration Reference](../reference/configuration.md#enrichment-configuration) for details.
+
 ## State Management
 
 ### State Files
