@@ -26,7 +26,7 @@ struct GeneralSettingsView: View {
     @State private var logLevel: String = "info"
     @State private var logFormat: String = "json"
     @State private var logAppPath: String = "~/.haven/hostagent.log"
-    @State private var logErrorPath: String = "~/.haven/hostagent_error.log"
+    @State private var logErrorPath: String? = nil  // Deprecated: kept for backward compatibility
     @State private var logAccessPath: String = "~/.haven/hostagent_access.log"
     
     var body: some View {
@@ -42,7 +42,7 @@ struct GeneralSettingsView: View {
     }
     
     private var combinedState: String {
-        "\(authHeader)|\(authSecret)|\(gatewayBaseUrl)|\(gatewayIngestPath)|\(gatewayIngestFilePath)|\(gatewayTimeoutMs)|\(logLevel)|\(logFormat)|\(logAppPath)|\(logErrorPath)|\(logAccessPath)"
+        "\(authHeader)|\(authSecret)|\(gatewayBaseUrl)|\(gatewayIngestPath)|\(gatewayIngestFilePath)|\(gatewayTimeoutMs)|\(logLevel)|\(logFormat)|\(logAppPath)|\(logErrorPath ?? "")|\(logAccessPath)"
     }
     
     @ViewBuilder
@@ -159,8 +159,12 @@ struct GeneralSettingsView: View {
                         HStack {
                             Text("Error Log Path:")
                                 .frame(width: 120, alignment: .trailing)
-                            TextField("", text: $logErrorPath)
-                                .textFieldStyle(.roundedBorder)
+                            TextField("", text: Binding(
+                                get: { logErrorPath ?? "" },
+                                set: { logErrorPath = $0.isEmpty ? nil : $0 }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(true)  // Deprecated: error log is no longer used
                         }
                         
                         HStack {
@@ -191,13 +195,13 @@ struct GeneralSettingsView: View {
         logLevel = config.logging.level
         logFormat = config.logging.format
         logAppPath = config.logging.paths.app
-        logErrorPath = config.logging.paths.error
+        logErrorPath = config.logging.paths.error  // Optional, deprecated
         logAccessPath = config.logging.paths.access
     }
     
     private func updateConfiguration() {
-        // Preserve existing advanced settings if available
-        let advancedSettings = config?.advanced ?? AdvancedModuleSettings()
+        // Preserve existing advanced settings if available (including debug settings)
+        let existingAdvanced = config?.advanced ?? AdvancedModuleSettings()
         let existingPort = config?.service.port ?? 7090
         
         config = SystemConfig(
@@ -237,7 +241,7 @@ struct GeneralSettingsView: View {
                 contacts: true,
                 mail: true
             ),
-            advanced: advancedSettings  // Preserve advanced settings
+            advanced: existingAdvanced  // Preserve advanced settings (including debug)
         )
     }
 }

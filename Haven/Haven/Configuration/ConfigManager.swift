@@ -180,6 +180,105 @@ public actor ConfigManager {
         _ = try loadSchedulesConfig()
     }
     
+    // MARK: - Initialize Defaults
+    
+    /// Initialize default configuration files if they don't exist
+    /// This should be called on first run of Haven.App
+    public func initializeDefaultsIfNeeded() throws {
+        // Check if any config file exists - if so, assume already initialized
+        let systemURL = configDirectory.appendingPathComponent("system.plist")
+        if FileManager.default.fileExists(atPath: systemURL.path) {
+            logger.info("Configuration files already exist, skipping initialization")
+            return
+        }
+        
+        logger.info("Initializing default configuration files on first run")
+        
+        // Create default SystemConfig matching default-config.yaml values
+        let defaultSystemConfig = SystemConfig(
+            service: SystemServiceConfig(
+                port: 7090,
+                auth: SystemAuthConfig(
+                    header: "X-Haven-Key",
+                    secret: "changeme"
+                )
+            ),
+            api: SystemApiConfig(
+                responseTimeoutMs: 2000,
+                statusTtlMinutes: 1440
+            ),
+            gateway: SystemGatewayConfig(
+                baseUrl: "http://localhost:8085",
+                ingestPath: "/v1/ingest",
+                ingestFilePath: "/v1/ingest/file",
+                timeoutMs: 30000
+            ),
+            logging: SystemLoggingConfig(
+                level: "info",
+                format: "json",
+                paths: SystemLoggingPathsConfig(
+                    app: "~/.haven/hostagent.log",
+                    error: nil,
+                    access: "~/.haven/hostagent_access.log"
+                )
+            ),
+            modules: ModulesEnablementConfig(
+                imessage: true,
+                ocr: true,
+                entity: true,
+                face: true,
+                fswatch: true,
+                localfs: true,
+                contacts: true,
+                mail: true
+            ),
+            advanced: AdvancedModuleSettings(
+                ocr: OCRModuleSettings(
+                    languages: ["en"],
+                    timeoutMs: 15000,
+                    recognitionLevel: "accurate",
+                    includeLayout: false
+                ),
+                entity: EntityModuleSettings(
+                    types: ["person", "organization", "place"],
+                    minConfidence: 0.6
+                ),
+                face: FaceModuleSettings(
+                    minFaceSize: 0.01,
+                    minConfidence: 0.7,
+                    includeLandmarks: false
+                ),
+                caption: CaptionModuleSettings(
+                    enabled: true,
+                    method: "ollama",
+                    timeoutMs: 60000,
+                    model: "llava:7b"
+                ),
+                fswatch: FSWatchModuleSettings(
+                    eventQueueSize: 1024,
+                    debounceMs: 500
+                ),
+                localfs: LocalFSModuleSettings(
+                    maxFileBytes: 104857600  // 100MB
+                ),
+                debug: DebugSettings(
+                    enabled: false,
+                    outputPath: "~/.haven/debug_documents.jsonl"
+                )
+            )
+        )
+        
+        // Save all default configs
+        try saveSystemConfig(defaultSystemConfig)
+        try saveEmailConfig(EmailInstancesConfig())
+        try saveFilesConfig(FilesInstancesConfig())
+        try saveContactsConfig(ContactsInstancesConfig())
+        try saveIMessageConfig(IMessageInstanceConfig())
+        try saveSchedulesConfig(CollectorSchedulesConfig())
+        
+        logger.info("Default configuration files initialized successfully")
+    }
+    
     // MARK: - Validation
     
     /// Validate system configuration

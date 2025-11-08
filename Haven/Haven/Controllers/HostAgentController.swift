@@ -11,6 +11,10 @@ import Combine
 import HavenCore
 import CollectorHandlers
 import HostAgentEmail
+import OCR
+import Entity
+import Face
+import Caption
 
 /// Main orchestration controller for HostAgent
 @MainActor
@@ -105,29 +109,52 @@ public class HostAgentController: ObservableObject {
     
     /// Ensure a specific collector is initialized (lazy initialization)
     private func ensureCollectorInitialized(id: String) async throws {
-        // Load config if not already loaded
-        if config == nil {
+        // Always reload config to pick up any changes from settings
             config = try await serviceController.loadConfig()
-        }
         
         guard let config = config else {
             throw HostAgentError.collectorErrors(["Failed to load configuration"])
         }
         
+        logger.info("Loaded configuration for collector initialization", metadata: [
+            "collector": id,
+            "debug_enabled": String(config.debug.enabled),
+            "debug_output_path": config.debug.outputPath
+        ])
+        
+        // Load enrichment configuration and create shared submitter
+        let enrichmentConfigManager = EnrichmentConfigManager()
+        let enrichmentConfig = enrichmentConfigManager.loadEnrichmentConfig()
+        let sharedSubmitter = try await createDocumentSubmitter(config: config)
+        
         // Initialize the specific collector (all modules are enabled, check instances instead)
+        // Always re-initialize to pick up config changes (especially debug mode)
         switch id {
         case "imessage":
             // iMessage doesn't require instances, always initialize if requested
-            if collectors[id] == nil {
-                let controller = try await IMessageController(config: config, serviceController: serviceController)
+                let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "imessage")
+                let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+                let controller = try await IMessageController(
+                    config: config,
+                    serviceController: serviceController,
+                    enrichmentOrchestrator: orchestrator,
+                    submitter: sharedSubmitter,
+                    skipEnrichment: skipEnrichment
+                )
                 collectors[id] = controller
                 logger.info("Initialized collector", metadata: ["collector": id])
-            }
         case "contacts":
             // Contacts requires instances - check if any are configured
+            // Contacts always skip enrichment (hardcoded)
             let hasContactsInstances = await hasContactsInstancesConfigured()
             if hasContactsInstances && collectors[id] == nil {
-                let controller = try await ContactsController(config: config, serviceController: serviceController)
+                let controller = try await ContactsController(
+                    config: config,
+                    serviceController: serviceController,
+                    enrichmentOrchestrator: nil,
+                    submitter: sharedSubmitter,
+                    skipEnrichment: true // Contacts always skip enrichment
+                )
                 collectors[id] = controller
                 logger.info("Initialized collector", metadata: ["collector": id])
             }
@@ -135,7 +162,15 @@ public class HostAgentController: ObservableObject {
             // Files requires instances - check if any are configured
             let hasFilesInstances = await hasFilesInstancesConfigured()
             if hasFilesInstances && collectors[id] == nil {
-                let controller = try await LocalFSController(config: config, serviceController: serviceController)
+                let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "localfs")
+                let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+                let controller = try await LocalFSController(
+                    config: config,
+                    serviceController: serviceController,
+                    enrichmentOrchestrator: orchestrator,
+                    submitter: sharedSubmitter,
+                    skipEnrichment: skipEnrichment
+                )
                 collectors[id] = controller
                 logger.info("Initialized collector", metadata: ["collector": id])
             }
@@ -143,7 +178,15 @@ public class HostAgentController: ObservableObject {
             // IMAP requires instances - check if any are configured
             let hasImapSources = await hasImapSourcesConfigured()
             if hasImapSources && collectors[id] == nil {
-                let controller = try await EmailController(config: config, serviceController: serviceController)
+                let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "email_imap")
+                let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+                let controller = try await EmailController(
+                    config: config,
+                    serviceController: serviceController,
+                    enrichmentOrchestrator: orchestrator,
+                    submitter: sharedSubmitter,
+                    skipEnrichment: skipEnrichment
+                )
                 collectors[id] = controller
                 logger.info("Initialized collector", metadata: ["collector": id])
             }
@@ -163,27 +206,62 @@ public class HostAgentController: ObservableObject {
             throw HostAgentError.collectorErrors(["Failed to load configuration"])
         }
         
+        // Load enrichment configuration and create shared submitter
+        let enrichmentConfigManager = EnrichmentConfigManager()
+        let enrichmentConfig = enrichmentConfigManager.loadEnrichmentConfig()
+        let sharedSubmitter = try await createDocumentSubmitter(config: config)
+        
         // Initialize all collectors that have instances configured (all modules are enabled)
         if collectors["imessage"] == nil {
-            let controller = try await IMessageController(config: config, serviceController: serviceController)
+            let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "imessage")
+            let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let controller = try await IMessageController(
+                config: config,
+                serviceController: serviceController,
+                enrichmentOrchestrator: orchestrator,
+                submitter: sharedSubmitter,
+                skipEnrichment: skipEnrichment
+            )
             collectors["imessage"] = controller
         }
         
         let hasContactsInstances = await hasContactsInstancesConfigured()
         if hasContactsInstances && collectors["contacts"] == nil {
-            let controller = try await ContactsController(config: config, serviceController: serviceController)
+            let controller = try await ContactsController(
+                config: config,
+                serviceController: serviceController,
+                enrichmentOrchestrator: nil,
+                submitter: sharedSubmitter,
+                skipEnrichment: true // Contacts always skip enrichment
+            )
             collectors["contacts"] = controller
         }
         
         let hasFilesInstances = await hasFilesInstancesConfigured()
         if hasFilesInstances && collectors["localfs"] == nil {
-            let controller = try await LocalFSController(config: config, serviceController: serviceController)
+            let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "localfs")
+            let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let controller = try await LocalFSController(
+                config: config,
+                serviceController: serviceController,
+                enrichmentOrchestrator: orchestrator,
+                submitter: sharedSubmitter,
+                skipEnrichment: skipEnrichment
+            )
             collectors["localfs"] = controller
         }
         
         let hasImapSources = await hasImapSourcesConfigured()
         if hasImapSources && collectors["email_imap"] == nil {
-            let controller = try await EmailController(config: config, serviceController: serviceController)
+            let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "email_imap")
+            let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let controller = try await EmailController(
+                config: config,
+                serviceController: serviceController,
+                enrichmentOrchestrator: orchestrator,
+                submitter: sharedSubmitter,
+                skipEnrichment: skipEnrichment
+            )
             collectors["email_imap"] = controller
         }
         
@@ -192,32 +270,140 @@ public class HostAgentController: ObservableObject {
     
     /// Initialize collectors (used by start() method for backward compatibility)
     private func initializeCollectors(config: HavenConfig) async throws {
+        // Load enrichment configuration
+        let enrichmentConfigManager = EnrichmentConfigManager()
+        let enrichmentConfig = enrichmentConfigManager.loadEnrichmentConfig()
+        
+        // Create shared document submitter (can be shared across all collectors)
+        let sharedSubmitter = try await createDocumentSubmitter(config: config)
+        
         // Initialize iMessage collector (always available, no instances needed)
-        let controller = try await IMessageController(config: config, serviceController: serviceController)
+        let skipIMessageEnrichment = enrichmentConfig.getSkipEnrichment(for: "imessage")
+        let imessageOrchestrator = skipIMessageEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+        let controller = try await IMessageController(
+            config: config,
+            serviceController: serviceController,
+            enrichmentOrchestrator: imessageOrchestrator,
+            submitter: sharedSubmitter,
+            skipEnrichment: skipIMessageEnrichment
+        )
         collectors["imessage"] = controller
         
         // Initialize Contacts collector if instances are configured
+        // Contacts always skip enrichment (hardcoded)
         let hasContactsInstances = await hasContactsInstancesConfigured()
         if hasContactsInstances {
-            let contactsController = try await ContactsController(config: config, serviceController: serviceController)
+            let contactsController = try await ContactsController(
+                config: config,
+                serviceController: serviceController,
+                enrichmentOrchestrator: nil,
+                submitter: sharedSubmitter,
+                skipEnrichment: true // Contacts always skip enrichment
+            )
             collectors["contacts"] = contactsController
         }
         
         // Initialize LocalFS collector if instances are configured
         let hasFilesInstances = await hasFilesInstancesConfigured()
         if hasFilesInstances {
-            let localfsController = try await LocalFSController(config: config, serviceController: serviceController)
+            let skipLocalFSEnrichment = enrichmentConfig.getSkipEnrichment(for: "localfs")
+            let localfsOrchestrator = skipLocalFSEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let localfsController = try await LocalFSController(
+                config: config,
+                serviceController: serviceController,
+                enrichmentOrchestrator: localfsOrchestrator,
+                submitter: sharedSubmitter,
+                skipEnrichment: skipLocalFSEnrichment
+            )
             collectors["localfs"] = localfsController
         }
         
         // Initialize Email collector if instances are configured
         let hasImapSources = await hasImapSourcesConfigured()
         if hasImapSources {
-            let emailController = try await EmailController(config: config, serviceController: serviceController)
+            let skipEmailEnrichment = enrichmentConfig.getSkipEnrichment(for: "email_imap")
+            let emailOrchestrator = skipEmailEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let emailController = try await EmailController(
+                config: config,
+                serviceController: serviceController,
+                enrichmentOrchestrator: emailOrchestrator,
+                submitter: sharedSubmitter,
+                skipEnrichment: skipEmailEnrichment
+            )
             collectors["email_imap"] = emailController
         }
         
         logger.info("Initialized collectors", metadata: ["count": String(collectors.count)])
+    }
+    
+    /// Create document submitter based on debug mode configuration
+    private func createDocumentSubmitter(config: HavenConfig) async throws -> any DocumentSubmitter {
+        // Check if debug mode is enabled
+        if config.debug.enabled {
+            logger.info("Debug mode enabled - using DebugDocumentSubmitter", metadata: [
+                "output_path": config.debug.outputPath
+            ])
+            return DebugDocumentSubmitter(outputPath: config.debug.outputPath)
+        } else {
+            // Normal mode - use BatchDocumentSubmitter with gateway client
+            let gatewaySubmissionClient = GatewaySubmissionClient(
+                config: config.gateway,
+                authToken: config.service.auth.secret
+            )
+            return BatchDocumentSubmitter(gatewayClient: gatewaySubmissionClient)
+        }
+    }
+    
+    /// Create enrichment orchestrator from config
+    private func createEnrichmentOrchestrator(config: HavenConfig) -> DocumentEnrichmentOrchestrator {
+        let ocrService = config.modules.ocr.enabled ? OCRService(
+            timeoutMs: config.modules.ocr.timeoutMs,
+            languages: config.modules.ocr.languages,
+            recognitionLevel: config.modules.ocr.recognitionLevel,
+            includeLayout: config.modules.ocr.includeLayout
+        ) : nil
+        
+        let faceService = config.modules.face.enabled ? FaceService(
+            minFaceSize: config.modules.face.minFaceSize,
+            minConfidence: config.modules.face.minConfidence,
+            includeLandmarks: config.modules.face.includeLandmarks
+        ) : nil
+        
+        let entityService = config.modules.entity.enabled ? EntityService(
+            enabledTypes: config.modules.entity.types.compactMap { EntityType(rawValue: $0) },
+            minConfidence: config.modules.entity.minConfidence
+        ) : nil
+        
+        // Log caption configuration for debugging
+        logger.info("Caption configuration", metadata: [
+            "enabled": String(config.modules.caption.enabled),
+            "method": config.modules.caption.method,
+            "timeout_ms": String(config.modules.caption.timeoutMs),
+            "model": config.modules.caption.model ?? "nil"
+        ])
+        
+        let captionService = config.modules.caption.enabled ? CaptionService(
+            method: config.modules.caption.method,
+            timeoutMs: config.modules.caption.timeoutMs,
+            model: config.modules.caption.model
+        ) : nil
+        
+        if captionService == nil {
+            logger.warning("CaptionService not created - caption module is disabled in config")
+        } else {
+            logger.info("CaptionService created successfully")
+        }
+        
+        return DocumentEnrichmentOrchestrator(
+            ocrService: ocrService,
+            faceService: faceService,
+            entityService: entityService,
+            captionService: captionService,
+            ocrConfig: config.modules.ocr,
+            faceConfig: config.modules.face,
+            entityConfig: config.modules.entity,
+            captionConfig: config.modules.caption
+        )
     }
     
     /// Extract base collector ID and instance ID from instance-specific collector ID
@@ -568,13 +754,6 @@ public class HostAgentController: ObservableObject {
             let imapInstances = emailConfig.instances.filter { instance in
                 instance.type == "imap" && instance.enabled
             }
-            
-            logger.info("Loaded IMAP instances", metadata: [
-                "count": String(imapInstances.count),
-                "total_instances": String(emailConfig.instances.count),
-                "instance_ids": imapInstances.map { $0.id }.joined(separator: ", "),
-                "all_instance_ids": emailConfig.instances.map { "\($0.id):\($0.type):\($0.enabled)" }.joined(separator: ", ")
-            ])
             
             return imapInstances
         } catch {

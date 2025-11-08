@@ -33,8 +33,8 @@ Schema migrations apply automatically. To re-run manually:
 docker compose exec -T postgres psql -U postgres -d haven -f - < schema/init.sql
 ```
 
-## Haven macOS App
-The unified Haven app is recommended for development as it provides native collectors and OCR capabilities.
+## Haven.app
+Haven.app is recommended for development as it provides native collectors and OCR capabilities.
 
 **Build and run:**
 ```bash
@@ -58,11 +58,11 @@ open build/Debug/Haven.app
 
 **Development mode:** Copy `~/Library/Messages/chat.db` to `~/.haven/chat.db` and set `HAVEN_IMESSAGE_CHAT_DB_PATH` in your environment if you want to use a copy instead of the live database.
 
-**Note:** The unified app replaces the previous HostAgent HTTP server + HavenUI architecture. Collectors run directly within the app via Swift APIs instead of requiring a separate localhost HTTP service.
+**Note:** Haven.app runs collectors directly via Swift APIs. No HTTP server is required.
 
 ## Collectors and Scripts
 
-**Using the Haven App (Recommended):**
+**Using Haven.app (Recommended):**
 - Launch Haven.app and use the Collectors window (`⌘2`) to run collectors
 - Configure collectors via Settings (`⌘,`)
 - View results in the Dashboard (`⌘1`)
@@ -97,8 +97,8 @@ State files live under `~/.haven/`. Clean them up between experiments if you nee
 ## Troubleshooting Tips
 - `409 Conflict` from `/v1/ingest`: the idempotency key already exists; verify collector state.
 - Empty search results: embeddings may still be pending; inspect worker logs or reset chunk status.
-- Haven app permission errors: confirm Full Disk Access and Contacts permissions in System Settings, then restart the app.
+- Haven.app permission errors: confirm Full Disk Access and Contacts permissions in System Settings, then restart the app.
 - Collector runtime won't start: check Gateway connectivity and configuration in Settings (`⌘,`).
 - Docker resource issues: ensure Docker Desktop has sufficient memory (4 GB+) when running the full stack.
 
-_Adapted from `README.md`, `AGENTS.md`, and `documentation/technical_reference.md`._
+_Adapted from `README.md` and `documentation/technical_reference.md`._

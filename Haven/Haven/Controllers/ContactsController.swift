@@ -18,10 +18,17 @@ public actor ContactsController: CollectorController {
     private let baseState: BaseCollectorController
     private let logger = HavenLogger(category: "contacts-controller")
     
-    public init(config: HavenConfig, serviceController: ServiceController) async throws {
+    public init(
+        config: HavenConfig,
+        serviceController: ServiceController,
+        enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        submitter: DocumentSubmitter? = nil,
+        skipEnrichment: Bool = false
+    ) async throws {
         self.baseState = BaseCollectorController()
         
         let gatewayClient = try await serviceController.getGatewayClient()
+        // Contacts always skip enrichment (hardcoded in handler)
         self.handler = ContactsHandler(config: config, gatewayClient: gatewayClient)
     }
     

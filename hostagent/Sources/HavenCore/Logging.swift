@@ -14,8 +14,7 @@ public struct HavenLogger {
     private static var outputFormat: String = "json"
     // Direct file logging for LaunchAgent (bypasses stdout buffering)
     private static var directFileLoggingEnabled = false
-    private static var stdoutLogFileHandle: FileHandle?
-    private static var stderrLogFileHandle: FileHandle?
+    private static var logFileHandle: FileHandle?
     // Shared ISO8601 formatter with fractional seconds for stable timestamps
     private static let iso8601Formatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -37,25 +36,24 @@ public struct HavenLogger {
             withIntermediateDirectories: true
         )
 
-        let stdoutPath = logsDir.appendingPathComponent("hostagent.log")
-        let stderrPath = logsDir.appendingPathComponent("hostagent-error.log")
+        let logPath = logsDir.appendingPathComponent("hostagent.log")
 
-        // Open file handles for direct writing with unbuffered I/O
+        // Open file handle for direct writing with unbuffered I/O
         do {
-            if !FileManager.default.fileExists(atPath: stdoutPath.path) {
-                FileManager.default.createFile(atPath: stdoutPath.path, contents: nil)
+            if !FileManager.default.fileExists(atPath: logPath.path) {
+                FileManager.default.createFile(atPath: logPath.path, contents: nil)
             }
-            stdoutLogFileHandle = try FileHandle(forWritingTo: stdoutPath)
-            stdoutLogFileHandle?.seekToEndOfFile()
-
-            if !FileManager.default.fileExists(atPath: stderrPath.path) {
-                FileManager.default.createFile(atPath: stderrPath.path, contents: nil)
-            }
-            stderrLogFileHandle = try FileHandle(forWritingTo: stderrPath)
-            stderrLogFileHandle?.seekToEndOfFile()
+            logFileHandle = try FileHandle(forWritingTo: logPath)
+            logFileHandle?.seekToEndOfFile()
         } catch {
             print("Failed to enable direct file logging: \(error)")
         }
+    }
+    
+    /// Ensure direct file logging is enabled (called automatically on first log)
+    private static func ensureDirectFileLogging() {
+        guard !directFileLoggingEnabled else { return }
+        enableDirectFileLogging()
     }
     
     public init(category: String) {
@@ -85,6 +83,9 @@ public struct HavenLogger {
     }
     
     private func log(level: String, message: String, metadata: [String: Any], osLogType: OSLogType) {
+        // Auto-enable direct file logging on first use
+        HavenLogger.ensureDirectFileLogging()
+        
         // Respect global minimum level
         let msgPriority = HavenLogger.priority(for: level)
         if msgPriority < HavenLogger.minimumLevelPriority {
@@ -150,9 +151,8 @@ public struct HavenLogger {
         if HavenLogger.directFileLoggingEnabled {
             let outputWithNewline = logOutput + "\n"
             if let data = outputWithNewline.data(using: .utf8) {
-                // For error levels, write to stderr log, otherwise stdout log
-                let isError = level == "error" || level == "fatal" || level == "critical"
-                if let fileHandle = isError ? HavenLogger.stderrLogFileHandle : HavenLogger.stdoutLogFileHandle {
+                // Write all logs to a single file handle
+                if let fileHandle = HavenLogger.logFileHandle {
                     // Write using low-level file descriptor for immediate disk flush
                     data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
                         if let baseAddress = ptr.baseAddress {
@@ -161,7 +161,13 @@ public struct HavenLogger {
                             fsync(fileHandle.fileDescriptor)
                         }
                     }
+                } else {
+                    // Fallback to stdout if file handle is not available
+                    print(logOutput)
                 }
+            } else {
+                // Fallback to stdout if data conversion fails
+                print(logOutput)
             }
         } else {
             // Traditional stdout/stderr output (may be buffered)
@@ -183,7 +189,7 @@ public struct HavenLogger {
         os_log("%{public}@", log: osLog, type: .info, diagnosticOutput)
         // Also write to file if enabled
         if directFileLoggingEnabled, let data = (diagnosticOutput + "\n").data(using: .utf8) {
-            if let fileHandle = stdoutLogFileHandle {
+            if let fileHandle = logFileHandle {
                 data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
                     if let baseAddress = ptr.baseAddress {
                         Darwin.write(fileHandle.fileDescriptor, baseAddress, data.count)

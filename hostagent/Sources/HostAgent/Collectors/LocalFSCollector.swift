@@ -454,12 +454,12 @@ public final class LocalFSCollector: @unchecked Sendable {
 }
 
 public struct LocalFSUploadMeta: Codable, Sendable {
-    var source: String
-    var path: String
-    var filename: String?
-    var mtime: Double?
-    var ctime: Double?
-    var tags: [String]
+    public var source: String
+    public var path: String
+    public var filename: String?
+    public var mtime: Double?
+    public var ctime: Double?
+    public var tags: [String]
     
     enum CodingKeys: String, CodingKey {
         case source

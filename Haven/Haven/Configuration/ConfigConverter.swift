@@ -77,7 +77,7 @@ public struct ConfigConverter {
                 format: systemConfig.logging.format,
                 paths: LoggingPathsConfig(
                     app: systemConfig.logging.paths.app,
-                    error: systemConfig.logging.paths.error,
+                    error: systemConfig.logging.paths.error,  // Optional, deprecated
                     access: systemConfig.logging.paths.access
                 )
             ),
@@ -106,6 +106,12 @@ public struct ConfigConverter {
                     minConfidence: systemConfig.advanced.face.minConfidence,
                     includeLandmarks: systemConfig.advanced.face.includeLandmarks
                 ),
+                caption: CaptionModuleConfig(
+                    enabled: systemConfig.advanced.caption.enabled,
+                    method: systemConfig.advanced.caption.method,
+                    timeoutMs: systemConfig.advanced.caption.timeoutMs,
+                    model: systemConfig.advanced.caption.model
+                ),
                 fswatch: FSWatchModuleConfig(
                     enabled: systemConfig.modules.fswatch,
                     watches: [],
@@ -123,6 +129,10 @@ public struct ConfigConverter {
                     redactPii: mailRedactPii ? .boolean(true) : .boolean(false),
                     sources: mailSources
                 )
+            ),
+            debug: DebugConfig(
+                enabled: systemConfig.advanced.debug.enabled,
+                outputPath: systemConfig.advanced.debug.outputPath
             )
         )
     }
@@ -152,7 +162,7 @@ public struct ConfigConverter {
                 format: config.logging.format,
                 paths: SystemLoggingPathsConfig(
                     app: config.logging.paths.app,
-                    error: config.logging.paths.error,
+                    error: config.logging.paths.error,  // Optional, deprecated
                     access: config.logging.paths.access
                 )
             ),
@@ -182,12 +192,22 @@ public struct ConfigConverter {
                     minConfidence: config.modules.face.minConfidence,
                     includeLandmarks: config.modules.face.includeLandmarks
                 ),
+                caption: CaptionModuleSettings(
+                    enabled: config.modules.caption.enabled,
+                    method: config.modules.caption.method,
+                    timeoutMs: config.modules.caption.timeoutMs,
+                    model: config.modules.caption.model
+                ),
                 fswatch: FSWatchModuleSettings(
                     eventQueueSize: config.modules.fswatch.eventQueueSize,
                     debounceMs: 500  // Default
                 ),
                 localfs: LocalFSModuleSettings(
                     maxFileBytes: 104857600  // Default 100MB
+                ),
+                debug: DebugSettings(
+                    enabled: config.debug.enabled,
+                    outputPath: config.debug.outputPath
                 )
             )
         )

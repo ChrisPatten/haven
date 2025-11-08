@@ -18,11 +18,24 @@ public actor IMessageController: CollectorController {
     private let baseState: BaseCollectorController
     private let logger = HavenLogger(category: "imessage-controller")
     
-    public init(config: HavenConfig, serviceController: ServiceController) async throws {
+    public init(
+        config: HavenConfig,
+        serviceController: ServiceController,
+        enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        submitter: DocumentSubmitter? = nil,
+        skipEnrichment: Bool = false
+    ) async throws {
         self.baseState = BaseCollectorController()
         
         let gatewayClient = try await serviceController.getGatewayClient()
-        self.handler = IMessageHandler(config: config, gatewayClient: gatewayClient)
+        // Pass enrichment settings to handler
+        self.handler = IMessageHandler(
+            config: config,
+            gatewayClient: gatewayClient,
+            enrichmentOrchestrator: enrichmentOrchestrator,
+            submitter: submitter,
+            skipEnrichment: skipEnrichment
+        )
     }
     
     public func run(request: HostAgentEmail.CollectorRunRequest?, onProgress: ((JobProgress) -> Void)?) async throws -> HostAgentEmail.RunResponse {

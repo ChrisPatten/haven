@@ -25,7 +25,7 @@ The menu bar icon changes color to reflect system status:
 
 ### Unified Architecture
 
-Unlike the previous architecture where HavenUI communicated with HostAgent via HTTP, the new Haven app:
+Haven.app:
 
 - **Direct module integration**: Calls collector modules directly via Swift APIs
 - **No HTTP server**: Eliminates the need for a separate localhost HTTP service
@@ -248,7 +248,7 @@ Gateway API (host.docker.internal:8085)
 Haven Services (Docker)
 ```
 
-Unlike the previous architecture, there is no HTTP server running on localhost:7090. All collector operations happen via direct Swift API calls within the app.
+All collector operations happen via direct Swift API calls within Haven.app. No HTTP server is required.
 
 ## Development
 
@@ -301,7 +301,6 @@ The unified app maintains feature parity with both HavenUI and HostAgent while p
 
 ## Related Documentation
 
-- [HostAgent Overview](../hostagent/index.md) - Collector architecture and API (legacy reference)
+- [Collector Implementation](../hostagent/index.md) - Collector architecture and implementation
 - [Architecture Overview](../architecture/overview.md) - System architecture and data flow
 - [Local Development](../operations/local-dev.md) - Setting up Haven for development
-- [Agents Guide](AGENTS.md) - System architecture and agent responsibilities

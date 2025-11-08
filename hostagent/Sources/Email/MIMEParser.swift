@@ -96,9 +96,16 @@ public struct MIMEParser {
         let parts = body.components(separatedBy: boundaryMarker)
         var mimeParts: [MIMEPart] = []
         
-        for part in parts {
+        for (index, part) in parts.enumerated() {
             let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty || trimmed == "--" {
+            
+            // Skip empty parts and the final closing boundary marker (ends with --)
+            if trimmed.isEmpty || trimmed == "--" || (index == parts.count - 1 && trimmed.hasSuffix("--")) {
+                continue
+            }
+            
+            // Skip preamble (content before first boundary) - it shouldn't have headers
+            if index == 0 && !trimmed.contains("Content-Type:") && !trimmed.contains("content-type:") {
                 continue
             }
             
@@ -106,29 +113,43 @@ public struct MIMEParser {
             let partLines = trimmed.components(separatedBy: .newlines)
             var partHeaderEndIndex = 0
             
-            for (index, line) in partLines.enumerated() {
+            for (lineIndex, line) in partLines.enumerated() {
                 if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    partHeaderEndIndex = index
+                    partHeaderEndIndex = lineIndex
                     break
                 }
+            }
+            
+            // If no empty line found, this might not be a valid MIME part - skip it
+            if partHeaderEndIndex == 0 && !partLines.isEmpty && !partLines[0].contains(":") {
+                continue
             }
             
             let partHeaders = partHeaderEndIndex > 0 ? parseHeaders(Array(partLines[0..<partHeaderEndIndex])) : [:]
             let partContent = partHeaderEndIndex < partLines.count ? Array(partLines[partHeaderEndIndex..<partLines.count]).joined(separator: "\n") : ""
             
-            // Decode content based on transfer encoding and charset
-            let encoding = partHeaders["content-transfer-encoding"]
+            // Get content type
             let contentType = partHeaders["content-type"] ?? "text/plain"
-            let charset = MIMEDecoder.extractCharset(from: contentType)
-            let decodedContent = MIMEDecoder.decodeContent(partContent, encoding: encoding, charset: charset).trimmingCharacters(in: .whitespacesAndNewlines)
             
-            let mimePart = MIMEPart(
-                content: decodedContent,
-                contentType: contentType,
-                headers: partHeaders
-            )
-            
-            mimeParts.append(mimePart)
+            // Check if this part is itself a multipart message
+            if contentType.lowercased().contains("multipart") {
+                // Recursively parse nested multipart content
+                let nestedParts = parseMultipartBody(partContent, contentType: contentType)
+                mimeParts.append(contentsOf: nestedParts)
+            } else {
+                // Decode content based on transfer encoding and charset
+                let encoding = partHeaders["content-transfer-encoding"]
+                let charset = MIMEDecoder.extractCharset(from: contentType)
+                let decodedContent = MIMEDecoder.decodeContent(partContent, encoding: encoding, charset: charset).trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                let mimePart = MIMEPart(
+                    content: decodedContent,
+                    contentType: contentType,
+                    headers: partHeaders
+                )
+                
+                mimeParts.append(mimePart)
+            }
         }
         
         return mimeParts

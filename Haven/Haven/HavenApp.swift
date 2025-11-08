@@ -72,6 +72,16 @@ struct HavenApp: App {
         _hostAgentController = StateObject(wrappedValue: controller)
         // Pass appState to delegate
         appDelegate.appState = appState
+        
+        // Initialize default configuration files on first run
+        Task {
+            do {
+                let configManager = ConfigManager()
+                try await configManager.initializeDefaultsIfNeeded()
+            } catch {
+                print("Warning: Failed to initialize default configuration: \(error.localizedDescription)")
+            }
+        }
     }
 
     var body: some Scene {

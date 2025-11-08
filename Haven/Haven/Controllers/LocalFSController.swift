@@ -18,11 +18,22 @@ public actor LocalFSController: CollectorController {
     private let baseState: BaseCollectorController
     private let logger = HavenLogger(category: "localfs-controller")
     
-    public init(config: HavenConfig, serviceController: ServiceController) async throws {
+    public init(
+        config: HavenConfig,
+        serviceController: ServiceController,
+        enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        submitter: DocumentSubmitter? = nil,
+        skipEnrichment: Bool = false
+    ) async throws {
         self.baseState = BaseCollectorController()
         
-        // LocalFSHandler doesn't need gateway client, it creates its own collector
-        self.handler = LocalFSHandler(config: config)
+        // Pass enrichment settings to handler
+        self.handler = LocalFSHandler(
+            config: config,
+            enrichmentOrchestrator: enrichmentOrchestrator,
+            submitter: submitter,
+            skipEnrichment: skipEnrichment
+        )
     }
     
     public func run(request: HostAgentEmail.CollectorRunRequest?, onProgress: ((JobProgress) -> Void)?) async throws -> HostAgentEmail.RunResponse {

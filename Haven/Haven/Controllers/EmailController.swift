@@ -18,11 +18,23 @@ public actor EmailController: CollectorController {
     private let baseState: BaseCollectorController
     private let logger = HavenLogger(category: "email-controller")
     
-    public init(config: HavenConfig, serviceController: ServiceController) async throws {
+    public init(
+        config: HavenConfig,
+        serviceController: ServiceController,
+        enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        submitter: DocumentSubmitter? = nil,
+        skipEnrichment: Bool = false
+    ) async throws {
         self.baseState = BaseCollectorController()
         
         // EmailImapHandler creates its own collector and services
-        self.handler = EmailImapHandler(config: config)
+        // Pass enrichment settings to handler
+        self.handler = EmailImapHandler(
+            config: config,
+            enrichmentOrchestrator: enrichmentOrchestrator,
+            submitter: submitter,
+            skipEnrichment: skipEnrichment
+        )
     }
     
     public func run(request: HostAgentEmail.CollectorRunRequest?, onProgress: ((JobProgress) -> Void)?) async throws -> HostAgentEmail.RunResponse {

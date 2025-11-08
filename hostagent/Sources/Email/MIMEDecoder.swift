@@ -205,4 +205,60 @@ public struct MIMEDecoder {
         
         return nil
     }
+    
+    /// Decode RFC 2047 encoded-word format used in email headers (Subject, From, etc.)
+    /// Format: =?charset?encoding?encoded-text?=
+    /// - Parameter header: The header value that may contain RFC 2047 encoded words
+    /// - Returns: Decoded header string
+    public static func decodeHeader(_ header: String) -> String {
+        // Pattern to match RFC 2047 encoded words: =?charset?encoding?text?=
+        let pattern = #"=\?([^?]+)\?([QqBb])\?([^?]+)\?="#
+        
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return header
+        }
+        
+        let nsString = header as NSString
+        let range = NSRange(location: 0, length: nsString.length)
+        var result = header
+        
+        // Process matches in reverse order to avoid index shifting
+        let matches = regex.matches(in: header, options: [], range: range).reversed()
+        
+        for match in matches {
+            guard match.numberOfRanges >= 4 else { continue }
+            
+            let charsetRange = match.range(at: 1)
+            let encodingRange = match.range(at: 2)
+            let textRange = match.range(at: 3)
+            
+            guard charsetRange.location != NSNotFound,
+                  encodingRange.location != NSNotFound,
+                  textRange.location != NSNotFound else { continue }
+            
+            let charset = nsString.substring(with: charsetRange).lowercased()
+            let encoding = nsString.substring(with: encodingRange).uppercased()
+            let encodedText = nsString.substring(with: textRange)
+            
+            var decodedText: String?
+            
+            if encoding == "Q" {
+                // Quoted-printable encoding
+                // In RFC 2047 Q encoding, underscores represent spaces
+                let withSpaces = encodedText.replacingOccurrences(of: "_", with: " ")
+                decodedText = decodeQuotedPrintable(withSpaces, charset: charset)
+            } else if encoding == "B" {
+                // Base64 encoding
+                decodedText = decodeBase64(encodedText, charset: charset)
+            }
+            
+            if let decoded = decodedText {
+                // Replace the encoded word with decoded text
+                result = (result as NSString).replacingCharacters(in: match.range, with: decoded)
+            }
+        }
+        
+        // Clean up any remaining whitespace issues
+        return result.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
+    }
 }

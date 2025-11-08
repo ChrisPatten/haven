@@ -38,9 +38,9 @@ docker compose exec -T postgres psql -U postgres -d haven -f - < schema/init.sql
 psql postgresql://postgres:postgres@localhost:5432/haven -f schema/init.sql
 ```
 
-## Build and Run the Haven macOS App (Recommended)
+## Build and Run Haven.app (Recommended)
 
-The unified Haven app provides a native macOS interface for running collectors:
+Haven.app provides a native macOS interface for running collectors:
 
 ```bash
 cd Haven
@@ -61,11 +61,11 @@ On first launch:
 2. Grant Contacts permission if you plan to collect contacts
 3. Configure Gateway URL in Settings (`⌘,`) or edit `~/.haven/hostagent.yaml`
 
-See the [Haven App Guide](guides/havenui.md) for detailed usage instructions.
+See the [Haven.app Guide](guides/havenui.md) for detailed usage instructions.
 
 ## Ingest Sample Data
 
-### Using the Haven App (Recommended)
+### Using Haven.app (Recommended)
 
 1. Launch Haven.app
 2. Open Collectors window (`⌘2`)

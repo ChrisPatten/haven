@@ -29,6 +29,12 @@ struct AdvancedSettingsView: View {
     @State private var faceMinConfidence: Double = 0.7
     @State private var faceIncludeLandmarks: Bool = false
     
+    // Caption settings
+    @State private var captionEnabled: Bool = false
+    @State private var captionMethod: String = "ollama"
+    @State private var captionTimeoutMs: Int = 10000
+    @State private var captionModel: String = ""
+    
     // FSWatch settings
     @State private var fswatchEventQueueSize: Int = 1024
     @State private var fswatchDebounceMs: Int = 500
@@ -36,13 +42,124 @@ struct AdvancedSettingsView: View {
     // LocalFS settings
     @State private var localfsMaxFileBytes: Int = 104857600  // 100MB
     
+    // Debug settings
+    @State private var debugEnabled: Bool = false
+    @State private var debugOutputPath: String = "~/.haven/debug_documents.jsonl"
+    
     private let entityCommonTypes = ["person", "organization", "place", "date", "money", "email", "phone", "url"]
     
     var body: some View {
+        finalView
+    }
+    
+    private var finalView: some View {
+        applyDebugModifiers(to: withLocalFSModifiers)
+    }
+    
+    private var withLocalFSModifiers: some View {
+        applyLocalFSModifiers(to: withFSWatchModifiers)
+    }
+    
+    private var withFSWatchModifiers: some View {
+        applyFSWatchModifiers(to: withCaptionModifiers)
+    }
+    
+    private var withCaptionModifiers: some View {
+        applyCaptionModifiers(to: withFaceModifiers)
+    }
+    
+    private var withFaceModifiers: some View {
+        applyFaceModifiers(to: withEntityModifiers)
+    }
+    
+    private var withEntityModifiers: some View {
+        applyEntityModifiers(to: withOCRModifiers)
+    }
+    
+    private var withOCRModifiers: some View {
+        applyOCRModifiers(to: baseView)
+    }
+    
+    private var baseView: some View {
+        contentView.onAppear(perform: loadConfiguration)
+    }
+    
+    @ViewBuilder
+    private func applyOCRModifiers<V: View>(to view: V) -> some View {
+        view
+            .onChange(of: ocrLanguages) { _, _ in updateConfiguration() }
+            .onChange(of: ocrTimeoutMs) { _, _ in updateConfiguration() }
+            .onChange(of: ocrRecognitionLevel) { _, _ in updateConfiguration() }
+            .onChange(of: ocrIncludeLayout) { _, _ in updateConfiguration() }
+    }
+    
+    @ViewBuilder
+    private func applyEntityModifiers<V: View>(to view: V) -> some View {
+        view
+            .onChange(of: entityTypes) { _, _ in updateConfiguration() }
+            .onChange(of: entityMinConfidence) { _, _ in updateConfiguration() }
+    }
+    
+    @ViewBuilder
+    private func applyFaceModifiers<V: View>(to view: V) -> some View {
+        view
+            .onChange(of: faceMinSize) { _, _ in updateConfiguration() }
+            .onChange(of: faceMinConfidence) { _, _ in updateConfiguration() }
+            .onChange(of: faceIncludeLandmarks) { _, _ in updateConfiguration() }
+    }
+    
+    @ViewBuilder
+    private func applyCaptionModifiers<V: View>(to view: V) -> some View {
+        view
+            .onChange(of: captionEnabled) { _, _ in updateConfiguration() }
+            .onChange(of: captionMethod) { _, _ in updateConfiguration() }
+            .onChange(of: captionTimeoutMs) { _, _ in updateConfiguration() }
+            .onChange(of: captionModel) { _, _ in updateConfiguration() }
+    }
+    
+    @ViewBuilder
+    private func applyFSWatchModifiers<V: View>(to view: V) -> some View {
+        view
+            .onChange(of: fswatchEventQueueSize) { _, _ in updateConfiguration() }
+            .onChange(of: fswatchDebounceMs) { _, _ in updateConfiguration() }
+    }
+    
+    @ViewBuilder
+    private func applyLocalFSModifiers<V: View>(to view: V) -> some View {
+        view
+            .onChange(of: localfsMaxFileBytes) { _, _ in updateConfiguration() }
+    }
+    
+    @ViewBuilder
+    private func applyDebugModifiers<V: View>(to view: V) -> some View {
+        view
+            .onChange(of: debugEnabled) { _, _ in updateConfiguration() }
+            .onChange(of: debugOutputPath) { _, _ in updateConfiguration() }
+    }
+    
+    private var contentView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                // OCR Settings
-                GroupBox("OCR Settings") {
+                ocrSettingsView
+                entitySettingsView
+                faceSettingsView
+                captionSettingsView
+                fswatchSettingsView
+                localfsSettingsView
+                debugSettingsView
+                
+                if let error = errorMessage {
+                    Text(error)
+                        .foregroundColor(.red)
+                        .padding()
+                }
+            }
+            .padding()
+        }
+    }
+    
+    private var ocrSettingsView: some View {
+        GroupBox("OCR Settings") {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text("Languages:")
@@ -77,10 +194,11 @@ struct AdvancedSettingsView: View {
                         Toggle("Include Layout", isOn: $ocrIncludeLayout)
                     }
                     .padding()
-                }
-                
-                // Entity Settings
-                GroupBox("Entity Extraction Settings") {
+        }
+    }
+    
+    private var entitySettingsView: some View {
+        GroupBox("Entity Extraction Settings") {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Entity Types:")
                             .font(.headline)
@@ -133,10 +251,11 @@ struct AdvancedSettingsView: View {
                         }
                     }
                     .padding()
-                }
-                
-                // Face Settings
-                GroupBox("Face Detection Settings") {
+        }
+    }
+    
+    private var faceSettingsView: some View {
+        GroupBox("Face Detection Settings") {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text("Min Face Size:")
@@ -161,10 +280,50 @@ struct AdvancedSettingsView: View {
                         Toggle("Include Landmarks", isOn: $faceIncludeLandmarks)
                     }
                     .padding()
-                }
-                
-                // FSWatch Settings
-                GroupBox("File System Watch Settings") {
+        }
+    }
+    
+    private var captionSettingsView: some View {
+        GroupBox("Caption Settings") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Enable Captioning", isOn: $captionEnabled)
+                            .help("When enabled, images will be captioned using the selected method")
+                        
+                        if captionEnabled {
+                            HStack {
+                                Text("Method:")
+                                    .frame(width: 150, alignment: .trailing)
+                                Picker("", selection: $captionMethod) {
+                                    Text("Ollama").tag("ollama")
+                                    Text("Vision").tag("vision")
+                                }
+                                .frame(width: 150)
+                            }
+                            
+                            HStack {
+                                Text("Timeout (ms):")
+                                    .frame(width: 150, alignment: .trailing)
+                                TextField("", value: $captionTimeoutMs, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                                Stepper("", value: $captionTimeoutMs, in: 1000...60000, step: 1000)
+                                    .labelsHidden()
+                            }
+                            
+                            HStack {
+                                Text("Model (optional):")
+                                    .frame(width: 150, alignment: .trailing)
+                                TextField("e.g., llava:7b", text: $captionModel)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                    }
+                    .padding()
+        }
+    }
+    
+    private var fswatchSettingsView: some View {
+        GroupBox("File System Watch Settings") {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text("Event Queue Size:")
@@ -187,10 +346,11 @@ struct AdvancedSettingsView: View {
                         }
                     }
                     .padding()
-                }
-                
-                // LocalFS Settings
-                GroupBox("Local File System Settings") {
+        }
+    }
+    
+    private var localfsSettingsView: some View {
+        GroupBox("Local File System Settings") {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text("Max File Size (bytes):")
@@ -207,31 +367,30 @@ struct AdvancedSettingsView: View {
                             .font(.caption)
                     }
                     .padding()
-                }
-                
-                if let error = errorMessage {
-                    Text(error)
-                        .foregroundColor(.red)
-                        .padding()
-                }
-            }
-            .padding()
         }
-        .onAppear {
-            loadConfiguration()
+    }
+    
+    private var debugSettingsView: some View {
+        GroupBox("Debug Mode") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Enable Debug Mode", isOn: $debugEnabled)
+                            .help("When enabled, documents are written to a JSON file instead of being submitted to the gateway")
+                        
+                        if debugEnabled {
+                            HStack {
+                                Text("Output Path:")
+                                    .frame(width: 150, alignment: .trailing)
+                                TextField("", text: $debugOutputPath)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                            
+                            Text("Documents will be written as JSON lines (JSONL format) to the specified file")
+                                .foregroundColor(.secondary)
+                                .font(.caption)
+                        }
+                    }
+                    .padding()
         }
-        .onChange(of: ocrLanguages) { _, _ in updateConfiguration() }
-        .onChange(of: ocrTimeoutMs) { _, _ in updateConfiguration() }
-        .onChange(of: ocrRecognitionLevel) { _, _ in updateConfiguration() }
-        .onChange(of: ocrIncludeLayout) { _, _ in updateConfiguration() }
-        .onChange(of: entityTypes) { _, _ in updateConfiguration() }
-        .onChange(of: entityMinConfidence) { _, _ in updateConfiguration() }
-        .onChange(of: faceMinSize) { _, _ in updateConfiguration() }
-        .onChange(of: faceMinConfidence) { _, _ in updateConfiguration() }
-        .onChange(of: faceIncludeLandmarks) { _, _ in updateConfiguration() }
-        .onChange(of: fswatchEventQueueSize) { _, _ in updateConfiguration() }
-        .onChange(of: fswatchDebounceMs) { _, _ in updateConfiguration() }
-        .onChange(of: localfsMaxFileBytes) { _, _ in updateConfiguration() }
     }
     
     private func loadConfiguration() {
@@ -252,10 +411,18 @@ struct AdvancedSettingsView: View {
         faceMinConfidence = config.advanced.face.minConfidence
         faceIncludeLandmarks = config.advanced.face.includeLandmarks
         
+        captionEnabled = config.advanced.caption.enabled
+        captionMethod = config.advanced.caption.method
+        captionTimeoutMs = config.advanced.caption.timeoutMs
+        captionModel = config.advanced.caption.model ?? ""
+        
         fswatchEventQueueSize = config.advanced.fswatch.eventQueueSize
         fswatchDebounceMs = config.advanced.fswatch.debounceMs
         
         localfsMaxFileBytes = config.advanced.localfs.maxFileBytes
+        
+        debugEnabled = config.advanced.debug.enabled
+        debugOutputPath = config.advanced.debug.outputPath
     }
     
     private func updateConfiguration() {
@@ -277,12 +444,22 @@ struct AdvancedSettingsView: View {
                 minConfidence: faceMinConfidence,
                 includeLandmarks: faceIncludeLandmarks
             ),
+            caption: CaptionModuleSettings(
+                enabled: captionEnabled,
+                method: captionMethod,
+                timeoutMs: captionTimeoutMs,
+                model: captionModel.isEmpty ? nil : captionModel
+            ),
             fswatch: FSWatchModuleSettings(
                 eventQueueSize: fswatchEventQueueSize,
                 debounceMs: fswatchDebounceMs
             ),
             localfs: LocalFSModuleSettings(
                 maxFileBytes: localfsMaxFileBytes
+            ),
+            debug: DebugSettings(
+                enabled: debugEnabled,
+                outputPath: debugOutputPath
             )
         )
         

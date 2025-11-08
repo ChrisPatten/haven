@@ -128,12 +128,12 @@ public struct SystemLoggingConfig: Codable {
 /// Logging paths configuration
 public struct SystemLoggingPathsConfig: Codable {
     public var app: String
-    public var error: String
+    public var error: String?  // Deprecated: kept for backward compatibility, not used
     public var access: String
     
     public init(
         app: String = "~/.haven/hostagent.log",
-        error: String = "~/.haven/hostagent_error.log",
+        error: String? = nil,
         access: String = "~/.haven/hostagent_access.log"
     ) {
         self.app = app
@@ -157,11 +157,11 @@ public struct ModulesEnablementConfig: Codable {
         imessage: Bool = true,
         ocr: Bool = true,
         entity: Bool = true,
-        face: Bool = false,
-        fswatch: Bool = false,
-        localfs: Bool = false,
-        contacts: Bool = false,
-        mail: Bool = false
+        face: Bool = true,
+        fswatch: Bool = true,
+        localfs: Bool = true,
+        contacts: Bool = true,
+        mail: Bool = true
     ) {
         self.imessage = imessage
         self.ocr = ocr
@@ -179,21 +179,27 @@ public struct AdvancedModuleSettings: Codable {
     public var ocr: OCRModuleSettings
     public var entity: EntityModuleSettings
     public var face: FaceModuleSettings
+    public var caption: CaptionModuleSettings
     public var fswatch: FSWatchModuleSettings
     public var localfs: LocalFSModuleSettings
+    public var debug: DebugSettings
     
     public init(
         ocr: OCRModuleSettings = OCRModuleSettings(),
         entity: EntityModuleSettings = EntityModuleSettings(),
         face: FaceModuleSettings = FaceModuleSettings(),
+        caption: CaptionModuleSettings = CaptionModuleSettings(),
         fswatch: FSWatchModuleSettings = FSWatchModuleSettings(),
-        localfs: LocalFSModuleSettings = LocalFSModuleSettings()
+        localfs: LocalFSModuleSettings = LocalFSModuleSettings(),
+        debug: DebugSettings = DebugSettings()
     ) {
         self.ocr = ocr
         self.entity = entity
         self.face = face
+        self.caption = caption
         self.fswatch = fswatch
         self.localfs = localfs
+        self.debug = debug
     }
 }
 
@@ -266,6 +272,33 @@ public struct FaceModuleSettings: Codable {
     }
 }
 
+/// Caption module settings
+public struct CaptionModuleSettings: Codable {
+    public var enabled: Bool
+    public var method: String
+    public var timeoutMs: Int
+    public var model: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case method
+        case timeoutMs = "timeout_ms"
+        case model
+    }
+    
+    public init(
+        enabled: Bool = true,
+        method: String = "ollama",
+        timeoutMs: Int = 60000,
+        model: String? = "llava:7b"
+    ) {
+        self.enabled = enabled
+        self.method = method
+        self.timeoutMs = timeoutMs
+        self.model = model
+    }
+}
+
 /// FSWatch module settings
 public struct FSWatchModuleSettings: Codable {
     public var eventQueueSize: Int
@@ -295,6 +328,22 @@ public struct LocalFSModuleSettings: Codable {
     
     public init(maxFileBytes: Int = 104857600) {
         self.maxFileBytes = maxFileBytes
+    }
+}
+
+/// Debug settings
+public struct DebugSettings: Codable {
+    public var enabled: Bool
+    public var outputPath: String
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case outputPath = "output_path"
+    }
+    
+    public init(enabled: Bool = false, outputPath: String = "~/.haven/debug_documents.jsonl") {
+        self.enabled = enabled
+        self.outputPath = outputPath
     }
 }
 

@@ -14,6 +14,11 @@ public actor IMessageHandler {
     private let entityService: EntityService?
     private let logger = HavenLogger(category: "imessage-handler")
     
+    // Enrichment support
+    private let enrichmentOrchestrator: EnrichmentOrchestrator?
+    private let submitter: DocumentSubmitter?
+    private let skipEnrichment: Bool
+    
     // State tracking
     private var isRunning: Bool = false
     private var lastRunTime: Date?
@@ -88,11 +93,24 @@ public actor IMessageHandler {
         }
     }
     
-    public init(config: HavenConfig, gatewayClient: GatewayClient) {
+    public init(
+        config: HavenConfig,
+        gatewayClient: GatewayClient,
+        enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        submitter: DocumentSubmitter? = nil,
+        skipEnrichment: Bool = false
+    ) {
+        logger.info("IMessageHandler initialized", metadata: [
+            "debug_enabled": String(config.debug.enabled),
+            "debug_output_path": config.debug.outputPath
+        ])
         self.config = config
         self.gatewayClient = gatewayClient
+        self.enrichmentOrchestrator = enrichmentOrchestrator
+        self.submitter = submitter
+        self.skipEnrichment = skipEnrichment
         
-        // Initialize OCR service if enabled
+        // Initialize OCR service if enabled (for backward compatibility with existing enrichment code)
         if config.modules.ocr.enabled && config.modules.imessage.ocrEnabled {
             self.ocrService = OCRService(
                 timeoutMs: config.modules.ocr.timeoutMs,
@@ -104,7 +122,7 @@ public actor IMessageHandler {
             self.ocrService = nil
         }
         
-        // Initialize entity service if enabled
+        // Initialize entity service if enabled (for backward compatibility with existing enrichment code)
         if config.modules.entity.enabled {
             let enabledTypes = config.modules.entity.types.compactMap { typeString -> EntityType? in
                 EntityType(rawValue: typeString)
@@ -242,6 +260,9 @@ public actor IMessageHandler {
             // - Batch 3 (T3, older): In currentBatch, NOT posted, cancelled
             // - Next run: Starts from latest fence (T2), processes backwards
             // - Messages at T3 are not in any fence, so they WILL be processed
+            // Skip saving fences if debug mode is enabled
+            let ignoreFences = config.debug.enabled
+            if !ignoreFences {
             do {
                 // Load current fences (they may have been updated during processing via periodic saves)
                 var currentFences = try loadIMessageState()
@@ -252,6 +273,9 @@ public actor IMessageHandler {
                 ])
             } catch {
                 logger.warning("Failed to save fences on cancellation", metadata: ["error": error.localizedDescription])
+                }
+            } else {
+                logger.debug("Debug mode: skipping fence save on cancellation")
             }
             
             isRunning = false
@@ -554,17 +578,24 @@ public actor IMessageHandler {
         }
         
         // Load persisted fences (timestamp-based)
+        // Skip loading fences if debug mode is enabled
+        let ignoreFences = config.debug.enabled
         var fences: [FenceRange] = []
+        if !ignoreFences {
         do {
             fences = try loadIMessageState()
             logger.info("Loaded iMessage fences", metadata: ["fence_count": String(fences.count)])
         } catch {
             logger.warning("Failed to load iMessage collector state", metadata: ["error": error.localizedDescription])
+            }
+        } else {
+            logger.info("Debug mode enabled: ignoring fences")
         }
 
         // Detect gaps between fences that need to be processed
         // Gaps can occur when a run is cancelled mid-way, leaving messages between fences unprocessed
-        let gaps = detectGapsBetweenFences(fences: fences)
+        // Skip gap detection if debug mode is enabled
+        let gaps = ignoreFences ? [] : detectGapsBetweenFences(fences: fences)
         if !gaps.isEmpty {
             logger.info("Detected gaps between fences that need processing", metadata: [
                 "gap_count": String(gaps.count),
@@ -574,8 +605,9 @@ public actor IMessageHandler {
         
         // Get total count of messages since latest fence for progress tracking
         // This includes messages in gaps between fences
+        // When debug mode is enabled, fences is empty, so this will use params-based counting
         let totalCount = try countMessagesSinceLatestFence(db: db!, params: params, fences: fences)
-        logger.info("Total messages to process", metadata: ["total_count": String(totalCount), "fence_count": String(fences.count), "gap_count": String(gaps.count)])
+        logger.info("Total messages to process", metadata: ["total_count": String(totalCount), "fence_count": String(fences.count), "gap_count": String(gaps.count), "debug_mode": String(ignoreFences)])
 
         // Retrieve candidate message ROWIDs chronologically ordered (respects params.order)
         // Default behavior: Fetches messages from newest until latest fence (when no since/until provided)
@@ -633,13 +665,22 @@ public actor IMessageHandler {
             let messageDate = appleEpochToDate(message.date)
 
             // Check if message timestamp is within any fence - if so, skip
-            if FenceManager.isTimestampInFences(messageDate, fences: fences) {
+            // Skip fence check if debug mode is enabled
+            let ignoreFences = config.debug.enabled
+            if !ignoreFences && FenceManager.isTimestampInFences(messageDate, fences: fences) {
                 logger.debug("Skipping message within fence", metadata: [
                     "row_id": String(rowId),
                     "timestamp": ISO8601DateFormatter().string(from: messageDate),
                     "fence_count": String(fences.count)
                 ])
                 continue
+            }
+            
+            if ignoreFences {
+                logger.debug("Debug mode: ignoring fences, processing message", metadata: [
+                    "row_id": String(rowId),
+                    "timestamp": ISO8601DateFormatter().string(from: messageDate)
+                ])
             }
             
             // Log when we're processing a message near fence boundaries for debugging
@@ -732,11 +773,41 @@ public actor IMessageHandler {
                 stats.attachmentsProcessed += message.attachments.count
             }
 
-            let document = try buildDocument(message: message, thread: thread, attachments: enrichedAttachments, db: db)
+            // Check limit before building/submitting document
+            if let lim = params.limit, lim > 0, submittedCount >= lim {
+                logger.info("Reached limit of \(lim) messages, stopping processing")
+                break
+            }
+
+            // Build document with new architecture enrichment support
+            // If submitter is used (e.g., debug mode), document may be nil
+            if let document = try await buildDocumentWithEnrichment(
+                message: message,
+                thread: thread,
+                attachments: enrichedAttachments,
+                db: db
+            ) {
             currentBatch.append(document)
             currentBatchTimestamps.append(messageDate)
             allDocuments.append(document)
             stats.documentsCreated += 1
+            } else {
+                // Document was submitted via submitter (e.g., debug mode), skip HTTP posting
+                // Count it toward the limit since it was successfully submitted
+                submittedCount += 1
+                stats.documentsCreated += 1
+                logger.debug("Document submitted via submitter, counting toward limit", metadata: [
+                    "row_id": String(rowId),
+                    "submitted_count": String(submittedCount),
+                    "limit": params.limit?.description ?? "unlimited"
+                ])
+                
+                // Check if we've reached the limit after this submission
+                if let lim = params.limit, lim > 0, submittedCount >= lim {
+                    logger.info("Reached limit of \(lim) messages after submitter submission, stopping processing")
+                    break
+                }
+            }
 
             // Process batch when it reaches batch size OR when we've reached the limit
             let shouldFlushBatch: Bool
@@ -773,7 +844,18 @@ public actor IMessageHandler {
                 logger.info("Processing batch of \(batchToSubmit.count) documents")
                 
                 // Post batch to gateway (URLSession will respect cancellation automatically)
-                let batchSuccessCount = try await postDocumentsToGateway(batchToSubmit, batchMode: params.batchMode)
+                // Skip HTTP posting if debug mode is enabled (documents already submitted via submitter)
+                let batchSuccessCount: Int
+                if config.debug.enabled {
+                    // In debug mode, documents are submitted via submitter, so skip HTTP posting
+                    // Count all documents as successful since they were submitted via submitter
+                    batchSuccessCount = batchToSubmit.count
+                    logger.debug("Debug mode: skipping HTTP posting, documents already submitted via submitter", metadata: [
+                        "batch_size": String(batchToSubmit.count)
+                    ])
+                } else {
+                    batchSuccessCount = try await postDocumentsToGateway(batchToSubmit, batchMode: params.batchMode)
+                }
                 logger.info("Posted batch to gateway", metadata: [
                     "batch_size": String(batchToSubmit.count),
                     "posted_to_gateway": String(batchSuccessCount),
@@ -787,8 +869,9 @@ public actor IMessageHandler {
                 onProgress?(stats.messagesProcessed, stats.messagesProcessed, submittedCount, max(0, stats.messagesProcessed - submittedCount), totalCount > 0 ? totalCount : nil)
                 
                 // Update fences with successfully submitted timestamps
+                // Skip fence updates if debug mode is enabled
                 let successfulTimestamps = Array(timestampsToSubmit.prefix(batchSuccessCount))
-                if !successfulTimestamps.isEmpty {
+                if !ignoreFences && !successfulTimestamps.isEmpty {
                     let minTimestamp = successfulTimestamps.min()!
                     let maxTimestamp = successfulTimestamps.max()!
                     fences = FenceManager.addFence(newEarliest: minTimestamp, newLatest: maxTimestamp, existingFences: fences)
@@ -874,7 +957,18 @@ public actor IMessageHandler {
             try Task.checkCancellation()
             
             logger.info("Processing final batch of \(finalBatch.count) documents")
-            let batchSuccessCount = try await postDocumentsToGateway(finalBatch, batchMode: params.batchMode)
+            // Skip HTTP posting if debug mode is enabled (documents already submitted via submitter)
+            let batchSuccessCount: Int
+            if config.debug.enabled {
+                // In debug mode, documents are submitted via submitter, so skip HTTP posting
+                // Count all documents as successful since they were submitted via submitter
+                batchSuccessCount = finalBatch.count
+                logger.debug("Debug mode: skipping HTTP posting for final batch, documents already submitted via submitter", metadata: [
+                    "batch_size": String(finalBatch.count)
+                ])
+            } else {
+                batchSuccessCount = try await postDocumentsToGateway(finalBatch, batchMode: params.batchMode)
+            }
             logger.info("Posted final batch to gateway", metadata: [
                 "batch_size": String(finalBatch.count),
                 "posted_to_gateway": String(batchSuccessCount),
@@ -888,8 +982,9 @@ public actor IMessageHandler {
             onProgress?(stats.messagesProcessed, stats.messagesProcessed, submittedCount, max(0, stats.messagesProcessed - submittedCount), totalCount > 0 ? totalCount : nil)
             
             // Update fences with successfully submitted timestamps
+            // Skip fence updates if debug mode is enabled
             let successfulTimestamps = Array(finalTimestamps.prefix(batchSuccessCount))
-            if !successfulTimestamps.isEmpty {
+            if !ignoreFences && !successfulTimestamps.isEmpty {
                 let minTimestamp = successfulTimestamps.min()!
                 let maxTimestamp = successfulTimestamps.max()!
                 fences = FenceManager.addFence(newEarliest: minTimestamp, newLatest: maxTimestamp, existingFences: fences)
@@ -913,11 +1008,16 @@ public actor IMessageHandler {
         }
         
         // Always save fences at the end of processing (final save)
+        // Skip saving fences if debug mode is enabled
+        if !ignoreFences {
         do {
             try saveIMessageState(fences: fences)
             logger.debug("Saved fences to disk (final save)", metadata: ["fence_count": String(fences.count)])
         } catch {
             logger.warning("Failed to save iMessage collector state (final save)", metadata: ["error": error.localizedDescription])
+            }
+        } else {
+            logger.debug("Debug mode: skipping fence save (final save)")
         }
 
         // After collection completes, attempt to detect and store self_person_id
@@ -1879,6 +1979,204 @@ public actor IMessageHandler {
         // Empty messages (unsent/retracted) typically have NULL attributedBody or empty attributedBody
         return !hasText && !hasAttributedBody && !hasAttachments
     }
+    
+    /// Build document with enrichment support using new architecture
+    private func buildDocumentWithEnrichment(
+        message: MessageData,
+        thread: ThreadData,
+        attachments: [[String: Any]],
+        db: OpaquePointer?
+    ) async throws -> [String: Any]? {
+        // First build the base document dictionary
+        let baseDocument = try buildDocument(message: message, thread: thread, attachments: attachments, db: db)
+        
+        // If enrichment is skipped, return base document
+        if skipEnrichment {
+            return baseDocument
+        }
+        
+        // Use new architecture enrichment if orchestrator is available
+        if let orchestrator = enrichmentOrchestrator {
+            // Convert message to CollectorDocument format for enrichment
+            let collectorDocument = try convertToCollectorDocument(
+                message: message,
+                thread: thread,
+                baseDocument: baseDocument
+            )
+            
+            // Enrich using orchestrator
+            let enrichedDocument = try await orchestrator.enrich(collectorDocument)
+            
+            // If submitter is available (e.g., debug mode), submit directly and return nil to skip HTTP posting
+            if let submitter = submitter {
+                do {
+                    _ = try await submitter.submit(enrichedDocument)
+                    logger.debug("Submitted document via submitter", metadata: [
+                        "source_id": enrichedDocument.base.sourceId
+                    ])
+                    // Return nil to indicate this was submitted via submitter and shouldn't be posted via HTTP
+                    return nil
+                } catch {
+                    logger.error("Failed to submit document via submitter", metadata: [
+                        "source_id": enrichedDocument.base.sourceId,
+                        "error": error.localizedDescription
+                    ])
+                    // Fall through to merge and post via HTTP as fallback
+                }
+            }
+            
+            // Merge enrichment data into dictionary document for HTTP posting
+            return mergeEnrichmentIntoDocument(baseDocument, enrichedDocument)
+        }
+        
+        // Fallback to base document if no orchestrator
+        return baseDocument
+    }
+    
+    /// Convert iMessage data to CollectorDocument format for enrichment
+    private func convertToCollectorDocument(
+        message: MessageData,
+        thread: ThreadData,
+        baseDocument: [String: Any]
+    ) throws -> CollectorDocument {
+        // Extract content from base document
+        let content = (baseDocument["content"] as? [String: Any])?["data"] as? String ?? ""
+        let contentHash = sha256(content)
+        
+        // Extract timestamp
+        let contentTimestampStr = baseDocument["content_timestamp"] as? String ?? ""
+        let contentTimestamp = ISO8601DateFormatter().date(from: contentTimestampStr) ?? Date()
+        
+        // Extract images from attachments (for enrichment)
+        // The filename in AttachmentData is actually the file path (enrichImageAttachment expands it)
+        var images: [ImageAttachment] = []
+        if let attachments = baseDocument["attachments"] as? [[String: Any]] {
+            for attachment in attachments {
+                // Check if this is an image attachment
+                if isImageAttachment(filename: attachment["filename"] as? String ?? "", mimeType: attachment["mime_type"] as? String) {
+                    // Use filename as path (it's actually the path in iMessage database)
+                    if let filename = attachment["filename"] as? String, !filename.isEmpty {
+                        // Expand tilde in path (same as enrichImageAttachment does)
+                        let expandedPath = NSString(string: filename).expandingTildeInPath
+                        
+                        // Verify file exists before adding to images
+                        if FileManager.default.fileExists(atPath: expandedPath) {
+                            let imageAttachment = ImageAttachment(
+                                hash: attachment["guid"] as? String ?? UUID().uuidString,
+                                mimeType: attachment["mime_type"] as? String ?? "image/jpeg",
+                                temporaryPath: expandedPath,
+                                temporaryData: nil
+                            )
+                            images.append(imageAttachment)
+                        }
+                    }
+                }
+            }
+        }
+        
+        return CollectorDocument(
+            content: content,
+            sourceType: "imessage",
+            sourceId: baseDocument["source_id"] as? String ?? "",
+            metadata: DocumentMetadata(
+                contentHash: contentHash,
+                mimeType: "text/plain",
+                timestamp: contentTimestamp,
+                timestampType: baseDocument["content_timestamp_type"] as? String ?? "received",
+                createdAt: contentTimestamp,
+                modifiedAt: contentTimestamp
+            ),
+            images: images,
+            contentType: .imessage,
+            title: baseDocument["title"] as? String ?? "",
+            canonicalUri: baseDocument["external_id"] as? String
+        )
+    }
+    
+    /// Merge enrichment data from EnrichedDocument into dictionary document
+    private func mergeEnrichmentIntoDocument(
+        _ baseDocument: [String: Any],
+        _ enrichedDocument: EnrichedDocument
+    ) -> [String: Any] {
+        var document = baseDocument
+        
+        // Add entity enrichment to metadata
+        if let entities = enrichedDocument.documentEnrichment?.entities, !entities.isEmpty {
+            var metadata = document["metadata"] as? [String: Any] ?? [:]
+            var enrichmentData: [String: Any] = [:]
+            
+            // Convert entities to dictionary format
+            var entitiesArray: [[String: Any]] = []
+            for entity in entities {
+                entitiesArray.append([
+                    "type": entity.type.rawValue,
+                    "text": entity.text,
+                    "confidence": entity.confidence,
+                    "range": entity.range  // Entity.range is [Int] (location, length)
+                ])
+            }
+            enrichmentData["entities"] = entitiesArray
+            metadata["enrichment"] = enrichmentData
+            document["metadata"] = metadata
+        }
+        
+        // Add image enrichments (OCR, faces, captions) to attachments
+        if let attachments = document["attachments"] as? [[String: Any]],
+           !enrichedDocument.imageEnrichments.isEmpty {
+            var updatedAttachments: [[String: Any]] = []
+            for (index, attachment) in attachments.enumerated() {
+                var updatedAttachment = attachment
+                
+                if index < enrichedDocument.imageEnrichments.count {
+                    let imageEnrichment = enrichedDocument.imageEnrichments[index]
+                    
+                    // Add OCR data
+                    if let ocr = imageEnrichment.ocr {
+                        var imageData = updatedAttachment["image"] as? [String: Any] ?? [:]
+                        imageData["ocr"] = [
+                            "text": ocr.ocrText,
+                            "recognition_level": ocr.recognitionLevel ?? "accurate",
+                            "lang": ocr.lang
+                        ]
+                        updatedAttachment["image"] = imageData
+                    }
+                    
+                    // Add face detection data
+                    if let faces = imageEnrichment.faces {
+                        var imageData = updatedAttachment["image"] as? [String: Any] ?? [:]
+                        imageData["faces"] = [
+                            "count": faces.faces.count,
+                            "detections": faces.faces.map { face in
+                                [
+                                    "confidence": face.confidence,
+                                    "bounds": [
+                                        "x": face.boundingBox.x,
+                                        "y": face.boundingBox.y,
+                                        "width": face.boundingBox.width,
+                                        "height": face.boundingBox.height
+                                    ]
+                                ]
+                            }
+                        ]
+                        updatedAttachment["image"] = imageData
+                    }
+                    
+                    // Add caption data
+                    if let caption = imageEnrichment.caption {
+                        var imageData = updatedAttachment["image"] as? [String: Any] ?? [:]
+                        imageData["caption"] = caption
+                        updatedAttachment["image"] = imageData
+                    }
+                }
+                
+                updatedAttachments.append(updatedAttachment)
+            }
+            document["attachments"] = updatedAttachments
+        }
+        
+        return document
+    }
+    
     
     private func buildDocument(message: MessageData, thread: ThreadData, attachments: [[String: Any]], db: OpaquePointer?) throws -> [String: Any] {
         // Extract message text

@@ -31,6 +31,14 @@ let package = Package(
             name: "FSWatch",
             targets: ["FSWatch"]
         ),
+        .library(
+            name: "Face",
+            targets: ["Face"]
+        ),
+        .library(
+            name: "Caption",
+            targets: ["Caption"]
+        ),
         .plugin(
             name: "GenerateBuildInfo",
             targets: ["GenerateBuildInfo"]
@@ -51,7 +59,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Yams", package: "Yams"),
                 .product(name: "Logging", package: "swift-log"),
-                .product(name: "Crypto", package: "swift-crypto")
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "SwiftSoup", package: "SwiftSoup"),
+                .product(name: "Demark", package: "Demark"),
+                .product(name: "HTMLEntities", package: "swift-html-entities")
             ],
             path: "Sources/HavenCore",
             plugins: ["GenerateBuildInfo"]
@@ -71,6 +82,11 @@ let package = Package(
             name: "Face",
             dependencies: ["HavenCore"],
             path: "Sources/Face"
+        ),
+        .target(
+            name: "Caption",
+            dependencies: ["HavenCore"],
+            path: "Sources/Caption"
         ),
         .target(
             name: "Email",
@@ -99,11 +115,11 @@ let package = Package(
                 "OCR",
                 "Entity",
                 "Face",
+                "Caption",
                 "Email",
                 "FSWatch"
             ],
-            path: "Sources/CollectorHandlers",
-            exclude: ["Handlers/EmailLocalHandler.swift", "Handlers/EmailLocalHandler.swift.removed"]
+            path: "Sources/CollectorHandlers"
         ),
         .plugin(
             name: "GenerateBuildInfo",
@@ -113,13 +129,18 @@ let package = Package(
             name: "HostAgentEmail",
             dependencies: [
                 "HavenCore",
-                "Email"
+                "Email",
+                "OCR",
+                "Entity",
+                "Face",
+                "Caption"
             ],
             path: "Sources/HostAgent",
-            exclude: ["main.swift"],
             sources: [
                 "Collectors",
-                "Submission"
+                "Submission",
+                "DocumentTypes.swift",
+                "EnrichmentOrchestrator.swift"
             ]
         ),
         .testTarget(

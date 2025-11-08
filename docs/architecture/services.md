@@ -8,12 +8,12 @@ Each Haven service plays a specific role in the ingestion → enrichment → sea
 | Catalog API | 8081 | FastAPI | Document + thread persistence, versioning, ingest status |
 | Search Service | 8080 | FastAPI + Typer | Hybrid lexical/vector queries backed by Qdrant |
 | Embedding Worker | n/a | Python worker | Generates embeddings for pending chunks |
-| HostAgent | 7090 (localhost) | Swift | macOS-native collectors, OCR, FS watch, link resolver |
+| Haven.app | n/a | Swift | macOS-native collectors, OCR, FS watch (runs collectors directly) |
 
 ## Gateway API
 - **Responsibilities**: Validate payloads (`/v1/ingest`, `/v1/ingest:batch`, `/v1/ingest/file`), compute idempotency keys, forward documents to Catalog, broker access to search, and expose `ask` summarisation.
 - **Authentication**: Bearer tokens via `Authorization: Bearer <token>`.
-- **Integrations**: Reads MinIO credentials for file uploads, proxies requests to Catalog and Search, communicates with HostAgent (`host.docker.internal:7090`).
+- **Integrations**: Reads MinIO credentials for file uploads, proxies requests to Catalog and Search.
 - **Observability**: `/v1/healthz`, structured logs keyed by `submission_id`, metrics covering request timings.
 
 ## Catalog API
@@ -34,21 +34,23 @@ Each Haven service plays a specific role in the ingestion → enrichment → sea
 - **Failure Handling**: Marks chunks as `failed` with error context; operators can reset to `pending` for retries.
 - **Integration**: Optional Ollama proxy for local embeddings; respects `OLLAMA_BASE_URL` and related settings.
 
-## HostAgent
-- **Responsibilities**: macOS-native API for:
-  - `POST /v1/collectors/imessage:run` for message collection
-  - `POST /v1/collectors/contacts:run` for macOS Contacts or VCF import
-  - Vision OCR (`/v1/ocr`) and face detection
-  - Filesystem watches with presigned upload support
-- **Security**: Requires Full Disk Access (Messages database), Contacts permission (for contacts collector). Authenticated via `x-auth` header.
-- **Deployment**: Installed via `make install` / `make launchd`; logs at `~/Library/Logs/Haven/hostagent.log`.
-- **Extensibility**: Modular configuration enables/disable collectors; includes LinkResolver CLI for "View Online" links. Swift implementation provides native performance and system integration.
+## Haven.app
+- **Responsibilities**: Unified macOS application that runs collectors directly:
+  - iMessage collection via direct database access
+  - Contacts collection from macOS Contacts.app
+  - Local filesystem watching and ingestion
+  - Email collection (IMAP and Mail.app)
+  - Vision OCR and image enrichment
+- **Architecture**: Collectors run directly within the app via Swift APIs (no HTTP server required).
+- **Security**: Requires Full Disk Access (Messages database), Contacts permission (for contacts collector).
+- **Deployment**: Built as macOS app bundle; configuration at `~/.haven/hostagent.yaml`.
+- **Extensibility**: Modular collector configuration; native macOS integration for best performance.
 
 ## Collectors and Utilities
-- **HostAgent Collectors**: Swift-native iMessage and Contacts collectors provide best performance and system integration.
-- **Python Collectors**: Legacy iMessage, LocalFS, and Contacts scripts remain for environments without HostAgent. They mirror the same ingestion contracts.
+- **Haven.app Collectors**: Swift-native collectors provide best performance and system integration.
+- **Python Collectors**: CLI collectors (`scripts/collectors/`) available for environments without Haven.app. They mirror the same ingestion contracts.
 - **Backfill Scripts**: `scripts/backfill_image_enrichment.py` reprocesses historical attachments with OCR/captioning.
 - **Docs Hooks**: `scripts/docs_hooks.py` ensures OpenAPI specs are available during MkDocs builds.
 - **Relationship Jobs**: `services/search_service/relationship_features.py` computes relationship scores from message history.
 
-_Adapted from `documentation/technical_reference.md`, `README.md`, and `AGENTS.md`._
+_Adapted from `documentation/technical_reference.md` and `README.md`._

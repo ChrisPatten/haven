@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import HavenCore
 import HostAgentEmail
 
@@ -6,6 +7,11 @@ public actor LocalFSHandler {
     private let config: HavenConfig
     private let collector: LocalFSCollector
     private let logger = HavenLogger(category: "localfs-handler")
+    
+    // Enrichment support
+    private let enrichmentOrchestrator: EnrichmentOrchestrator?
+    private let submitter: DocumentSubmitter?
+    private let skipEnrichment: Bool
     
     private struct CollectorStats: Codable {
         var scanned: Int
@@ -41,9 +47,146 @@ public actor LocalFSHandler {
     private var lastRunError: String?
     private var lastStateFileURL: URL?
     
-    public init(config: HavenConfig) {
+    public init(
+        config: HavenConfig,
+        enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        submitter: DocumentSubmitter? = nil,
+        skipEnrichment: Bool = false
+    ) {
         self.config = config
-        self.collector = LocalFSCollector(gatewayConfig: config.gateway, authToken: config.service.auth.secret)
+        self.enrichmentOrchestrator = enrichmentOrchestrator
+        self.submitter = submitter
+        self.skipEnrichment = skipEnrichment
+        
+        // Capture enrichment settings for closure
+        let orchestrator = enrichmentOrchestrator
+        let submitter = submitter
+        let skipEnrichment = skipEnrichment
+        
+        // Create collector with custom upload function that supports enrichment
+        self.collector = LocalFSCollector(
+            gatewayConfig: config.gateway,
+            authToken: config.service.auth.secret,
+            uploader: { config, token, fileURL, data, metadata, filename, idempotencyKey, mimeType in
+                // Use enrichment path if enabled and orchestrator/submitter available
+                if !skipEnrichment, let orchestrator = orchestrator, let submitter = submitter {
+                    return try await Self.submitFileWithEnrichment(
+                        fileURL: fileURL,
+                        data: data,
+                        metadata: metadata,
+                        filename: filename,
+                        idempotencyKey: idempotencyKey,
+                        mimeType: mimeType,
+                        orchestrator: orchestrator,
+                        submitter: submitter,
+                        gatewayConfig: config,
+                        authToken: token
+                    )
+                } else {
+                    // Fallback to standard file submission
+                    let client = GatewaySubmissionClient(config: config, authToken: token)
+                    return try await client.submitFile(
+                        fileURL: fileURL,
+                        data: data,
+                        metadata: metadata,
+                        filename: filename,
+                        idempotencyKey: idempotencyKey,
+                        mimeType: mimeType
+                    )
+                }
+            }
+        )
+    }
+    
+    /// Submit file with enrichment using new architecture
+    private static func submitFileWithEnrichment(
+        fileURL: URL,
+        data: Data,
+        metadata: LocalFSUploadMeta,
+        filename: String,
+        idempotencyKey: String,
+        mimeType: String,
+        orchestrator: EnrichmentOrchestrator,
+        submitter: DocumentSubmitter,
+        gatewayConfig: GatewayConfig,
+        authToken: String
+    ) async throws -> GatewayFileSubmissionResponse {
+        let textExtractor = TextExtractor()
+        let imageExtractor = ImageExtractor()
+        
+        // Extract text content
+        var content = ""
+        if mimeType.hasPrefix("text/") {
+            // Extract text from text files
+            if let text = String(data: data, encoding: .utf8) {
+                content = await textExtractor.extractText(from: text, mimeType: mimeType)
+            }
+        }
+        
+        // Extract images
+        let images = await imageExtractor.extractImages(from: data, mimeType: mimeType, filePath: fileURL.path)
+        
+        // Build CollectorDocument
+        let contentHash = sha256Hex(of: data)
+        let timestamp = metadata.mtime.map { Date(timeIntervalSince1970: $0) } ?? Date()
+        
+        let document = CollectorDocument(
+            content: content.isEmpty ? "[File: \(filename)]" : content,
+            sourceType: "localfs",
+            sourceId: "localfs:\(idempotencyKey)",
+            metadata: DocumentMetadata(
+                contentHash: contentHash,
+                mimeType: mimeType,
+                timestamp: timestamp,
+                timestampType: "modified",
+                createdAt: metadata.ctime.map { Date(timeIntervalSince1970: $0) } ?? timestamp,
+                modifiedAt: timestamp
+            ),
+            images: images,
+            contentType: .localfs,
+            title: filename,
+            canonicalUri: fileURL.path
+        )
+        
+        // Enrich document
+        let enrichedDocument = try await orchestrator.enrich(document)
+        
+        // Submit via DocumentSubmitter
+        let submissionResult = try await submitter.submit(enrichedDocument)
+        
+        // Convert submission result to GatewayFileSubmissionResponse
+        // Note: DocumentSubmitter returns SubmissionResult, but we need GatewayFileSubmissionResponse
+        // Extract submission details from SubmissionResult
+        guard submissionResult.success, let submission = submissionResult.submission else {
+            // Return error response - throw an error
+            throw NSError(
+                domain: "LocalFSHandler",
+                code: submissionResult.statusCode ?? 500,
+                userInfo: [NSLocalizedDescriptionKey: submissionResult.error ?? "Unknown error"]
+            )
+        }
+        
+        // Create response from submission
+        var response = GatewayFileSubmissionResponse(
+            submissionId: submission.submissionId,
+            docId: submission.docId,
+            externalId: submission.externalId,
+            status: submission.status,
+            threadId: submission.threadId,
+            fileIds: [],
+            duplicate: false,
+            totalChunks: 0,
+            fileSha256: "",
+            objectKey: "",
+            extractionStatus: "completed"
+        )
+        return response
+    }
+    
+    /// Compute SHA-256 hash of data
+    private static func sha256Hex(of data: Data) -> String {
+        let hash = SHA256.hash(data: data)
+        return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
     
     // MARK: - Direct Swift APIs

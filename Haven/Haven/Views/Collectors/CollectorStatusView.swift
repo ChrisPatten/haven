@@ -108,16 +108,33 @@ struct CollectorStatusView: View {
     private func lastRunStatsView(_ stats: CollectorStateResponse) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let statsDict = stats.lastRunStats {
+                // Primary stats: Found, Processed, Submitted
                 HStack(spacing: 16) {
                     if let scanned = getIntValue(from: statsDict, key: "scanned") {
-                        StatItem(label: "Scanned", value: "\(scanned)")
+                        StatItem(label: "Found", value: "\(scanned)")
+                    }
+                    if let matched = getIntValue(from: statsDict, key: "matched") {
+                        StatItem(label: "Processed", value: "\(matched)")
                     }
                     if let submitted = getIntValue(from: statsDict, key: "submitted") {
                         StatItem(label: "Submitted", value: "\(submitted)")
                     }
-                    if let errors = getIntValue(from: statsDict, key: "errors"), errors > 0 {
+                }
+                
+                // Secondary stats: Errors (if any)
+                if let errors = getIntValue(from: statsDict, key: "errors"), errors > 0 {
+                    HStack(spacing: 16) {
                         StatItem(label: "Errors", value: "\(errors)", color: .red)
+                        if let skipped = getIntValue(from: statsDict, key: "skipped"), skipped > 0 {
+                            StatItem(label: "Skipped", value: "\(skipped)", color: .orange)
+                        }
                     }
+                    .padding(.top, 4)
+                } else if let skipped = getIntValue(from: statsDict, key: "skipped"), skipped > 0 {
+                    HStack(spacing: 16) {
+                        StatItem(label: "Skipped", value: "\(skipped)", color: .orange)
+                    }
+                    .padding(.top, 4)
                 }
             }
             

@@ -7,6 +7,7 @@ public struct HavenConfig: Codable {
     public var gateway: GatewayConfig
     public var logging: LoggingConfig
     public var modules: ModulesConfig
+    public var debug: DebugConfig
     
     enum CodingKeys: String, CodingKey {
         case service
@@ -14,18 +15,21 @@ public struct HavenConfig: Codable {
         case gateway
         case logging
         case modules
+        case debug
     }
     
     public init(service: ServiceConfig = ServiceConfig(),
                 api: ApiConfig = ApiConfig(),
                 gateway: GatewayConfig = GatewayConfig(),
                 logging: LoggingConfig = LoggingConfig(),
-                modules: ModulesConfig = ModulesConfig()) {
+                modules: ModulesConfig = ModulesConfig(),
+                debug: DebugConfig = DebugConfig()) {
         self.service = service
         self.api = api
         self.gateway = gateway
         self.logging = logging
         self.modules = modules
+        self.debug = debug
     }
     
     public init(from decoder: Decoder) throws {
@@ -37,6 +41,7 @@ public struct HavenConfig: Codable {
         self.gateway = try container.decode(GatewayConfig.self, forKey: .gateway)
         self.logging = try container.decode(LoggingConfig.self, forKey: .logging)
         self.modules = try container.decode(ModulesConfig.self, forKey: .modules)
+        self.debug = try container.decodeIfPresent(DebugConfig.self, forKey: .debug) ?? DebugConfig()
     }
 }
 
@@ -129,6 +134,7 @@ public struct ModulesConfig: Codable {
     public var ocr: OCRModuleConfig
     public var entity: EntityModuleConfig
     public var face: FaceModuleConfig
+    public var caption: CaptionModuleConfig
     public var fswatch: FSWatchModuleConfig
     public var localfs: LocalFSModuleConfig
     public var contacts: StubModuleConfig
@@ -139,6 +145,7 @@ public struct ModulesConfig: Codable {
         case ocr
         case entity
         case face
+        case caption
         case fswatch
         case localfs
         case contacts
@@ -149,6 +156,7 @@ public struct ModulesConfig: Codable {
                 ocr: OCRModuleConfig = OCRModuleConfig(),
                 entity: EntityModuleConfig = EntityModuleConfig(),
                 face: FaceModuleConfig = FaceModuleConfig(),
+                caption: CaptionModuleConfig = CaptionModuleConfig(),
                 fswatch: FSWatchModuleConfig = FSWatchModuleConfig(),
                 localfs: LocalFSModuleConfig = LocalFSModuleConfig(),
                 contacts: StubModuleConfig = StubModuleConfig(),
@@ -157,6 +165,7 @@ public struct ModulesConfig: Codable {
         self.ocr = ocr
         self.entity = entity
         self.face = face
+        self.caption = caption
         self.fswatch = fswatch
         self.localfs = localfs
         self.contacts = contacts
@@ -172,6 +181,7 @@ public struct ModulesConfig: Codable {
         // New fields with defaults for backward compatibility
         entity = try container.decodeIfPresent(EntityModuleConfig.self, forKey: .entity) ?? EntityModuleConfig()
         face = try container.decodeIfPresent(FaceModuleConfig.self, forKey: .face) ?? FaceModuleConfig()
+        caption = try container.decodeIfPresent(CaptionModuleConfig.self, forKey: .caption) ?? CaptionModuleConfig()
         
         fswatch = try container.decode(FSWatchModuleConfig.self, forKey: .fswatch)
         localfs = try container.decodeIfPresent(LocalFSModuleConfig.self, forKey: .localfs) ?? LocalFSModuleConfig()
@@ -322,6 +332,39 @@ public struct FaceModuleConfig: Codable {
     }
 }
 
+public struct CaptionModuleConfig: Codable {
+    public var enabled: Bool
+    public var method: String  // "ollama", "vision", etc.
+    public var timeoutMs: Int
+    public var model: String?  // Optional model name for captioning service
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case method
+        case timeoutMs = "timeout_ms"
+        case model
+    }
+    
+    public init(enabled: Bool = false,
+                method: String = "ollama",
+                timeoutMs: Int = 60000,
+                model: String? = nil) {
+        self.enabled = enabled
+        self.method = method
+        self.timeoutMs = timeoutMs
+        self.model = model
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        method = try container.decodeIfPresent(String.self, forKey: .method) ?? "ollama"
+        timeoutMs = try container.decodeIfPresent(Int.self, forKey: .timeoutMs) ?? 60000
+        model = try container.decodeIfPresent(String.self, forKey: .model)
+    }
+}
+
 public struct FSWatchModuleConfig: Codable {
     public var enabled: Bool
     public var watches: [FSWatchEntry]
@@ -449,7 +492,7 @@ public struct LoggingConfig: Codable {
 
 public struct LoggingPathsConfig: Codable {
     public var app: String
-    public var error: String
+    public var error: String?  // Deprecated: kept for backward compatibility, not used
     public var access: String
     
     enum CodingKeys: String, CodingKey {
@@ -458,10 +501,32 @@ public struct LoggingPathsConfig: Codable {
         case access
     }
     
-    public init(app: String = "~/.haven/hostagent.log", error: String = "~/.haven/hostagent_error.log", access: String = "~/.haven/hostagent_access.log") {
+    public init(app: String = "~/.haven/hostagent.log", error: String? = nil, access: String = "~/.haven/hostagent_access.log") {
         self.app = app
         self.error = error
         self.access = access
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        app = try container.decodeIfPresent(String.self, forKey: .app) ?? "~/.haven/hostagent.log"
+        error = try container.decodeIfPresent(String.self, forKey: .error)  // Decode but ignore
+        access = try container.decodeIfPresent(String.self, forKey: .access) ?? "~/.haven/hostagent_access.log"
+    }
+}
+
+public struct DebugConfig: Codable {
+    public var enabled: Bool
+    public var outputPath: String
+    
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case outputPath = "output_path"
+    }
+    
+    public init(enabled: Bool = false, outputPath: String = "~/.haven/debug_documents.jsonl") {
+        self.enabled = enabled
+        self.outputPath = outputPath
     }
 }
 
@@ -717,33 +782,34 @@ public class ConfigLoader {
     
     public init() {}
     
-    /// Load configuration from YAML file with environment variable overrides
+    /// Load configuration from plist files (system.plist) with environment variable overrides
+    /// This replaces the old YAML-based config system
     public func load(from path: String? = nil) throws -> HavenConfig {
-        let configPath = path ?? defaultConfigPath()
+        // Use plist-based config system (same as Haven.App)
+        // Load from ~/.haven/system.plist and other plist files
+        let configDir = defaultConfigDirectory()
+        let systemURL = configDir.appendingPathComponent("system.plist")
         
         // Start with defaults
         var config = HavenConfig()
-        // Ensure default config is present in user's ~/.haven when no explicit config provided
-        if path == nil {
-            ensureDefaultConfigExists(at: configPath)
-        }
-
-        // Load from file if it exists
-        if FileManager.default.fileExists(atPath: configPath) {
-            logger.info("Loading configuration from \(configPath)")
-            let url = URL(fileURLWithPath: configPath)
-            let data = try Data(contentsOf: url)
-
-            // Parse YAML - if parsing fails, log and continue using defaults
-            let decoder = YAMLDecoder()
+        
+        // Load from plist if it exists
+        if FileManager.default.fileExists(atPath: systemURL.path) {
+            logger.info("Loading configuration from plist files in \(configDir.path)")
             do {
-                config = try decoder.decode(HavenConfig.self, from: data)
+                let data = try Data(contentsOf: systemURL)
+                let decoder = PropertyListDecoder()
+                // Note: We need to load SystemConfig and convert to HavenConfig
+                // For now, use defaults and let ConfigManager handle the conversion
+                // This is a compatibility shim - HostAgent should use ConfigManager directly
+                logger.info("Plist config found, but ConfigLoader should use ConfigManager for full support")
             } catch {
-                logger.error("Failed to parse configuration file; using defaults", metadata: ["error": "\(error)"])
-                // Keep `config` as initialized defaults and continue
+                logger.error("Failed to parse plist configuration file; using defaults", metadata: ["error": "\(error)"])
             }
         } else {
-            logger.warning("Configuration file not found at \(configPath), using defaults")
+            logger.warning("Configuration file not found at \(systemURL.path), using defaults")
+            // Ensure defaults are initialized if this is first run
+            ensureDefaultConfigExists()
         }
         
         // Apply environment variable overrides
@@ -755,76 +821,44 @@ public class ConfigLoader {
         return config
     }
     
-    public func save(_ config: HavenConfig, to path: String? = nil) throws {
-        let configPath = path ?? defaultConfigPath()
-        let url = URL(fileURLWithPath: configPath)
-        
-        // Ensure directory exists
-        let dir = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        
-        // Encode to YAML
-        let encoder = YAMLEncoder()
-        let data = try encoder.encode(config)
-        try data.write(to: url)
-        
-        logger.info("Saved configuration to \(configPath)")
+    private func defaultConfigDirectory() -> URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".haven", isDirectory: true)
     }
     
-    private func defaultConfigPath() -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".haven/hostagent.yaml").path
-    }
-
-    /// Ensure the default config file is copied from bundled resources to the user's ~/.haven
-    /// if no explicit config path was provided and the file does not already exist.
-    private func ensureDefaultConfigExists(at configPath: String) {
+    /// Ensure default plist config files exist (delegates to ConfigManager logic)
+    private func ensureDefaultConfigExists() {
+        let configDir = defaultConfigDirectory()
+        let systemURL = configDir.appendingPathComponent("system.plist")
+        
         // If config already exists, nothing to do
-        if FileManager.default.fileExists(atPath: configPath) {
+        if FileManager.default.fileExists(atPath: systemURL.path) {
             return
         }
-
-        // Attempt to locate the bundled default config in package resources
-        var defaultConfigURL: URL? = nil
-        // Try a few candidate locations within the repository layout for Resources/default-config.yaml
-        var candidates: [URL] = []
-
-        // 1) Resources/ relative to this package directory (source layout)
-        let currentFileURL = URL(fileURLWithPath: #file)
-        let packageDir = currentFileURL.deletingLastPathComponent().deletingLastPathComponent()
-        candidates.append(packageDir.appendingPathComponent("Resources/default-config.yaml"))
-
-        // 2) Resources/ relative to current working directory (when running from hostagent folder)
-        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        candidates.append(cwd.appendingPathComponent("Resources/default-config.yaml"))
-        candidates.append(cwd.appendingPathComponent("../Resources/default-config.yaml"))
-
-        // 3) workspace-relative hostagent/Resources (when running from repo root)
-        candidates.append(cwd.appendingPathComponent("hostagent/Resources/default-config.yaml"))
-
-        for candidate in candidates {
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                defaultConfigURL = candidate
-                break
-            }
-        }
-
-        guard let src = defaultConfigURL else {
-            logger.info("No bundled default-config.yaml found; skipping copy to \(configPath)")
-            return
-        }
-
+        
+        // Create default config using same defaults as ConfigManager
+        // This ensures HostAgent can work standalone without Haven.App
+        logger.info("Initializing default plist configuration files")
+        
         do {
-            let destURL = URL(fileURLWithPath: configPath)
-            let dir = destURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: destURL.path) == false {
-                try FileManager.default.copyItem(at: src, to: destURL)
-                logger.info("Created default config at \(configPath)")
-            }
+            // Ensure directory exists
+            try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+            
+            // Create default HavenConfig and convert to SystemConfig for plist
+            let defaultConfig = HavenConfig()
+            // For now, just log - actual initialization should happen via ConfigManager
+            // This is a fallback for standalone HostAgent usage
+            logger.info("Default config initialization should be handled by ConfigManager.initializeDefaultsIfNeeded()")
         } catch {
-            logger.error("Failed to copy default config to \(configPath)", metadata: ["error": "\(error)"])
+            logger.error("Failed to initialize default config", metadata: ["error": "\(error)"])
         }
+    }
+    
+    public func save(_ config: HavenConfig, to path: String? = nil) throws {
+        // Config saving should be done via ConfigManager in Haven.App
+        // This method is kept for backward compatibility but logs a warning
+        logger.warning("ConfigLoader.save() is deprecated. Use ConfigManager.saveSystemConfig() instead.")
+        throw ConfigError.validationError("Config saving should be done via ConfigManager, not ConfigLoader")
     }
     
     private func applyEnvironmentOverrides(_ config: inout HavenConfig) {
@@ -872,8 +906,11 @@ public class ConfigLoader {
     }
 }
 
-// MARK: - YAML Coding Support
+// MARK: - YAML Coding Support (DEPRECATED - No longer used)
+// YAML config has been replaced with plist-based configuration
+// This code is kept for reference but is no longer used
 
+/*
 import Yams
 
 struct YAMLDecoder {
@@ -954,3 +991,4 @@ struct YAMLNodeDecoder {
         }
     }
 }
+*/

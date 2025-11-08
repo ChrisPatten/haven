@@ -733,13 +733,6 @@ public actor ContactsHandler {
     }
     
     private func submitBatch(batch: [PersonPayloadModel]) async throws {
-        let url = URL(string: config.gateway.baseUrl + "/catalog/contacts/ingest")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(config.service.auth.secret)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = TimeInterval(config.gateway.timeoutMs) / 1000.0
-        
         // Build payload
         let deviceId = getDeviceId()
         let payload: [String: Any] = [
@@ -752,6 +745,24 @@ public actor ContactsHandler {
             }
         ]
         
+        // Check if debug mode is enabled
+        if config.debug.enabled {
+            // Write contact batch payload to debug file
+            try await writeContactsBatchToDebugFile(payload: payload)
+            logger.debug("Debug mode: wrote contacts batch to debug file", metadata: [
+                "count": String(batch.count),
+                "output_path": config.debug.outputPath
+            ])
+            return
+        }
+        
+        // Normal mode: post to gateway
+        let url = URL(string: config.gateway.baseUrl + "/catalog/contacts/ingest")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(config.service.auth.secret)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = TimeInterval(config.gateway.timeoutMs) / 1000.0
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
         
         logger.debug("Posting contacts batch to gateway", metadata: [
@@ -806,6 +817,13 @@ public actor ContactsHandler {
             logger.error("Failed to submit batch after retries", metadata: ["error": error.localizedDescription])
             throw error
         }
+    }
+    
+    /// Write contacts batch payload to debug file (JSONL format)
+    /// Uses DebugFileWriter to centralize all debug file I/O
+    private func writeContactsBatchToDebugFile(payload: [String: Any]) async throws {
+        let fileWriter = DebugFileWriter(outputPath: config.debug.outputPath)
+        try await fileWriter.writeDictionary(payload)
     }
     
     private func personToDict(person: PersonPayloadModel) -> [String: Any] {

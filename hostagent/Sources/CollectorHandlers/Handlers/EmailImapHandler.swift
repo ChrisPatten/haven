@@ -11,6 +11,11 @@ public actor EmailImapHandler {
     private let baseSecretResolver: SecretResolving
     private let logger = HavenLogger(category: "email-imap-handler")
     
+    // Enrichment support
+    private let enrichmentOrchestrator: EnrichmentOrchestrator?
+    private let submitter: DocumentSubmitter?
+    private let skipEnrichment: Bool
+    
     // State tracking
     private var isRunning: Bool = false
     private var lastRunTime: Date?
@@ -57,7 +62,10 @@ public actor EmailImapHandler {
         config: HavenConfig,
         emailCollector: (any EmailCollecting)? = nil,
         emailService: EmailService? = nil,
-        secretResolver: SecretResolving = KeychainSecretResolver()
+        secretResolver: SecretResolving = KeychainSecretResolver(),
+        enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        submitter: DocumentSubmitter? = nil,
+        skipEnrichment: Bool = false
     ) {
         self.config = config
         if let providedCollector = emailCollector {
@@ -74,6 +82,9 @@ public actor EmailImapHandler {
         }
         self.emailService = emailService ?? EmailService()
         self.baseSecretResolver = secretResolver
+        self.enrichmentOrchestrator = enrichmentOrchestrator
+        self.submitter = submitter
+        self.skipEnrichment = skipEnrichment
         
         // Load persisted state (lazy loading on first getCollectorState call)
     }
@@ -208,7 +219,10 @@ public actor EmailImapHandler {
             ) async -> (totalFound: Int, processed: Int, submitted: Int, results: [ImapMessageResult], errors: [ImapRunError], earliestTouched: Date?, latestTouched: Date?) {
                 do {
                     // Load persisted fences BEFORE searching to optimize what we fetch
+                    // Skip loading fences if debug mode is enabled
+                    let ignoreFences = config.debug.enabled
                     var fences: [FenceRange] = []
+                    if !ignoreFences {
                     do {
                         fences = try loadImapState(account: account, folder: folder)
                         logger.info("Loaded IMAP fences", metadata: [
@@ -218,6 +232,12 @@ public actor EmailImapHandler {
                         ])
                     } catch {
                         logger.warning("Failed to load IMAP account state", metadata: ["account": account.responseIdentifier, "folder": folder, "error": error.localizedDescription])
+                        }
+                    } else {
+                        logger.info("Debug mode enabled: ignoring fences", metadata: [
+                            "account": account.responseIdentifier,
+                            "folder": folder
+                        ])
                     }
                     
                     if reset == true {
@@ -227,11 +247,27 @@ public actor EmailImapHandler {
 
                     // Calculate gaps in fences (time ranges not covered by fences)
                     // These are the ranges we need to search for new messages
-                    let gaps = Self.calculateGaps(
+                    // When debug mode is enabled, create a gap covering the entire requested range
+                    let gaps: [FenceRange]
+                    if ignoreFences {
+                        // Create a single gap covering the entire requested range
+                        // Use Unix epoch (1970-01-01) instead of Date.distantPast (year 1) for IMAP compatibility
+                        let gapSince = sinceDate ?? Date(timeIntervalSince1970: 0)
+                        let gapBefore = beforeDate ?? Date()
+                        gaps = [FenceRange(earliest: gapSince, latest: gapBefore)]
+                        logger.info("Debug mode: creating gap covering entire requested range", metadata: [
+                            "account": account.responseIdentifier,
+                            "folder": folder,
+                            "since": gapSince.description,
+                            "before": gapBefore.description
+                        ])
+                    } else {
+                        gaps = Self.calculateGaps(
                         fences: fences,
                         requestedSince: sinceDate,
                         requestedBefore: beforeDate
                     )
+                    }
                     
                     logger.info("Calculated fence gaps for IMAP search", metadata: [
                         "account": account.responseIdentifier,
@@ -239,11 +275,13 @@ public actor EmailImapHandler {
                         "fence_count": "\(fences.count)",
                         "gap_count": "\(gaps.count)",
                         "requested_since": sinceDate?.description ?? "nil",
-                        "requested_before": beforeDate?.description ?? "nil"
+                        "requested_before": beforeDate?.description ?? "nil",
+                        "debug_mode": String(ignoreFences)
                     ])
                     
                     // If there are no gaps (everything is fenced), skip searching
-                    if gaps.isEmpty && !fences.isEmpty {
+                    // Skip this check if debug mode is enabled
+                    if !ignoreFences && gaps.isEmpty && !fences.isEmpty {
                         logger.info("All requested time range is covered by fences, skipping IMAP search", metadata: [
                             "account": account.responseIdentifier,
                             "folder": folder
@@ -254,16 +292,23 @@ public actor EmailImapHandler {
                     // Perform searches for each gap and combine results
                     var allUIDs: Set<UInt32> = []
                     for (index, gap) in gaps.enumerated() {
+                        // If no explicit beforeDate was provided, use current time right before search
+                        // This ensures we catch messages that arrived between gap creation and search execution
+                        // The gap.latest was set to Date() at gap creation time, but we want the current time
+                        let searchBefore: Date = beforeDate ?? Date()
+                        
                         logger.info("Searching IMAP gap \(index + 1)/\(gaps.count)", metadata: [
                             "account": account.responseIdentifier,
                             "folder": folder,
                             "gap_since": gap.earliest.description,
-                            "gap_before": gap.latest.description
+                            "gap_before": gap.latest.description,
+                            "search_before": searchBefore.description,
+                            "had_explicit_before": beforeDate != nil ? "true" : "false"
                         ])
                         let gapResults = try await imapSession.searchMessages(
                             folder: folder,
                             since: gap.earliest,
-                            before: gap.latest
+                            before: searchBefore
                         )
                         allUIDs.formUnion(gapResults)
                         logger.debug("IMAP gap search completed", metadata: [
@@ -388,7 +433,8 @@ public actor EmailImapHandler {
                             }
                             
                             // Update fences with successfully submitted timestamps
-                            if !successfulTimestamps.isEmpty {
+                            // Skip fence updates if debug mode is enabled
+                            if !ignoreFences && !successfulTimestamps.isEmpty {
                                 let minTimestamp = successfulTimestamps.min()!
                                 let maxTimestamp = successfulTimestamps.max()!
                                 fences = FenceManager.addFence(newEarliest: minTimestamp, newLatest: maxTimestamp, existingFences: fences)
@@ -438,7 +484,8 @@ public actor EmailImapHandler {
                                 processedCount += 1
                                 
                                 // Check if message timestamp is within any fence - if so, skip
-                                if let msgDate = message.date, FenceManager.isTimestampInFences(msgDate, fences: fences) {
+                                // Skip fence check if debug mode is enabled
+                                if !ignoreFences, let msgDate = message.date, FenceManager.isTimestampInFences(msgDate, fences: fences) {
                                     logger.debug("Skipping message within fence", metadata: [
                                         "account": account.responseIdentifier,
                                         "folder": folder,
@@ -446,6 +493,15 @@ public actor EmailImapHandler {
                                         "timestamp": ISO8601DateFormatter().string(from: msgDate)
                                     ])
                                     continue
+                                }
+                                
+                                if ignoreFences, let msgDate = message.date {
+                                    logger.debug("Debug mode: ignoring fences, processing message", metadata: [
+                                        "account": account.responseIdentifier,
+                                        "folder": folder,
+                                        "uid": String(uid),
+                                        "timestamp": ISO8601DateFormatter().string(from: msgDate)
+                                    ])
                                 }
                                 
                                 // If date bounds are specified, check them and skip/stop based on processing order
@@ -485,41 +541,115 @@ public actor EmailImapHandler {
                                     }
                                 }
                                 
-                                let payload = try await emailCollector.buildDocumentPayload(
-                                    email: message,
-                                    intent: nil,
-                                    relevance: nil,
-                                    sourceType: "email",
-                                    sourceIdPrefix: sourcePrefix
-                                )
-                                
-                                if dryRun {
-                                    let entry = ImapMessageResult(
-                                        uid: uid,
-                                        messageId: payload.metadata.messageId,
-                                        status: "dry_run",
-                                        submissionId: nil,
-                                        docId: nil,
-                                        duplicate: nil
+                                // Use new architecture: collectAndSubmit
+                                if let emailCollectorActor = emailCollector as? EmailCollector {
+                                    let submissionResult = try await emailCollectorActor.collectAndSubmit(
+                                        email: message,
+                                        enrichmentOrchestrator: enrichmentOrchestrator,
+                                        submitter: submitter,
+                                        skipEnrichment: skipEnrichment,
+                                        config: config,
+                                        intent: nil,
+                                        relevance: nil
                                     )
-                                    results.append(entry)
-                                    continue
-                                }
-                                
-                                if globalLimit > 0 && remainingGlobalLimit <= 0 {
-                                    stopProcessing = true
-                                    break
-                                }
-                                
-                                pendingSubmissions.append(
-                                    PendingImapSubmission(
-                                        uid: uid,
-                                        payload: payload,
-                                        messageDate: message.date
+                                    
+                                    if dryRun {
+                                        // For dry run, extract message ID from email
+                                        let messageId = message.messageId?.trimmingCharacters(in: CharacterSet(charactersIn: "<>")).trimmingCharacters(in: .whitespacesAndNewlines)
+                                        let entry = ImapMessageResult(
+                                            uid: uid,
+                                            messageId: messageId?.isEmpty == false ? messageId : nil,
+                                            status: "dry_run",
+                                            submissionId: nil,
+                                            docId: nil,
+                                            duplicate: nil
+                                        )
+                                        results.append(entry)
+                                        continue
+                                    }
+                                    
+                                    // Handle submission result
+                                    if submissionResult.success, let submission = submissionResult.submission {
+                                        submittedCount += 1
+                                        let entry = ImapMessageResult(
+                                            uid: uid,
+                                            messageId: submission.docId, // Use docId as message identifier
+                                            status: submission.status,
+                                            submissionId: submission.submissionId,
+                                            docId: submission.docId,
+                                            duplicate: submission.duplicate
+                                        )
+                                        results.append(entry)
+                                        
+                                        if let msgDate = message.date {
+                                            if let prev = earliestProcessedDate {
+                                                if msgDate < prev { earliestProcessedDate = msgDate }
+                                            } else {
+                                                earliestProcessedDate = msgDate
+                                            }
+                                            if let prev = latestProcessedDate {
+                                                if msgDate > prev { latestProcessedDate = msgDate }
+                                            } else {
+                                                latestProcessedDate = msgDate
+                                            }
+                                        }
+                                        
+                                        // Report progress
+                                        onProgress?(processedCount, processedCount, submittedCount, max(0, processedCount - submittedCount))
+                                        
+                                        // Update fences if needed
+                                        // Skip fence updates if debug mode is enabled
+                                        if !ignoreFences, let msgDate = message.date {
+                                            fences = FenceManager.addFence(newEarliest: msgDate, newLatest: msgDate, existingFences: fences)
+                                            try? saveImapState(account: account, folder: folder, fences: fences)
+                                        }
+                                    } else {
+                                        let reason = submissionResult.error ?? "Submission failed"
+                                        errors.append(ImapRunError(uid: uid, reason: reason))
+                                    }
+                                    
+                                    if globalLimit > 0 && submittedCount >= globalLimit {
+                                        stopProcessing = true
+                                        break
+                                    }
+                                } else {
+                                    // Fallback to old architecture if collector doesn't support new method
+                                    let payload = try await emailCollector.buildDocumentPayload(
+                                        email: message,
+                                        intent: nil,
+                                        relevance: nil,
+                                        sourceType: "email",
+                                        sourceIdPrefix: sourcePrefix
                                     )
-                                )
-                                
-                                await flushPendingSubmissions(force: false)
+                                    
+                                    if dryRun {
+                                        let entry = ImapMessageResult(
+                                            uid: uid,
+                                            messageId: payload.metadata.messageId,
+                                            status: "dry_run",
+                                            submissionId: nil,
+                                            docId: nil,
+                                            duplicate: nil
+                                        )
+                                        results.append(entry)
+                                        continue
+                                    }
+                                    
+                                    if globalLimit > 0 && remainingGlobalLimit <= 0 {
+                                        stopProcessing = true
+                                        break
+                                    }
+                                    
+                                    pendingSubmissions.append(
+                                        PendingImapSubmission(
+                                            uid: uid,
+                                            payload: payload,
+                                            messageDate: message.date
+                                        )
+                                    )
+                                    
+                                    await flushPendingSubmissions(force: false)
+                                }
                                 
                                 if stopProcessing {
                                     break

@@ -172,6 +172,47 @@ public actor ImapSession {
                 }
             }
             let ordered = uids.sorted(by: >)
+            
+            // If date-based search found nothing, try a search for all messages to see if folder has any messages
+            // If messages exist but weren't found by date search, fall back to returning all messages
+            if ordered.isEmpty && (since != nil || before != nil) {
+                logger.debug("Date-based search found no messages, checking if folder has any messages", metadata: [
+                    "folder": folder
+                ])
+                do {
+                    guard let allExpression = MCOIMAPSearchExpression.searchAll() else {
+                        logger.debug("Failed to create search all expression", metadata: ["folder": folder])
+                        return ordered
+                    }
+                    let allIndexSet = try await performSearch(folder: folder, expression: allExpression)
+                    var allUids: [UInt32] = []
+                    allIndexSet.enumerate { index in
+                        if index <= UInt64(UInt32.max) {
+                            allUids.append(UInt32(index))
+                        }
+                    }
+                    if !allUids.isEmpty {
+                        logger.warning("Date-based search found 0 messages but folder contains \(allUids.count) total messages - falling back to all messages. Email dates may be outside search range or IMAP server doesn't support date search", metadata: [
+                            "folder": folder,
+                            "total_messages": "\(allUids.count)",
+                            "search_since": since.map { ISO8601DateFormatter().string(from: $0) } ?? "nil",
+                            "search_before": before.map { ISO8601DateFormatter().string(from: $0) } ?? "nil"
+                        ])
+                        // Fall back to returning all messages when date search fails
+                        return allUids.sorted(by: >)
+                    } else {
+                        logger.debug("Folder contains no messages", metadata: [
+                            "folder": folder
+                        ])
+                    }
+                } catch {
+                    logger.debug("Failed to check for all messages in folder", metadata: [
+                        "folder": folder,
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
+            
             logger.debug("IMAP search completed", metadata: [
                 "folder": folder,
                 "attempt": "\(attempt)",
@@ -322,10 +363,15 @@ public actor ImapSession {
             expressions.append(MCOIMAPSearchExpression.search(sinceReceivedDate: since))
         }
         if let before {
-            expressions.append(MCOIMAPSearchExpression.search(beforeReceivedDate: before))
+            // Add a small buffer (1 second) to account for timestamp precision issues
+            // This ensures messages with timestamps slightly after the 'before' date are still included
+            let bufferedBefore = before.addingTimeInterval(1.0)
+            expressions.append(MCOIMAPSearchExpression.search(beforeReceivedDate: bufferedBefore))
         }
         guard var combined = expressions.first else {
-            return MCOIMAPSearchExpression.searchAll()
+            // If no date filters, search all messages
+            // Force unwrap is safe here - searchAll() should always return a valid expression
+            return MCOIMAPSearchExpression.searchAll()!
         }
         for expression in expressions.dropFirst() {
             combined = MCOIMAPSearchExpression.searchAnd(combined, other: expression)

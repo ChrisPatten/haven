@@ -30,6 +30,7 @@ struct SettingsWindow: View {
         case files = "Files"
         case contacts = "Contacts"
         case schedules = "Schedules"
+        case enrichment = "Enrichment"
         case advanced = "Advanced"
         
         var id: String { rawValue }
@@ -42,6 +43,7 @@ struct SettingsWindow: View {
             case .files: return "folder"
             case .contacts: return "person.crop.circle"
             case .schedules: return "calendar"
+            case .enrichment: return "sparkles"
             case .advanced: return "slider.horizontal.3"
             }
         }
@@ -98,6 +100,8 @@ struct SettingsWindow: View {
                         configManager: configManagerWrapper.configManager,
                         errorMessage: $errorMessage
                     )
+                case .enrichment:
+                    EnrichmentSettingsView(errorMessage: $errorMessage)
                 case .advanced:
                     AdvancedSettingsView(
                         systemConfig: $systemConfig,
@@ -166,6 +170,8 @@ struct SettingsWindow: View {
                 configManager: manager,
                 errorMessage: $errorMessage
             )
+        case .enrichment:
+            EnrichmentSettingsView(errorMessage: $errorMessage)
         case .advanced:
             AdvancedSettingsView(
                 systemConfig: $systemConfig,
