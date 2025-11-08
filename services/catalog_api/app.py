@@ -6,7 +6,8 @@ import os
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+UTC = timezone.utc
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -41,6 +42,10 @@ from services.catalog_api.models_v2 import (
     EmbeddingSubmitRequest,
     EmbeddingSubmitResponse,
     FileDescriptor,
+    IntentSignalCreateRequest,
+    IntentSignalFeedbackRequest,
+    IntentSignalResponse,
+    IntentStatusResponse,
     PersonPayload,
     SubmissionStatusResponse,
 )
@@ -956,13 +961,14 @@ def _ingest_document(
                         is_completed,
                         completed_at,
                         metadata,
-                        status
+                        status,
+                        intent_status
                     )
                     VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s
+                        %s, %s, %s
                     )
                     RETURNING *
                     """,
@@ -993,6 +999,7 @@ def _ingest_document(
                         payload.completed_at,
                         Json(payload.metadata or {}),
                         "submitted",
+                        "pending",  # intent_status defaults to 'pending' for automatic queueing
                     ),
                 )
                 doc_record = cur.fetchone()
@@ -1664,3 +1671,277 @@ def get_context_general() -> ContextGeneralResponse:
 @app.get("/v1/healthz")
 def health_check() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+# ============================================================================
+# INTENT SIGNALS ENDPOINTS
+# ============================================================================
+
+@app.post(
+    "/v1/catalog/intent-signals",
+    response_model=IntentSignalResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_intent_signal(
+    payload: IntentSignalCreateRequest,
+    _token: None = Depends(verify_token),
+) -> IntentSignalResponse:
+    """Persist an intent signal from the intents worker"""
+    logger.info("create_intent_signal", artifact_id=str(payload.artifact_id))
+    
+    # Verify artifact exists and create signal
+    with get_connection(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT doc_id FROM documents WHERE doc_id = %s",
+                (payload.artifact_id,),
+            )
+            artifact = cur.fetchone()
+            if not artifact:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Artifact not found")
+            
+            # Generate signal_id from signal_data if not present
+            signal_data = payload.signal_data
+            signal_id_str = signal_data.get("signal_id")
+            if not signal_id_str:
+                # Generate a deterministic signal_id if not provided
+                signal_id_str = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"intent:{payload.artifact_id}:{payload.taxonomy_version}:{orjson.dumps(signal_data, option=orjson.OPT_SORT_KEYS).decode()}"
+                ))
+            
+            try:
+                signal_id = uuid.UUID(signal_id_str)
+            except ValueError:
+                # If signal_id is not a valid UUID, generate one deterministically
+                signal_id = uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"intent:{payload.artifact_id}:{payload.taxonomy_version}:{signal_id_str}"
+                )
+            
+            # Insert intent signal
+            cur.execute(
+                """
+                INSERT INTO intent_signals (
+                    signal_id,
+                    artifact_id,
+                    taxonomy_version,
+                    parent_thread_id,
+                    signal_data,
+                    conflict,
+                    conflicting_fields,
+                    status
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (signal_id) DO UPDATE
+                SET signal_data = EXCLUDED.signal_data,
+                    conflict = EXCLUDED.conflict,
+                    conflicting_fields = EXCLUDED.conflicting_fields,
+                    updated_at = NOW()
+                RETURNING *
+                """,
+                (
+                    signal_id,
+                    payload.artifact_id,
+                    payload.taxonomy_version,
+                    payload.parent_thread_id,
+                    Json(signal_data),
+                    payload.conflict,
+                    payload.conflicting_fields if payload.conflicting_fields else [],
+                    "pending",
+                ),
+            )
+            signal_row = cur.fetchone()
+            if not signal_row:
+                raise HTTPException(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to create intent signal",
+                )
+            
+            # Update document intent_status to 'processed'
+            cur.execute(
+                """
+                UPDATE documents
+                SET intent_status = 'processed',
+                    intent_processing_completed_at = NOW(),
+                    intent_processing_error = NULL,
+                    updated_at = NOW()
+                WHERE doc_id = %s
+                """,
+                (payload.artifact_id,),
+            )
+            
+            conn.commit()
+    
+    return IntentSignalResponse(
+        signal_id=signal_row["signal_id"],
+        artifact_id=signal_row["artifact_id"],
+        taxonomy_version=signal_row["taxonomy_version"],
+        parent_thread_id=signal_row["parent_thread_id"],
+        signal_data=_coerce_json(signal_row["signal_data"]),
+        status=signal_row["status"],
+        user_feedback=_coerce_json(signal_row["user_feedback"]) if signal_row.get("user_feedback") else None,
+        conflict=signal_row["conflict"],
+        conflicting_fields=signal_row["conflicting_fields"] or [],
+        created_at=signal_row["created_at"],
+        updated_at=signal_row["updated_at"],
+    )
+
+
+@app.get(
+    "/v1/catalog/intent-signals/{signal_id}",
+    response_model=IntentSignalResponse,
+)
+def get_intent_signal(
+    signal_id: str,
+    _token: None = Depends(verify_token),
+) -> IntentSignalResponse:
+    """Retrieve an intent signal by ID"""
+    try:
+        signal_uuid = uuid.UUID(signal_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid signal_id") from exc
+    
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM intent_signals
+                WHERE signal_id = %s
+                """,
+                (signal_uuid,),
+            )
+            signal_row = cur.fetchone()
+            if not signal_row:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Intent signal not found")
+    
+    return IntentSignalResponse(
+        signal_id=signal_row["signal_id"],
+        artifact_id=signal_row["artifact_id"],
+        taxonomy_version=signal_row["taxonomy_version"],
+        parent_thread_id=signal_row["parent_thread_id"],
+        signal_data=_coerce_json(signal_row["signal_data"]),
+        status=signal_row["status"],
+        user_feedback=_coerce_json(signal_row["user_feedback"]) if signal_row.get("user_feedback") else None,
+        conflict=signal_row["conflict"],
+        conflicting_fields=signal_row["conflicting_fields"] or [],
+        created_at=signal_row["created_at"],
+        updated_at=signal_row["updated_at"],
+    )
+
+
+@app.patch(
+    "/v1/catalog/intent-signals/{signal_id}/feedback",
+    response_model=IntentSignalResponse,
+)
+def update_intent_signal_feedback(
+    signal_id: str,
+    payload: IntentSignalFeedbackRequest,
+    _token: None = Depends(verify_token),
+) -> IntentSignalResponse:
+    """Update user feedback on an intent signal"""
+    try:
+        signal_uuid = uuid.UUID(signal_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid signal_id") from exc
+    
+    # Map action to status
+    status_map = {
+        "confirm": "confirmed",
+        "edit": "edited",
+        "reject": "rejected",
+        "snooze": "snoozed",
+    }
+    new_status = status_map.get(payload.action)
+    if not new_status:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid action: {payload.action}",
+        )
+    
+    feedback_data = {
+        "action": payload.action,
+        "timestamp": datetime.now(tz=UTC).isoformat(),
+    }
+    if payload.corrected_slots:
+        feedback_data["corrected_slots"] = payload.corrected_slots
+    if payload.user_id:
+        feedback_data["user_id"] = payload.user_id
+    if payload.notes:
+        feedback_data["notes"] = payload.notes
+    
+    with get_connection(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                UPDATE intent_signals
+                SET status = %s,
+                    user_feedback = %s,
+                    updated_at = NOW()
+                WHERE signal_id = %s
+                RETURNING *
+                """,
+                (new_status, Json(feedback_data), signal_uuid),
+            )
+            signal_row = cur.fetchone()
+            if not signal_row:
+                conn.rollback()
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Intent signal not found")
+            conn.commit()
+    
+    return IntentSignalResponse(
+        signal_id=signal_row["signal_id"],
+        artifact_id=signal_row["artifact_id"],
+        taxonomy_version=signal_row["taxonomy_version"],
+        parent_thread_id=signal_row["parent_thread_id"],
+        signal_data=_coerce_json(signal_row["signal_data"]),
+        status=signal_row["status"],
+        user_feedback=_coerce_json(signal_row["user_feedback"]) if signal_row.get("user_feedback") else None,
+        conflict=signal_row["conflict"],
+        conflicting_fields=signal_row["conflicting_fields"] or [],
+        created_at=signal_row["created_at"],
+        updated_at=signal_row["updated_at"],
+    )
+
+
+@app.get(
+    "/v1/catalog/documents/{doc_id}/intent-status",
+    response_model=IntentStatusResponse,
+)
+def get_document_intent_status(
+    doc_id: str,
+    _token: None = Depends(verify_token),
+) -> IntentStatusResponse:
+    """Check intent processing status for a document"""
+    try:
+        doc_uuid = uuid.UUID(doc_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid doc_id") from exc
+    
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT 
+                    doc_id,
+                    intent_status,
+                    intent_processing_started_at,
+                    intent_processing_completed_at,
+                    intent_processing_error
+                FROM documents
+                WHERE doc_id = %s
+                """,
+                (doc_uuid,),
+            )
+            doc_row = cur.fetchone()
+            if not doc_row:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found")
+    
+    return IntentStatusResponse(
+        doc_id=doc_row["doc_id"],
+        intent_status=doc_row["intent_status"],
+        intent_processing_started_at=doc_row["intent_processing_started_at"],
+        intent_processing_completed_at=doc_row["intent_processing_completed_at"],
+        intent_processing_error=doc_row["intent_processing_error"],
+    )

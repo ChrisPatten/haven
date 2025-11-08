@@ -192,3 +192,123 @@ class EmbeddingSubmitResponse(BaseModel):
 class DeleteDocumentResponse(BaseModel):
     doc_id: UUID
     status: str
+
+
+# ============================================================================
+# INTENT SIGNALS MODELS
+# ============================================================================
+
+class TextSpan(BaseModel):
+    """Text span evidence for intent signals"""
+    start_offset: int
+    end_offset: int
+    preview: str
+
+
+class LayoutRef(BaseModel):
+    """Layout reference for OCR/document evidence"""
+    attachment_id: Optional[str] = None
+    page: Optional[int] = None
+    block_id: Optional[str] = None
+    line_id: Optional[str] = None
+
+
+class EntityRef(BaseModel):
+    """Reference to an entity used in slot filling"""
+    type: str
+    index: int
+
+
+class Evidence(BaseModel):
+    """Evidence supporting the intent and slots"""
+    text_spans: List[TextSpan] = Field(default_factory=list)
+    layout_refs: List[LayoutRef] = Field(default_factory=list)
+    entity_refs: List[EntityRef] = Field(default_factory=list)
+
+
+class IntentResult(BaseModel):
+    """Single intent with slots and evidence"""
+    name: str
+    confidence: float
+    slots: Dict[str, Any] = Field(default_factory=dict)
+    missing_slots: List[str] = Field(default_factory=list)
+    follow_up_needed: bool = False
+    follow_up_reason: Optional[str] = None
+    evidence: Evidence
+
+
+class ProcessingTimestamps(BaseModel):
+    """Timing information for intent processing"""
+    ner_started_at: Optional[datetime] = None
+    ner_completed_at: Optional[datetime] = None
+    received_at: datetime
+    intent_started_at: datetime
+    intent_completed_at: datetime
+    emitted_at: datetime
+
+
+class Provenance(BaseModel):
+    """Processing provenance for intent signals"""
+    ner_version: str
+    ner_framework: str
+    classifier_version: str
+    slot_filler_version: str
+    config_snapshot_id: str
+    processing_location: Literal["client", "server", "hybrid"]
+
+
+class IntentSignalData(BaseModel):
+    """Complete Intent Signal schema (stored in signal_data JSONB)"""
+    signal_id: str
+    artifact_id: str
+    taxonomy_version: str
+    intents: List[IntentResult] = Field(default_factory=list)
+    global_confidence: Optional[float] = None
+    processing_notes: List[str] = Field(default_factory=list)
+    processing_timestamps: ProcessingTimestamps
+    provenance: Provenance
+    parent_thread_id: Optional[str] = None
+    conflict: bool = False
+    conflicting_fields: List[str] = Field(default_factory=list)
+
+
+class IntentSignalCreateRequest(BaseModel):
+    """Request to create an intent signal"""
+    artifact_id: UUID
+    taxonomy_version: str
+    signal_data: Dict[str, Any]  # IntentSignalData as dict
+    parent_thread_id: Optional[UUID] = None
+    conflict: bool = False
+    conflicting_fields: List[str] = Field(default_factory=list)
+
+
+class IntentSignalResponse(BaseModel):
+    """Response for intent signal queries"""
+    signal_id: UUID
+    artifact_id: UUID
+    taxonomy_version: str
+    parent_thread_id: Optional[UUID] = None
+    signal_data: Dict[str, Any]
+    status: str
+    user_feedback: Optional[Dict[str, Any]] = None
+    conflict: bool
+    conflicting_fields: List[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class IntentSignalFeedbackRequest(BaseModel):
+    """Request to update user feedback on an intent signal"""
+    action: Literal["confirm", "edit", "reject", "snooze"]
+    corrected_slots: Optional[Dict[str, Any]] = None
+    user_id: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class IntentStatusResponse(BaseModel):
+    """Response for document intent processing status"""
+    doc_id: UUID
+    intent_status: str
+    intent_processing_started_at: Optional[datetime] = None
+    intent_processing_completed_at: Optional[datetime] = None
+    intent_processing_error: Optional[str] = None

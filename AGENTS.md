@@ -15,12 +15,12 @@ Haven turns personal data (iMessage, files, email) into searchable knowledge via
 - **Gateway API (FastAPI, :8085)**: Public entry point. Validates auth, orchestrates ingestion, proxies search. Only external-facing service.
 - **Catalog API (FastAPI)**: Persists documents/threads/chunks in Postgres. Tracks ingestion status.
 - **Search Service (FastAPI)**: Hybrid lexical/vector search over Qdrant + Postgres.
-- **Embedding Worker (Python)**: Background process vectorizing chunks via Ollama/BAAI models.
+- **Worker Service (Python)**: Background workers for vectorizing chunks (embedding worker) and processing intents (intents worker) via Ollama/BAAI models.
 
 **Data Flow:**
 1. Collectors/HostAgent → Gateway (validate, dedupe, queue)
 2. Gateway → Catalog (persist metadata)
-3. Embedding Worker → Catalog (vectorize pending chunks) → Qdrant
+3. Worker Service → Catalog (vectorize pending chunks, process intents) → Qdrant
 4. Search queries join Postgres + Qdrant
 
 **Topology:**
@@ -32,14 +32,14 @@ Host (macOS) ─ HostAgent (localhost:7090)
 Docker ─ Gateway (:8085 exposed) ─→ Catalog (8081) ─→ Postgres
                                    └─→ Search (8080) ↔ Qdrant
                                    └─→ MinIO (binaries)
-Embedding Worker → Catalog → Qdrant
+Worker Service → Catalog → Qdrant
 ```
 
 **Codebase Map:**
 - `hostagent/`: Swift native daemon (legacy - being migrated to `Haven/`)
 - `HavenUI/`: Original SwiftUI menubar app (legacy - being migrated to `Haven/`)
 - `Haven/`: New unified Swift app combining HavenUI and HostAgent functionality
-- `services/`: FastAPI microservices (gateway, catalog, search, embedding)
+- `services/`: FastAPI microservices (gateway, catalog, search, worker_service)
 - `shared/`: Cross-service utilities (DB, logging, image enrichment)
 - `schema/`: Postgres migrations
 - `src/haven/`: Reusable Python package
