@@ -68,6 +68,20 @@ public struct LocalFSStateEntry: Codable, Sendable {
     public var size: Int
     public var tags: [String]
     
+    public init(
+        path: String,
+        firstSeen: Date,
+        lastSeen: Date,
+        size: Int,
+        tags: [String] = []
+    ) {
+        self.path = path
+        self.firstSeen = firstSeen
+        self.lastSeen = lastSeen
+        self.size = size
+        self.tags = tags
+    }
+    
     enum CodingKeys: String, CodingKey {
         case path
         case firstSeen = "first_seen"
@@ -460,6 +474,22 @@ public struct LocalFSUploadMeta: Codable, Sendable {
     public var mtime: Double?
     public var ctime: Double?
     public var tags: [String]
+    
+    public init(
+        source: String,
+        path: String,
+        filename: String? = nil,
+        mtime: Double? = nil,
+        ctime: Double? = nil,
+        tags: [String] = []
+    ) {
+        self.source = source
+        self.path = path
+        self.filename = filename
+        self.mtime = mtime
+        self.ctime = ctime
+        self.tags = tags
+    }
     
     enum CodingKeys: String, CodingKey {
         case source

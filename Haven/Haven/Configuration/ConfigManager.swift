@@ -19,6 +19,7 @@ public actor ConfigManager {
     private var systemConfig: SystemConfig?
     private var emailConfig: EmailInstancesConfig?
     private var filesConfig: FilesInstancesConfig?
+    private var icloudDriveConfig: ICloudDriveInstancesConfig?
     private var contactsConfig: ContactsInstancesConfig?
     private var imessageConfig: IMessageInstanceConfig?
     private var schedulesConfig: CollectorSchedulesConfig?
@@ -102,6 +103,28 @@ public actor ConfigManager {
         logger.info("Files configuration saved", metadata: ["path": url.path])
     }
     
+    // MARK: - iCloud Drive Configuration
+    
+    /// Load iCloud Drive instances configuration from icloud_drive.plist
+    public func loadICloudDriveConfig() throws -> ICloudDriveInstancesConfig {
+        if let cached = icloudDriveConfig {
+            return cached
+        }
+        
+        let url = configDirectory.appendingPathComponent("icloud_drive.plist")
+        let config = try loadConfig(from: url, type: ICloudDriveInstancesConfig.self, default: ICloudDriveInstancesConfig())
+        icloudDriveConfig = config
+        return config
+    }
+    
+    /// Save iCloud Drive instances configuration to icloud_drive.plist
+    public func saveICloudDriveConfig(_ config: ICloudDriveInstancesConfig) throws {
+        let url = configDirectory.appendingPathComponent("icloud_drive.plist")
+        try saveConfig(config, to: url)
+        icloudDriveConfig = config
+        logger.info("iCloud Drive configuration saved", metadata: ["path": url.path])
+    }
+    
     // MARK: - Contacts Configuration
     
     /// Load contacts instances configuration from contacts.plist
@@ -175,6 +198,7 @@ public actor ConfigManager {
         _ = try loadSystemConfig()
         _ = try loadEmailConfig()
         _ = try loadFilesConfig()
+        _ = try loadICloudDriveConfig()
         _ = try loadContactsConfig()
         _ = try loadIMessageConfig()
         _ = try loadSchedulesConfig()
@@ -272,6 +296,7 @@ public actor ConfigManager {
         try saveSystemConfig(defaultSystemConfig)
         try saveEmailConfig(EmailInstancesConfig())
         try saveFilesConfig(FilesInstancesConfig())
+        try saveICloudDriveConfig(ICloudDriveInstancesConfig())
         try saveContactsConfig(ContactsInstancesConfig())
         try saveIMessageConfig(IMessageInstanceConfig())
         try saveSchedulesConfig(CollectorSchedulesConfig())

@@ -1,21 +1,21 @@
 //
-//  FilesSettingsView.swift
+//  ICloudDriveSettingsView.swift
 //  Haven
 //
-//  LocalFS collector instances management view
+//  iCloud Drive collector instances management view
 //
 
 import SwiftUI
 import AppKit
 
-/// Files settings view for managing LocalFS instances
-struct FilesSettingsView: View {
-    @Binding var config: FilesInstancesConfig?
+/// iCloud Drive settings view for managing iCloud Drive instances
+struct ICloudDriveSettingsView: View {
+    @Binding var config: ICloudDriveInstancesConfig?
     var configManager: ConfigManager
     @Binding var errorMessage: String?
     
-    @State private var instances: [FilesInstance] = []
-    @State private var selectedInstance: FilesInstance.ID?
+    @State private var instances: [ICloudDriveInstance] = []
+    @State private var selectedInstance: ICloudDriveInstance.ID?
     @State private var showingAddSheet = false
     @State private var showingEditSheet = false
     
@@ -23,7 +23,7 @@ struct FilesSettingsView: View {
         VStack(spacing: 0) {
             // Toolbar
             HStack {
-                Button("Add Source") {
+                Button("Add Instance") {
                     showingAddSheet = true
                 }
                 .buttonStyle(.borderedProminent)
@@ -42,9 +42,9 @@ struct FilesSettingsView: View {
             // Table view
             if instances.isEmpty {
                 VStack {
-                    Text("No file collector instances configured")
+                    Text("No iCloud Drive collector instances configured")
                         .foregroundColor(.secondary)
-                    Text("Click 'Add Source' to configure a file watch directory")
+                    Text("Click 'Add Instance' to configure an iCloud Drive collector")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -54,8 +54,8 @@ struct FilesSettingsView: View {
                     TableColumn("Name") { instance in
                         Text(instance.name.isEmpty ? instance.id : instance.name)
                     }
-                    TableColumn("Paths") { instance in
-                        Text(instance.paths.joined(separator: ", "))
+                    TableColumn("Path") { instance in
+                        Text(instance.path ?? "Default (iCloud Drive root)")
                             .lineLimit(1)
                     }
                     TableColumn("Enabled") { instance in
@@ -84,7 +84,7 @@ struct FilesSettingsView: View {
             }
         }
         .sheet(isPresented: $showingAddSheet) {
-            FilesInstanceEditSheet(
+            ICloudDriveInstanceEditSheet(
                 instance: nil,
                 onSave: { instance in
                     instances.append(instance)
@@ -95,7 +95,7 @@ struct FilesSettingsView: View {
         .sheet(isPresented: $showingEditSheet) {
             if let selectedId = selectedInstance,
                let instance = instances.first(where: { $0.id == selectedId }) {
-                FilesInstanceEditSheet(
+                ICloudDriveInstanceEditSheet(
                     instance: instance,
                     onSave: { updatedInstance in
                         if let index = instances.firstIndex(where: { $0.id == updatedInstance.id }) {
@@ -109,10 +109,6 @@ struct FilesSettingsView: View {
         .onAppear {
             loadConfiguration()
         }
-        .onChange(of: selectedInstance) { _, newValue in
-            // Only auto-open edit sheet if selected from table row click, not from pencil button
-            // The pencil button sets showingEditSheet directly
-        }
     }
     
     private func loadConfiguration() {
@@ -125,7 +121,7 @@ struct FilesSettingsView: View {
     }
     
     private func updateConfiguration() {
-        config = FilesInstancesConfig(instances: instances)
+        config = ICloudDriveInstancesConfig(instances: instances)
     }
     
     private func removeSelectedInstance() {
@@ -136,49 +132,38 @@ struct FilesSettingsView: View {
     }
 }
 
-/// Sheet for editing a files instance
-struct FilesInstanceEditSheet: View {
-    let instance: FilesInstance?
-    let onSave: (FilesInstance) -> Void
+/// Sheet for editing an iCloud Drive instance
+struct ICloudDriveInstanceEditSheet: View {
+    let instance: ICloudDriveInstance?
+    let onSave: (ICloudDriveInstance) -> Void
     
     @Environment(\.dismiss) private var dismiss
     
     @State private var id: String = ""
     @State private var name: String = ""
     @State private var enabled: Bool = true
-    @State private var watchDirectory: String = ""
-    @State private var includeChildDirectories: Bool = true
-    @State private var includeGlobs: [String] = ["*.txt", "*.md", "*.pdf"]
+    @State private var path: String = ""
+    @State private var includeGlobs: [String] = ["*.txt", "*.md", "*.pdf", "*.jpg", "*.jpeg", "*.png", "*.gif", "*.heic", "*.heif"]
     @State private var excludeGlobs: [String] = []
     @State private var tags: [String] = []
-    @State private var moveTo: String = ""
-    @State private var deleteAfter: Bool = false
-    @State private var followSymlinks: Bool = false
-    @State private var showingDirectoryPicker: Bool = false
     
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Display Name", text: $name, prompt: Text("e.g., Documents"))
-                        .help("A friendly name for this file source")
+                    TextField("Display Name", text: $name, prompt: Text("e.g., My iCloud Drive"))
+                        .help("A friendly name for this iCloud Drive collector")
                     
                     Toggle("Enabled", isOn: $enabled)
                 }
                 
                 Section {
-                    HStack {
-                        TextField("Select directory...", text: $watchDirectory, prompt: Text("/path/to/directory"))
-                        Button("Browse...") {
-                            selectDirectory()
-                        }
-                    }
-                    
-                    Toggle("Include child directories", isOn: $includeChildDirectories)
+                    TextField("Path (Optional)", text: $path, prompt: Text("Leave empty for default iCloud Drive root"))
+                        .help("Optional: Specify a subfolder path within iCloud Drive. Leave empty to use the default iCloud Drive Documents folder.")
                 } header: {
-                    Text("Watch Directory")
+                    Text("iCloud Drive Path")
                 } footer: {
-                    Text("The directory to watch for file changes")
+                    Text("Leave empty to use the default iCloud Drive Documents folder, or specify a subfolder path (e.g., 'Documents/Work')")
                 }
                 
                 Section {
@@ -242,22 +227,9 @@ struct FilesInstanceEditSheet: View {
                 } footer: {
                     Text("Glob patterns for files to exclude from processing")
                 }
-                
-                Section {
-                    TextField("Move To Directory", text: $moveTo, prompt: Text("/path/to/processed"))
-                        .help("Optional: Move files to this directory after processing")
-                    
-                    Toggle("Delete After Processing", isOn: $deleteAfter)
-                    
-                    Toggle("Follow Symbolic Links", isOn: $followSymlinks)
-                } header: {
-                    Text("Options")
-                } footer: {
-                    Text("Advanced options for file processing behavior")
-                }
             }
             .formStyle(.grouped)
-            .navigationTitle(instance == nil ? "Add File Source" : "Edit File Source")
+            .navigationTitle(instance == nil ? "Add iCloud Drive Instance" : "Edit iCloud Drive Instance")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -266,17 +238,14 @@ struct FilesInstanceEditSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        let instance = FilesInstance(
+                        let instance = ICloudDriveInstance(
                             id: instance?.id ?? UUID().uuidString,
                             name: name,
                             enabled: enabled,
-                            paths: watchDirectory.isEmpty ? [] : [watchDirectory],
+                            path: path.isEmpty ? nil : path,
                             includeGlobs: includeGlobs.filter { !$0.isEmpty },
                             excludeGlobs: excludeGlobs.filter { !$0.isEmpty },
-                            tags: tags.filter { !$0.isEmpty },
-                            moveTo: moveTo.isEmpty ? nil : moveTo,
-                            deleteAfter: deleteAfter,
-                            followSymlinks: followSymlinks || includeChildDirectories
+                            tags: tags.filter { !$0.isEmpty }
                         )
                         onSave(instance)
                         dismiss()
@@ -284,20 +253,16 @@ struct FilesInstanceEditSheet: View {
                 }
             }
         }
-        .frame(width: 600, height: 700)
+        .frame(width: 600, height: 600)
         .onAppear {
             if let instance = instance {
                 id = instance.id
                 name = instance.name
                 enabled = instance.enabled
-                watchDirectory = instance.paths.first ?? ""
-                includeChildDirectories = instance.followSymlinks
+                path = instance.path ?? ""
                 includeGlobs = instance.includeGlobs
                 excludeGlobs = instance.excludeGlobs
                 tags = instance.tags
-                moveTo = instance.moveTo ?? ""
-                deleteAfter = instance.deleteAfter
-                followSymlinks = instance.followSymlinks
             } else {
                 id = UUID().uuidString
             }
@@ -328,20 +293,6 @@ struct FilesInstanceEditSheet: View {
                 excludeGlobs[index] = newValue
             }
         )
-    }
-    
-    private func selectDirectory() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
-        
-        if panel.runModal() == .OK {
-            if let url = panel.url {
-                watchDirectory = url.path
-            }
-        }
     }
 }
 

@@ -12,14 +12,15 @@ from .taxonomy import IntentDefinition, IntentTaxonomy
 
 DEFAULT_PRIORS: Dict[str, Dict[str, float]] = {
     "email": {
-        "schedule.create": 1.15,
+        "schedule.create": 1.2,
         "task.create": 0.9,
     },
     "imessage": {
-        "reminder.create": 1.15,
+        "reminder.create": 1.2,  # Matches taxonomy channel_priors
     },
     "note": {
-        "task.create": 1.1,
+        "task.create": 1.15,
+        "reminder.create": 1.05,
     },
 }
 

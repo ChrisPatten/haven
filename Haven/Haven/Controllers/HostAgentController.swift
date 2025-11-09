@@ -190,6 +190,22 @@ public class HostAgentController: ObservableObject {
                 collectors[id] = controller
                 logger.info("Initialized collector", metadata: ["collector": id])
             }
+        case "icloud_drive":
+            // iCloud Drive requires instances - check if any are configured
+            let hasICloudDriveInstances = await hasICloudDriveInstancesConfigured()
+            if hasICloudDriveInstances && collectors[id] == nil {
+                let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "icloud_drive")
+                let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+                let controller = try await ICloudDriveController(
+                    config: config,
+                    serviceController: serviceController,
+                    enrichmentOrchestrator: orchestrator,
+                    submitter: sharedSubmitter,
+                    skipEnrichment: skipEnrichment
+                )
+                collectors[id] = controller
+                logger.info("Initialized collector", metadata: ["collector": id])
+            }
         default:
             throw HostAgentError.collectorNotFound(id)
         }
@@ -265,6 +281,20 @@ public class HostAgentController: ObservableObject {
             collectors["email_imap"] = controller
         }
         
+        let hasICloudDriveInstances = await hasICloudDriveInstancesConfigured()
+        if hasICloudDriveInstances && collectors["icloud_drive"] == nil {
+            let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "icloud_drive")
+            let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let controller = try await ICloudDriveController(
+                config: config,
+                serviceController: serviceController,
+                enrichmentOrchestrator: orchestrator,
+                submitter: sharedSubmitter,
+                skipEnrichment: skipEnrichment
+            )
+            collectors["icloud_drive"] = controller
+        }
+        
         logger.info("Ensured all collectors initialized", metadata: ["count": String(collectors.count)])
     }
     
@@ -316,6 +346,21 @@ public class HostAgentController: ObservableObject {
                 skipEnrichment: skipLocalFSEnrichment
             )
             collectors["localfs"] = localfsController
+        }
+        
+        // Initialize iCloud Drive collector if instances are configured
+        let hasICloudDriveInstances = await hasICloudDriveInstancesConfigured()
+        if hasICloudDriveInstances {
+            let skipICloudDriveEnrichment = enrichmentConfig.getSkipEnrichment(for: "icloud_drive")
+            let icloudDriveOrchestrator = skipICloudDriveEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let icloudDriveController = try await ICloudDriveController(
+                config: config,
+                serviceController: serviceController,
+                enrichmentOrchestrator: icloudDriveOrchestrator,
+                submitter: sharedSubmitter,
+                skipEnrichment: skipICloudDriveEnrichment
+            )
+            collectors["icloud_drive"] = icloudDriveController
         }
         
         // Initialize Email collector if instances are configured
@@ -784,6 +829,32 @@ public class HostAgentController: ObservableObject {
             return filesConfig.instances.filter { $0.enabled }
         } catch {
             logger.error("Failed to load files instances", metadata: ["error": error.localizedDescription])
+            return []
+        }
+    }
+    
+    /// Check if any iCloud Drive collector instances are configured
+    /// - Returns: true if at least one enabled iCloud Drive instance is configured, false otherwise
+    public func hasICloudDriveInstancesConfigured() async -> Bool {
+        do {
+            let configManager = ConfigManager()
+            let icloudDriveConfig = try await configManager.loadICloudDriveConfig()
+            return icloudDriveConfig.instances.contains { $0.enabled }
+        } catch {
+            logger.error("Failed to load iCloud Drive config for instance check", metadata: ["error": error.localizedDescription])
+            return false
+        }
+    }
+    
+    /// Get all enabled iCloud Drive instances
+    /// - Returns: Array of enabled iCloud Drive instances
+    public func getICloudDriveInstances() async -> [ICloudDriveInstance] {
+        do {
+            let configManager = ConfigManager()
+            let icloudDriveConfig = try await configManager.loadICloudDriveConfig()
+            return icloudDriveConfig.instances.filter { $0.enabled }
+        } catch {
+            logger.error("Failed to load iCloud Drive instances", metadata: ["error": error.localizedDescription])
             return []
         }
     }

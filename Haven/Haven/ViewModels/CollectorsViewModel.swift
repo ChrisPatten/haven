@@ -66,12 +66,14 @@ class CollectorsViewModel: ObservableObject {
         let hasImapSources = await hostAgentController.hasImapSourcesConfigured()
         let hasContactsInstances = await hostAgentController.hasContactsInstancesConfigured()
         let hasFilesInstances = await hostAgentController.hasFilesInstancesConfigured()
+        let hasICloudDriveInstances = await hostAgentController.hasICloudDriveInstancesConfigured()
         let isIMessageEnabled = await hostAgentController.isIMessageModuleEnabled()
         
         // Load instances for collectors that support them
         let imapInstances = await hostAgentController.getImapInstances()
         let contactsInstances = await hostAgentController.getContactsInstances()
         let filesInstances = await hostAgentController.getFilesInstances()
+        let icloudDriveInstances = await hostAgentController.getICloudDriveInstances()
         
         // Load from supported collectors
         for (_, baseInfo) in CollectorInfo.supportedCollectors {
@@ -192,6 +194,49 @@ class CollectorsViewModel: ObservableObject {
                     let instanceId = "localfs:\(instance.id)"
                     // Set display name to instance name
                     let displayName = instance.name.isEmpty ? "Local Files (\(instance.id))" : instance.name
+                    
+                    var info = CollectorInfo(
+                        id: instanceId,
+                        displayName: displayName,
+                        description: baseInfo.description,
+                        category: baseInfo.category,
+                        enabled: instance.enabled,
+                        lastRunTime: nil,
+                        lastRunStatus: nil,
+                        isRunning: false,
+                        lastError: nil,
+                        payload: baseInfo.payload,
+                        imapAccountId: nil
+                    )
+                    
+                    loadPersistedLastRunInfo(for: &info)
+                    
+                    // Load state from API if available (use base collector ID for state)
+                    if CollectorInfo.hasStateEndpoint(baseInfo.id) {
+                        if let state = await hostAgentController.getCollectorState(id: baseInfo.id) {
+                            collectorStates[info.id] = state
+                            if let lastRunTimeStr = state.lastRunTime {
+                                let formatter = ISO8601DateFormatter()
+                                formatter.formatOptions = [.withInternetDateTime]
+                                info.lastRunTime = formatter.date(from: lastRunTimeStr)
+                            }
+                            info.lastRunStatus = state.lastRunStatus
+                            info.isRunning = state.isRunning ?? false
+                            info.lastError = state.lastRunError
+                        }
+                    }
+                    
+                    info.isRunning = appState.isCollectorRunning(info.id)
+                    loadedCollectors.append(info)
+                }
+            }
+            // Handle iCloud Drive - create entry for each enabled instance
+            else if baseInfo.id == "icloud_drive" {
+                for instance in icloudDriveInstances {
+                    // Create instance-specific collector ID
+                    let instanceId = "icloud_drive:\(instance.id)"
+                    // Set display name to instance name
+                    let displayName = instance.name.isEmpty ? "iCloud Drive (\(instance.id))" : instance.name
                     
                     var info = CollectorInfo(
                         id: instanceId,

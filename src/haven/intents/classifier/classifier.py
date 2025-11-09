@@ -31,6 +31,7 @@ def classify_artifact(
     text: str,
     taxonomy: IntentTaxonomy,
     entities: Optional[Dict[str, Any]] = None,
+    thread_context: Optional[List[Dict[str, Any]]] = None,
     settings: Optional[ClassifierSettings] = None,
     client: Optional[httpx.Client] = None,
 ) -> ClassificationResult:
@@ -42,6 +43,7 @@ def classify_artifact(
         text=text,
         taxonomy=taxonomy,
         entities=entities,
+        thread_context=thread_context,
         min_confidence=settings.min_confidence,
     )
     payload = {
@@ -76,30 +78,70 @@ def _build_prompt(
     text: str,
     taxonomy: IntentTaxonomy,
     entities: Optional[Dict[str, Any]],
+    thread_context: Optional[List[Dict[str, Any]]] = None,
     min_confidence: float,
 ) -> str:
     taxonomy_summary = _summarize_taxonomy(taxonomy)
     entities_block = json.dumps(entities or {}, ensure_ascii=False, indent=2)
+    
+    thread_block = ""
+    if thread_context:
+        thread_messages = []
+        for msg in thread_context[-5:]:  # Last 5 messages for context
+            msg_text = msg.get("text", "")
+            sender = msg.get("sender") or msg.get("from")
+            if msg_text:
+                sender_str = f" ({sender})" if sender else ""
+                thread_messages.append(f"- {msg_text[:200]}{sender_str}")
+        if thread_messages:
+            thread_block = (
+                "\n\nPrevious messages in this conversation (for context):\n"
+                + "\n".join(thread_messages)
+                + "\n"
+            )
+    
+    channel_context_hint = ""
+    if entities and entities.get("channel_context"):
+        ctx = entities["channel_context"]
+        from_person = ctx.get("from", {}).get("display_name", "")
+        to_people = [p.get("display_name", "") for p in ctx.get("to", [])]
+        if from_person or to_people:
+            channel_context_hint = (
+                "\n\nChannel context: "
+                f"From: {from_person or 'unknown'}, "
+                f"To: {', '.join(to_people) if to_people else 'unknown'}. "
+                "Use this to resolve pronouns (e.g., 'you' refers to the recipient, 'me' refers to the sender).\n"
+            )
+    
     return (
         "You are an intent classification assistant. "
-        "Given the following artifact text and extracted entities, "
-        "identify which intents from the provided taxonomy are present. "
+        "Given the following artifact text, extracted entities, and optional conversation context, "
+        "identify which intents from the provided taxonomy are present.\n\n"
         "Return a JSON object with this structure:\n"
-        "{"
-        '"intents": ['
-        '{"name": "<intent_name>", "base_confidence": 0.0-1.0, "reasons": ["..."]}'
-        "],"
-        '"notes": ["optional explanatory notes"]'
-        "}\n"
-        "Only include intents whose confidence is at least "
-        f"{min_confidence:.2f}. "
-        "Confidence values must be floats between 0 and 1. "
-        "Use multi-label classification (zero or more intents may apply).\n\n"
-        f"Taxonomy version: {taxonomy.version}\n"
+        "{\n"
+        '  "intents": [\n'
+        '    {"name": "<intent_name>", "base_confidence": 0.0-1.0, "reasons": ["detailed explanation"]}\n'
+        "  ],\n"
+        '  "notes": ["optional explanatory notes"]\n'
+        "}\n\n"
+        "Guidelines:\n"
+        "- Only include intents whose confidence is at least "
+        f"{min_confidence:.2f}.\n"
+        "- Confidence values must be floats between 0 and 1.\n"
+        "- Use multi-label classification (zero or more intents may apply).\n"
+        "- For each intent, provide detailed reasons explaining WHY it matches:\n"
+        "  * Quote specific phrases from the text that indicate this intent\n"
+        "  * Explain semantic patterns (e.g., 'remember to' suggests reminder.create)\n"
+        "  * Note any contextual clues from channel metadata or conversation history\n"
+        "  * Do NOT just list slot names - explain the reasoning\n"
+        "- Consider conversation context when resolving ambiguous references.\n"
+        f"{channel_context_hint}"
+        f"{thread_block}"
+        f"\nTaxonomy version: {taxonomy.version}\n"
         "Available intents:\n"
         f"{taxonomy_summary}\n\n"
         f"Entities (JSON):\n{entities_block}\n\n"
-        "Artifact text:\n"
+        "Current artifact text:\n"
         "-----\n"
         f"{text.strip()}\n"
         "-----"

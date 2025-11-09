@@ -35,6 +35,9 @@ struct ScopePanelView: View {
             case "localfs":
                 LocalFSScopeView(scopeData: $scopeData)
                 
+            case "icloud_drive":
+                ICloudDriveScopeView(scopeData: $scopeData)
+                
             case "contacts":
                 ContactsScopeView(scopeData: $scopeData)
                 

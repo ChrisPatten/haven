@@ -17,6 +17,7 @@ struct SettingsWindow: View {
     @State private var systemConfig: SystemConfig?
     @State private var emailConfig: EmailInstancesConfig?
     @State private var filesConfig: FilesInstancesConfig?
+    @State private var icloudDriveConfig: ICloudDriveInstancesConfig?
     @State private var contactsConfig: ContactsInstancesConfig?
     @State private var imessageConfig: IMessageInstanceConfig?
     @State private var schedulesConfig: CollectorSchedulesConfig?
@@ -28,6 +29,7 @@ struct SettingsWindow: View {
         case imessage = "iMessage"
         case email = "Email"
         case files = "Files"
+        case icloudDrive = "iCloud Drive"
         case contacts = "Contacts"
         case schedules = "Schedules"
         case enrichment = "Enrichment"
@@ -41,6 +43,7 @@ struct SettingsWindow: View {
             case .imessage: return "message"
             case .email: return "envelope"
             case .files: return "folder"
+            case .icloudDrive: return "icloud"
             case .contacts: return "person.crop.circle"
             case .schedules: return "calendar"
             case .enrichment: return "sparkles"
@@ -85,6 +88,12 @@ struct SettingsWindow: View {
                 case .files:
                     FilesSettingsView(
                         config: $filesConfig,
+                        configManager: configManagerWrapper.configManager,
+                        errorMessage: $errorMessage
+                    )
+                case .icloudDrive:
+                    ICloudDriveSettingsView(
+                        config: $icloudDriveConfig,
                         configManager: configManagerWrapper.configManager,
                         errorMessage: $errorMessage
                     )
@@ -158,6 +167,12 @@ struct SettingsWindow: View {
                 configManager: manager,
                 errorMessage: $errorMessage
             )
+        case .icloudDrive:
+            ICloudDriveSettingsView(
+                config: $icloudDriveConfig,
+                configManager: manager,
+                errorMessage: $errorMessage
+            )
         case .contacts:
             ContactsSettingsView(
                 config: $contactsConfig,
@@ -189,6 +204,7 @@ struct SettingsWindow: View {
             systemConfig = try await configManagerWrapper.configManager.loadSystemConfig()
             emailConfig = try await configManagerWrapper.configManager.loadEmailConfig()
             filesConfig = try await configManagerWrapper.configManager.loadFilesConfig()
+            icloudDriveConfig = try await configManagerWrapper.configManager.loadICloudDriveConfig()
             contactsConfig = try await configManagerWrapper.configManager.loadContactsConfig()
             imessageConfig = try await configManagerWrapper.configManager.loadIMessageConfig()
             schedulesConfig = try await configManagerWrapper.configManager.loadSchedulesConfig()
@@ -212,6 +228,9 @@ struct SettingsWindow: View {
                 }
                 if let filesConfig = filesConfig {
                     try await configManagerWrapper.configManager.saveFilesConfig(filesConfig)
+                }
+                if let icloudDriveConfig = icloudDriveConfig {
+                    try await configManagerWrapper.configManager.saveICloudDriveConfig(icloudDriveConfig)
                 }
                 if let contactsConfig = contactsConfig {
                     try await configManagerWrapper.configManager.saveContactsConfig(contactsConfig)

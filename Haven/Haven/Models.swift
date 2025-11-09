@@ -309,11 +309,19 @@ public struct CollectorInfo: Identifiable {
             category: "contacts",
             enabled: false,
             payload: #"{"collector_options": {"mode": "real"}}"#
+        ),
+        "icloud_drive": CollectorInfo(
+            id: "icloud_drive",
+            displayName: "iCloud Drive",
+            description: "Files from iCloud Drive",
+            category: "files",
+            enabled: false,
+            payload: #"{"collector_options": {"path": ""}}"#
         )
     ]
     
     // Collectors that have /state endpoints
-    static let stateAwareCollectors = Set(["imessage", "contacts", "localfs"])
+    static let stateAwareCollectors = Set(["imessage", "contacts", "localfs", "icloud_drive"])
     
     static func hasStateEndpoint(_ collectorId: String) -> Bool {
         // Extract base collector ID for account-specific collectors (e.g., "email_imap" from "email_imap:personal-icloud")

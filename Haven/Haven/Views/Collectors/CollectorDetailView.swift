@@ -267,6 +267,8 @@ struct CollectorDetailView: View {
             return "No contacts collector instances configured"
         case "localfs":
             return "No files collector instances configured"
+        case "icloud_drive":
+            return "No iCloud Drive collector instances configured"
         default:
             return "Collector is disabled"
         }
