@@ -10,31 +10,59 @@ import SwiftUI
 struct CollectorListSidebar: View {
     @Binding var collectors: [CollectorInfo]
     @Binding var selectedCollectorId: String?
+    let filterText: String
     let isCollectorRunning: (String) -> Bool
     let onRunAll: () -> Void
+    let onAddCollector: () -> Void
     let isLoading: Bool
+    @AppStorage("collectorSidebarExpandedSections") private var expandedSectionsRaw: String = "messages,email,files,contacts"
     
     var body: some View {
         VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                Button(action: onAddCollector) {
+                    Label("Add Collector", systemImage: "leaf.fill")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(HavenPrimaryButtonStyle())
+                
+                Text("Bring new accounts online in just two steps.")
+                    .font(.caption)
+                    .foregroundStyle(HavenColors.textSecondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
+            
+            Divider()
+            
             List(selection: $selectedCollectorId) {
                 ForEach(collectorCategories) { category in
-                    Section(category.name) {
-                        ForEach(collectorsInCategory(category.id)) { collector in
-                            CollectorSidebarRow(
-                                collector: collector,
-                                isRunning: isCollectorRunning(collector.id),
-                                isSelected: selectedCollectorId == collector.id
-                            )
-                            .tag(collector.id)
+                    DisclosureGroup(
+                        isExpanded: Binding(
+                            get: { expandedSections.contains(category.id) },
+                            set: { setExpanded($0, for: category.id) }
+                        ),
+                        content: {
+                            ForEach(collectorsInCategory(category.id)) { collector in
+                                CollectorSidebarRow(
+                                    collector: collector,
+                                    isRunning: isCollectorRunning(collector.id),
+                                    isSelected: selectedCollectorId == collector.id
+                                )
+                                .tag(collector.id)
+                            }
+                        },
+                        label: {
+                            Label(category.name, systemImage: category.icon)
                         }
-                    }
+                    )
                 }
             }
             .listStyle(.sidebar)
             
             Divider()
             
-            // Run All button
             Button(action: onRunAll) {
                 HStack {
                     Label("Run All", systemImage: "play.fill")
@@ -53,6 +81,20 @@ struct CollectorListSidebar: View {
         }
     }
     
+    private var expandedSections: Set<String> {
+        Set(expandedSectionsRaw.split(separator: ",").map { String($0) }.filter { !$0.isEmpty })
+    }
+    
+    private func setExpanded(_ expanded: Bool, for id: String) {
+        var sections = expandedSections
+        if expanded {
+            sections.insert(id)
+        } else {
+            sections.remove(id)
+        }
+        expandedSectionsRaw = sections.joined(separator: ",")
+    }
+    
     private var hasRunningCollectors: Bool {
         collectors.contains { isCollectorRunning($0.id) }
     }
@@ -60,39 +102,41 @@ struct CollectorListSidebar: View {
     private struct CollectorCategory: Identifiable {
         let id: String
         let name: String
+        let icon: String
     }
     
     private var collectorCategories: [CollectorCategory] {
         [
-            CollectorCategory(id: "messages", name: "Messages"),
-            CollectorCategory(id: "email", name: "Email"),
-            CollectorCategory(id: "files", name: "Files"),
-            CollectorCategory(id: "contacts", name: "Contacts")
+            CollectorCategory(id: "messages", name: "Messages", icon: "message.fill"),
+            CollectorCategory(id: "email", name: "Email", icon: "envelope.fill"),
+            CollectorCategory(id: "files", name: "Files", icon: "folder.fill"),
+            CollectorCategory(id: "contacts", name: "Contacts", icon: "person.2.fill")
         ]
     }
     
     private func collectorsInCategory(_ categoryId: String) -> [CollectorInfo] {
-        collectors.filter { collector in
-            // Only show collectors that match the category
-            guard collector.category == categoryId else { return false }
-            
-            // For IMAP, files, and contacts collectors (including instance-specific ones),
-            // only show if they're enabled (configured)
-            // iMessage should always be shown regardless of enabled state
-            if collector.id == "email_imap" || collector.id.hasPrefix("email_imap:") {
-                return collector.enabled
+        collectors
+            .filter { collector in
+                guard collector.category == categoryId else { return false }
+                
+                if collector.id == "email_imap" || collector.id.hasPrefix("email_imap:") {
+                    return collector.enabled
+                }
+                if collector.id == "localfs" || collector.id.hasPrefix("localfs:") {
+                    return collector.enabled
+                }
+                if collector.id == "contacts" || collector.id.hasPrefix("contacts:") {
+                    return collector.enabled
+                }
+                
+                return true
             }
-            if collector.id == "localfs" || collector.id.hasPrefix("localfs:") {
-                return collector.enabled
+            .filter { collector in
+                guard !filterText.isEmpty else { return true }
+                return collector.displayName.localizedCaseInsensitiveContains(filterText)
+                    || collector.description.localizedCaseInsensitiveContains(filterText)
             }
-            if collector.id == "contacts" || collector.id.hasPrefix("contacts:") {
-                return collector.enabled
-            }
-            
-            // Show all other collectors (including iMessage)
-            return true
-        }
-        .sorted { $0.displayName < $1.displayName }
+            .sorted { $0.displayName < $1.displayName }
     }
 }
 
@@ -177,4 +221,3 @@ struct CollectorSidebarRow: View {
         return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
-

@@ -36,12 +36,12 @@ struct DashboardView: View {
                 
                 Spacer()
                 
-                Button(action: { }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
+                if appState.errorMessage != nil {
+                    Button("Dismiss Issues") {
+                        appState.clearError()
+                    }
+                    .buttonStyle(HavenSecondaryButtonStyle())
                 }
-                .help("Close")
-                .buttonStyle(PlainButtonStyle())
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -675,4 +675,3 @@ struct LogViewerView: View {
         }
     }
 }
-

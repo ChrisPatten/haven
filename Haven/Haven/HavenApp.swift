@@ -12,6 +12,7 @@ extension Notification.Name {
     static let openCollectorsWindowOnLaunch = Notification.Name("openCollectorsWindowOnLaunch")
     static let openSettingsToSection = Notification.Name("openSettingsToSection")
     static let settingsConfigSaved = Notification.Name("settingsConfigSaved")
+    static let openMainSection = Notification.Name("openMainSection")
 }
 
 // Static flag to track if we've opened collectors window on launch
@@ -22,21 +23,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var initialized = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard appState != nil, !initialized else {
-            return
-        }
-
+        guard appState != nil, !initialized else { return }
         initialized = true
         
-        // Set activation policy to regular so app appears in dock
         NSApplication.shared.setActivationPolicy(.regular)
         
-        // Check for full disk access on startup
         Task { @MainActor in
             await checkFullDiskAccess()
         }
         
-        // Open collectors window after delay using notification
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             NotificationCenter.default.post(name: .openCollectorsWindowOnLaunch, object: nil)
         }
@@ -44,16 +39,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     @MainActor
     private func checkFullDiskAccess() async {
-        // Run the check on a background queue to avoid blocking
         let hasAccess = await Task.detached(priority: .userInitiated) {
             FullDiskAccessChecker.checkFullDiskAccess()
         }.value
         
         appState?.setFullDiskAccessGranted(hasAccess)
-    }
-    
-    func applicationWillTerminate(_ notification: Notification) {
-        // Cleanup will be handled here in future iterations
     }
 }
 
@@ -63,17 +53,15 @@ struct HavenApp: App {
     @StateObject private var hostAgentController: HostAgentController
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
-    @State private var hasOpenedCollectorsWindowOnLaunch = false
+    @State private var hasOpenedMainOnLaunch = false
 
     init() {
         let appState = AppState()
         let controller = HostAgentController(appState: appState)
         _appState = State(initialValue: appState)
         _hostAgentController = StateObject(wrappedValue: controller)
-        // Pass appState to delegate
         appDelegate.appState = appState
         
-        // Initialize default configuration files on first run
         Task {
             do {
                 let configManager = ConfigManager()
@@ -88,239 +76,129 @@ struct HavenApp: App {
         MenuBarExtra {
             MenuContent(
                 appState: appState,
-                openDashboard: { openOrFocusDashboard() },
-                openCollectors: { openOrFocusCollectors() },
-                openSettings: { openOrFocusSettings() },
+                openDashboard: { openMain(section: .dashboard) },
+                openCollectors: { openMain(section: .collectors) },
+                openSettings: { openSettingsWindow() },
                 startAction: startHostAgent,
                 stopAction: stopHostAgent,
                 runAllAction: runAllCollectors
             )
             .background(
-                // Hidden view that listens for launch notification
                 Color.clear
                     .task {
-                        // Listen for the notification and open collectors window
                         for await _ in NotificationCenter.default.notifications(named: .openCollectorsWindowOnLaunch) {
-                            guard !hasOpenedCollectorsOnLaunch else {
-                                continue
-                            }
-                            hasOpenedCollectorsOnLaunch = true
-                            openOrFocusCollectors()
-                            // Only open once, then break
+                            guard !hasOpenedMainOnLaunch else { continue }
+                            hasOpenedMainOnLaunch = true
+                            openMain(section: .collectors)
                             break
                         }
                     }
             )
             .onReceive(NotificationCenter.default.publisher(for: .openSettingsToSection)) { notification in
                 if let section = notification.object as? SettingsWindow.SettingsSection {
-                    openOrFocusSettings(to: section)
+                    openSettingsWindow(to: section)
                 }
             }
         } label: {
-            // Custom colored icon instead of systemImage
             Image(systemName: "circle.fill")
                 .foregroundStyle(statusColor)
                 .symbolRenderingMode(.palette)
         }
         .commands {
             CommandGroup(replacing: .appSettings) {
-                // Placeholder for custom menu if needed
+                Button("Settings…") {
+                    openSettingsWindow()
+                }
+                .keyboardShortcut(",", modifiers: [.command])
+            }
+            
+            CommandMenu("Navigate") {
+                Button("Dashboard") {
+                    openMain(section: .dashboard)
+                }
+                .keyboardShortcut("1", modifiers: [.command])
+                
+                Button("Collectors") {
+                    openMain(section: .collectors)
+                }
+                .keyboardShortcut("2", modifiers: [.command])
+                
+                Button("Permissions") {
+                    openMain(section: .permissions)
+                }
+                .keyboardShortcut("3", modifiers: [.command])
+            }
+            
+            CommandMenu("Actions") {
+                Button("Run All Collectors") {
+                    Task { await runAllCollectors() }
+                }
+                .keyboardShortcut("R", modifiers: [.command, .shift])
+                
+                Button("New Collector") {
+                    openMain(section: .collectors)
+                    NotificationCenter.default.post(name: .openMainSection, object: MainWindowView.Section.collectors)
+                }
+                .keyboardShortcut("N", modifiers: [.command])
             }
         }
 
-        WindowGroup("Haven Dashboard", id: "dashboard") {
-            DashboardView(
-                appState: appState,
-                startAction: startHostAgent,
-                stopAction: stopHostAgent,
-                runAllAction: runAllCollectors
-            )
-        }
-        .keyboardShortcut("1", modifiers: [.command])
-        .windowStyle(.automatic)
-        .windowToolbarStyle(.unified(showsTitle: true))
-        .defaultSize(width: 600, height: 500)
-        
-        WindowGroup("Haven Collectors", id: "collectors") {
-            CollectorsView(
+        WindowGroup("Haven", id: "main") {
+            MainWindowView(
                 appState: appState,
                 hostAgentController: hostAgentController
             )
-            .background(WindowFocusHelper())
         }
-        .keyboardShortcut("2", modifiers: [.command])
         .windowStyle(.automatic)
         .windowToolbarStyle(.unified(showsTitle: true))
-        .defaultSize(width: 900, height: 600)
+        .defaultSize(width: 1120, height: 720)
         
-        WindowGroup("Settings", id: "settings") {
+        Settings {
             SettingsWindow()
-                .background(WindowFocusHelper())
+                .frame(minWidth: 800, minHeight: 600)
         }
-        .keyboardShortcut(",", modifiers: [.command])
-        .windowStyle(.automatic)
-        .windowToolbarStyle(.unified(showsTitle: true))
-        .defaultSize(width: 800, height: 600)
     }
 
     private var statusColor: Color {
         switch appState.status {
-        case .green:
-            return .green
-        case .yellow:
-            return .yellow
-        case .red:
-            return .red
+        case .green: return .green
+        case .yellow: return .yellow
+        case .red: return .red
         }
     }
-
-    private func openOrFocusDashboard() {
-        // Activate the app first to ensure it comes to foreground
-        // This must happen before opening the window
+    
+    private func openMain(section: MainWindowView.Section) {
         NSApplication.shared.activate(ignoringOtherApps: true)
+        NotificationCenter.default.post(name: .openMainSection, object: section)
         
-        // Check if dashboard window already exists
         if let existingWindow = NSApplication.shared.windows.first(where: { window in
-            window.identifier?.rawValue == "dashboard" ||
-            window.title == "Haven Dashboard"
+            window.identifier?.rawValue == "main" || window.title == "Haven"
         }) {
-            // Bring existing window to front
             existingWindow.makeKeyAndOrderFront(nil)
             existingWindow.orderFrontRegardless()
             existingWindow.makeMain()
         } else {
-            // Open new dashboard window
-            openWindow(id: "dashboard")
-            
-            // Ensure the new window is focused when it appears
-            // Use multiple attempts to catch window creation
-            func bringWindowToFront() {
-                if let newWindow = NSApplication.shared.windows.first(where: { window in
-                    window.identifier?.rawValue == "dashboard" ||
-                    window.title == "Haven Dashboard"
-                }) {
-                    NSApplication.shared.activate(ignoringOtherApps: true)
+            openWindow(id: "main")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                if let newWindow = NSApplication.shared.windows.first(where: { $0.identifier?.rawValue == "main" }) {
                     newWindow.makeKeyAndOrderFront(nil)
                     newWindow.orderFrontRegardless()
                     newWindow.makeMain()
                 }
             }
-            
-            // Try immediately
-            DispatchQueue.main.async {
-                bringWindowToFront()
-            }
-            
-            // Try after short delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                bringWindowToFront()
-            }
-            
-            // Try after longer delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                bringWindowToFront()
-            }
         }
     }
     
-    private func openOrFocusCollectors() {
-        // Activate the app first to ensure it comes to foreground
+    private func openSettingsWindow(to section: SettingsWindow.SettingsSection? = nil) {
         NSApplication.shared.activate(ignoringOtherApps: true)
-        
-        // Check if collectors window already exists
-        if let existingWindow = NSApplication.shared.windows.first(where: { window in
-            window.identifier?.rawValue == "collectors" ||
-            window.title == "Haven Collectors"
-        }) {
-            // Bring existing window to front
-            existingWindow.makeKeyAndOrderFront(nil)
-            existingWindow.orderFrontRegardless()
-            existingWindow.makeMain()
-        } else {
-            // Open new collectors window
-            openWindow(id: "collectors")
-            
-            // Ensure the new window is focused when it appears
-            // Use multiple attempts to catch window creation
-            func bringWindowToFront() {
-                if let newWindow = NSApplication.shared.windows.first(where: { window in
-                    window.identifier?.rawValue == "collectors" ||
-                    window.title == "Haven Collectors"
-                }) {
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                    newWindow.makeKeyAndOrderFront(nil)
-                    newWindow.orderFrontRegardless()
-                    newWindow.makeMain()
-                }
-            }
-            
-            // Try immediately
-            DispatchQueue.main.async {
-                bringWindowToFront()
-            }
-            
-            // Try after short delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                bringWindowToFront()
-            }
-            
-            // Try after longer delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                bringWindowToFront()
-            }
-        }
-    }
-    
-    private func openOrFocusSettings(to section: SettingsWindow.SettingsSection? = nil) {
-        // Activate the app first to ensure it comes to foreground
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        
-        // Post notification if a specific section is requested
         if let section = section {
             NotificationCenter.default.post(name: .openSettingsToSection, object: section)
         }
-        
-        // Check if settings window already exists
-        if let existingWindow = NSApplication.shared.windows.first(where: { window in
-            window.identifier?.rawValue == "settings" ||
-            window.title == "Settings"
-        }) {
-            // Bring existing window to front
-            existingWindow.makeKeyAndOrderFront(nil)
-            existingWindow.orderFrontRegardless()
-            existingWindow.makeMain()
-        } else {
-            // Open new settings window
-            openWindow(id: "settings")
-            
-            // Ensure the new window is focused when it appears
-            func bringWindowToFront() {
-                if let newWindow = NSApplication.shared.windows.first(where: { window in
-                    window.identifier?.rawValue == "settings" ||
-                    window.title == "Settings"
-                }) {
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                    newWindow.makeKeyAndOrderFront(nil)
-                    newWindow.orderFrontRegardless()
-                    newWindow.makeMain()
-                }
-            }
-            
-            // Try immediately
-            DispatchQueue.main.async {
-                bringWindowToFront()
-            }
-            
-            // Try after short delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                bringWindowToFront()
-            }
-            
-            // Try after longer delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                bringWindowToFront()
-            }
-        }
+        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+    }
+
+    private func openSettingsWindow() {
+        openSettingsWindow(to: nil)
     }
 
     private func startHostAgent() async {

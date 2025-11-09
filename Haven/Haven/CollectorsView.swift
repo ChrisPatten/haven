@@ -14,22 +14,16 @@ import HostAgentEmail
 struct CollectorsView: View {
     var appState: AppState
     var hostAgentController: HostAgentController
-    
-    @StateObject private var viewModel: CollectorsViewModel
+    @ObservedObject var viewModel: CollectorsViewModel
+    var filterText: String
+    var onAddCollector: () -> Void
+    @AppStorage("collectors.selectedId") private var persistedCollectorId: String = ""
     
     @State private var runBuilderViewModel: CollectorRunRequestBuilderViewModel?
     @State private var showingRunConfiguration = false
     @State private var errorMessage: String?
     @State private var collectorToReset: CollectorInfo?
     @State private var showingResetConfirmation = false
-    
-    init(appState: AppState, hostAgentController: HostAgentController) {
-        self.appState = appState
-        self.hostAgentController = hostAgentController
-        
-        let vm = CollectorsViewModel(hostAgentController: hostAgentController, appState: appState)
-        _viewModel = StateObject(wrappedValue: vm)
-    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -38,6 +32,7 @@ struct CollectorsView: View {
                 CollectorListSidebar(
                     collectors: $viewModel.collectors,
                     selectedCollectorId: $viewModel.selectedCollectorId,
+                    filterText: filterText,
                     isCollectorRunning: { collectorId in
                         appState.isCollectorRunning(collectorId)
                     },
@@ -46,6 +41,7 @@ struct CollectorsView: View {
                             await runAllCollectors()
                         }
                     },
+                    onAddCollector: onAddCollector,
                     isLoading: viewModel.isLoading
                 )
                 .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 300)
@@ -105,25 +101,6 @@ struct CollectorsView: View {
                 FullDiskAccessBanner()
             }
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .automatic) {
-                Button(action: {
-                    viewModel.refreshCollectors()
-                }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(viewModel.isLoading)
-                
-                Button(action: {
-                    Task {
-                        await runAllCollectors()
-                    }
-                }) {
-                    Label("Run All", systemImage: "play.fill")
-                }
-                .disabled(viewModel.isLoading || viewModel.collectors.isEmpty)
-            }
-        }
         .sheet(isPresented: $showingRunConfiguration) {
             if let collector = viewModel.getSelectedCollector(),
                let runBuilderVM = runBuilderViewModel {
@@ -165,6 +142,9 @@ struct CollectorsView: View {
             Text("This will remove all state files and fences for \(collector.displayName). The collector will return to a fresh, never-run state. This action cannot be undone.")
         }
         .onAppear {
+            if !persistedCollectorId.isEmpty {
+                viewModel.selectCollector(persistedCollectorId)
+            }
             viewModel.startPolling()
         }
         .onDisappear {
@@ -173,6 +153,9 @@ struct CollectorsView: View {
         .onReceive(NotificationCenter.default.publisher(for: .settingsConfigSaved)) { _ in
             // Refresh collectors immediately when settings are saved
             viewModel.refreshCollectors()
+        }
+        .onChange(of: viewModel.selectedCollectorId) { _, newValue in
+            persistedCollectorId = newValue ?? ""
         }
     }
     
