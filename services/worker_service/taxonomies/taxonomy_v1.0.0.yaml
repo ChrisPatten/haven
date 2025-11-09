@@ -1,0 +1,79 @@
+version: "1.0.0"
+created_at: "2025-11-09T00:00:00Z"
+description: "Initial MVP taxonomy for Haven intents worker."
+intents:
+  task.create:
+    description: "Create a new task or to-do item that the user wants to track."
+    slots:
+      what:
+        type: string
+        required: true
+        description: "Short description of the task."
+      due_date:
+        type: datetime
+        required: false
+        constraints:
+          min: "now"
+        description: "Due date or deadline for the task."
+      assignee:
+        type: person
+        required: false
+        description: "Person responsible for completing the task."
+      source_ref:
+        type: string
+        required: true
+        description: "Reference to the source artifact that triggered the task."
+    channel_priors:
+      note: 1.15
+      email: 0.9
+  schedule.create:
+    description: "Schedule a calendar event, meeting, or appointment."
+    slots:
+      start_dt:
+        type: datetime
+        required: true
+        description: "Start date/time for the scheduled event."
+      end_dt:
+        type: datetime
+        required: false
+        constraints:
+          min_field: start_dt
+        description: "Optional end date/time; must be after start."
+      location:
+        type: location
+        required: false
+        description: "Where the event takes place."
+      participants:
+        type: array[person]
+        required: false
+        description: "People invited or expected at the event."
+      source_ref:
+        type: string
+        required: true
+        description: "Reference to the source artifact that triggered the schedule."
+    channel_priors:
+      email: 1.2
+      imessage: 0.9
+  reminder.create:
+    description: "Create a reminder or follow-up notification for the user."
+    slots:
+      what:
+        type: string
+        required: true
+        description: "Summary of what the reminder should cover."
+      remind_at:
+        type: datetime
+        required: false
+        description: "When the reminder should trigger."
+      person:
+        type: person
+        required: false
+        description: "Optional person the reminder is about."
+      source_ref:
+        type: string
+        required: true
+        description: "Reference to the source artifact that triggered the reminder."
+    channel_priors:
+      imessage: 1.2
+      note: 1.05
+

@@ -101,12 +101,11 @@ This document outlines what remains to be implemented to enable the LLM-based In
   - ✅ Atomically claim jobs and set status to `processing`
   - ✅ Batch processing (configurable, default 8)
 
-- [ ] Implement intent classification
-  - Load taxonomy from database or files
-  - Classify artifacts using LLM (Ollama/local) or rules
-  - Multi-label intent detection
-  - Compute confidence scores
-  - Apply channel-aware priors
+- [x] Implement intent classification
+  - ✅ Load taxonomy from YAML via `TaxonomyLoader` with on-disk caching
+  - ✅ Classify artifacts using Ollama (`llama3.2`) with multi-label detection and confidence scoring
+  - ✅ Apply channel-aware priors using configurable multipliers
+  - ⚠️ Rule-based fallback remains TBD (tracked separately)
 
 - [ ] Implement slot filling
   - Map pre-processed entities to intent slots
@@ -139,34 +138,33 @@ This document outlines what remains to be implemented to enable the LLM-based In
   - Handle errors and mark as `failed` with error details
 
 - [ ] Add configuration
-  - `WORKER_POLL_INTERVAL` (default: 2.0 seconds)
-  - `WORKER_BATCH_SIZE` (default: 8)
-  - `INTENT_REQUEST_TIMEOUT` (default: 15.0 seconds)
-  - Taxonomy file paths
-  - Confidence thresholds
+  - ✅ Taxonomy file path default + min confidence (`INTENT_MIN_CONFIDENCE`)
+  - ✅ Reuse worker poll interval, batch size, and request timeout env overrides
+  - ⚠️ Intent-specific thresholds, timeout tuning, and dedupe windows still pending
 
 #### 2.2 Intent Classifier Module
 **Priority: High**  
 **Location: `src/haven/intents/classifier/`** (new package)
 
-- [ ] Create classifier package structure
-  - `__init__.py`
-  - `taxonomy.py` - Load and validate taxonomy
-  - `classifier.py` - Intent classification logic
-  - `priors.py` - Channel-aware priors
+- [x] Create classifier package structure
+  - ✅ `__init__.py`
+  - ✅ `taxonomy.py` - Load and validate taxonomy
+  - ✅ `classifier.py` - Intent classification logic
+  - ✅ `priors.py` - Channel-aware priors
 
-- [ ] Implement taxonomy loader
-  - Load from JSON/YAML files or database
-  - Validate taxonomy schema
-  - Support versioning
+- [x] Implement taxonomy loader
+  - ✅ File-based loader with YAML/JSON support and schema validation
+  - ✅ Version-aware caching keyed by taxonomy path mtime
+  - ⚠️ Database-backed storage remains to be implemented
 
-- [ ] Implement intent classifier
-  - LLM-based classification (using Ollama/local models)
-  - Rule-based fallback
-  - Multi-label detection
-  - Confidence scoring
+- [x] Implement intent classifier
+  - ✅ LLM-based classification via Ollama with multi-label JSON output
+  - ✅ Confidence scoring surfaced through `ClassificationResult`
+  - ⚠️ Rule-based fallback deferred
 
-- [ ] Implement channel priors
+- [x] Implement channel priors
+  - ✅ Default multipliers per source (`email`, `imessage`, `note`)
+  - ✅ Environment overrides via `INTENT_PRIOR_OVERRIDES`
   - Apply source-specific priors (email vs iMessage vs notes)
   - Adjust confidence based on channel metadata
 
@@ -272,15 +270,14 @@ This document outlines what remains to be implemented to enable the LLM-based In
 **Priority: High**  
 **Location: `services/intents_service/taxonomies/`** (new directory)
 
-- [ ] Create initial taxonomy files
-  - `taxonomy_v1.0.0.yaml` - MVP intents (task.create, schedule.create, reminder.create)
-  - Define slots for each intent
-  - Set constraints and validation rules
+- [x] Create initial taxonomy files
+  - ✅ `services/worker_service/taxonomies/taxonomy_v1.0.0.yaml` covering task.create, schedule.create, reminder.create
+  - ✅ Slots and baseline constraints defined per intent
+  - ⚠️ Future versions should migrate into dedicated intents service directory
 
-- [ ] Implement taxonomy loader
-  - Load from YAML/JSON files
-  - Validate schema
-  - Store in database for versioning
+- [x] Implement taxonomy loader
+  - ✅ File-based loader with schema validation and version awareness
+  - ⚠️ Persisting taxonomy versions in database still outstanding
 
 #### 4.2 Configuration Management
 **Priority: Medium**  
