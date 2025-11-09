@@ -48,6 +48,7 @@ struct MainWindowView: View {
     @State private var searchText = ""
     @State private var showingCollectorWizard = false
     @State private var wizardErrorMessage: String?
+    @State private var sidebarVisibility: NavigationSplitViewVisibility = .automatic
     
     init(appState: AppState, hostAgentController: HostAgentController) {
         self.appState = appState
@@ -73,7 +74,7 @@ struct MainWindowView: View {
     }
     
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $sidebarVisibility) {
             sidebar
                 .frame(minWidth: sidebarWidth)
                 .navigationSplitViewColumnWidth(min: 220, ideal: sidebarWidth, max: 320)
@@ -83,7 +84,11 @@ struct MainWindowView: View {
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                ToggleSidebarButton()
+                Button {
+                    sidebarVisibility = sidebarVisibility == .doubleColumn ? .detailOnly : .doubleColumn
+                } label: {
+                    Label("Toggle Sidebar", systemImage: "sidebar.left")
+                }
             }
             
             ToolbarItem(placement: .principal) {
@@ -142,7 +147,7 @@ struct MainWindowView: View {
     
     private var sidebar: some View {
         List(selection: sectionBinding) {
-            Section {
+            SwiftUI.Section {
                 statusCard
             }
             .listRowInsets(EdgeInsets())
