@@ -44,6 +44,27 @@ contacts = [
   "rich>=13.7",
 ]
 workers = ["celery", "kombu"]
+# Local development dependencies (not installed in Docker services)
+# Merged from local_requirements.txt for local macOS development
+dev = [
+  # macOS / platform-specific
+  "pyobjc-framework-Contacts",  # Required for collector_contacts.py on macOS
+  # Identifier normalization (full phonenumbers, not just lite)
+  "phonenumbers",  # shared.people_normalization expects this
+  # Image enrichment / OCR / vision
+  "Pillow>=10.0.0",  # Used by shared/image_enrichment.py
+  "pillow-heif>=0.13.0",  # HEIC/HEIF support for Pillow
+  # Environment / configuration
+  "python-dotenv",  # Environment variable loading for local runs
+  # File format helpers / parsers
+  "biplist",  # Apple plist parsing (collectors may read plists)
+  # Testing / development
+  "pytest",
+  # Notebook / interactive development
+  "pandas>=2.0",  # Required for notebooks/postgres_query_playground.ipynb
+  "ipython>=8.0",  # Required for notebooks/postgres_query_playground.ipynb
+  "ipykernel",  # Jupyter kernel for running notebooks
+]
 
 [tool.setuptools]
 package-dir = {"haven" = "src/haven"}

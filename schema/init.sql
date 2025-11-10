@@ -117,7 +117,7 @@ CREATE TABLE documents (
         status IN ('submitted', 'extracting', 'extracted', 'enriching', 'enriched', 'indexed', 'failed')
     ),
     CONSTRAINT documents_valid_source_type CHECK (
-        source_type IN ('imessage', 'sms', 'email', 'email_local', 'localfs', 'gdrive', 'note', 'reminder', 'calendar_event', 'contact')
+        source_type IN ('imessage', 'sms', 'email', 'email_local', 'localfs', 'gdrive', 'note', 'reminder', 'macos_reminders', 'calendar_event', 'contact')
     ),
     intent JSONB DEFAULT NULL,
     relevance_score FLOAT DEFAULT NULL,

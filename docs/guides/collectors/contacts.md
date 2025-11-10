@@ -224,7 +224,7 @@ Each `.vcf` file can contain one or more contacts.
 
 ### State File
 
-State is tracked in `~/.haven/contacts_collector_state.json`:
+State is tracked in `~/Library/Application Support/Haven/State/contacts_collector_state.json`:
 
 ```json
 {
@@ -248,10 +248,10 @@ To force full re-sync:
 
 ```bash
 # Remove state file
-rm ~/.haven/contacts_collector_state.json
+rm ~/Library/Application\ Support/Haven/State/contacts_collector_state.json
 
 # Run collector (will process all contacts)
-python scripts/collectors/collector_contacts.py --full-sync
+# In Haven.app: Collectors → Contacts → Run
 ```
 
 **Warning:** This will re-process all contacts. Use with caution.

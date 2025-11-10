@@ -265,6 +265,8 @@ struct CollectorDetailView: View {
             return "No IMAP collector instances configured"
         case "contacts":
             return "No contacts collector instances configured"
+        case "reminders":
+            return "Reminders collector is disabled. Please enable it in Settings → General → Modules."
         case "localfs":
             return "No files collector instances configured"
         case "icloud_drive":

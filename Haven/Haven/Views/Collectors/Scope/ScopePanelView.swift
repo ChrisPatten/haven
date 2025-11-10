@@ -41,6 +41,12 @@ struct ScopePanelView: View {
             case "contacts":
                 ContactsScopeView(scopeData: $scopeData)
                 
+            case "reminders":
+                RemindersScopeView(
+                    scopeData: $scopeData,
+                    hostAgentController: hostAgentController
+                )
+            
             default:
                 Text("Scope configuration not available for this collector")
                     .foregroundStyle(.secondary)

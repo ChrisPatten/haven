@@ -68,6 +68,7 @@ class CollectorsViewModel: ObservableObject {
         let hasFilesInstances = await hostAgentController.hasFilesInstancesConfigured()
         let hasICloudDriveInstances = await hostAgentController.hasICloudDriveInstancesConfigured()
         let isIMessageEnabled = await hostAgentController.isIMessageModuleEnabled()
+        let isRemindersEnabled = await hostAgentController.isRemindersModuleEnabled()
         
         // Load instances for collectors that support them
         let imapInstances = await hostAgentController.getImapInstances()
@@ -272,6 +273,30 @@ class CollectorsViewModel: ObservableObject {
                     info.isRunning = appState.isCollectorRunning(info.id)
                     loadedCollectors.append(info)
                 }
+            }
+            // Handle Reminders (no instances, single collector like iMessage)
+            else if baseInfo.id == "reminders" {
+                var info = baseInfo
+                info.enabled = isRemindersEnabled
+                loadPersistedLastRunInfo(for: &info)
+                
+                // Load state from API if available
+                if CollectorInfo.hasStateEndpoint(info.id) {
+                    if let state = await hostAgentController.getCollectorState(id: info.id) {
+                        collectorStates[info.id] = state
+                        if let lastRunTimeStr = state.lastRunTime {
+                            let formatter = ISO8601DateFormatter()
+                            formatter.formatOptions = [.withInternetDateTime]
+                            info.lastRunTime = formatter.date(from: lastRunTimeStr)
+                        }
+                        info.lastRunStatus = state.lastRunStatus
+                        info.isRunning = state.isRunning ?? false
+                        info.lastError = state.lastRunError
+                    }
+                }
+                
+                info.isRunning = appState.isCollectorRunning(info.id)
+                loadedCollectors.append(info)
             }
         }
         

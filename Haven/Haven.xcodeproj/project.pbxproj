@@ -415,6 +415,8 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSContactsUsageDescription = "Haven needs access to your contacts to sync them with your knowledge base.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Haven needs full access to your reminders to sync changes and keep your data up to date.";
+				INFOPLIST_KEY_NSRemindersUsageDescription = "Haven needs access to your reminders to index them for search.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -446,6 +448,8 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSContactsUsageDescription = "Haven needs access to your contacts to sync them with your knowledge base.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Haven needs full access to your reminders to sync changes and keep your data up to date.";
+				INFOPLIST_KEY_NSRemindersUsageDescription = "Haven needs access to your reminders to index them for search.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

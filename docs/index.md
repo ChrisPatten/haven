@@ -16,6 +16,7 @@ Haven is a personal data plane that keeps high-signal conversations, files, and 
 - [iMessage Collector](guides/collectors/imessage.md) — collect and index iMessage conversations.
 - [Local Files Collector](guides/collectors/localfs.md) — watch directories and ingest files.
 - [Contacts Collector](guides/collectors/contacts.md) — sync macOS Contacts and VCF files.
+- [Reminders Collector](guides/collectors/reminders.md) — sync macOS Reminders.app data.
 - [Email Collectors](guides/collectors/email.md) — IMAP and local Mail.app email collection.
 
 ## Configuration

@@ -47,7 +47,7 @@ Each Haven service plays a specific role in the ingestion → enrichment → sea
   - `EnrichmentOrchestrator` coordinates OCR, face detection, entity extraction, and captioning
   - Per-collector enrichment control via `~/.haven/collector_enrichment.plist`
   - Module-level configuration (OCR quality, entity types, etc.) via `hostagent.yaml` advanced settings
-- **Security**: Requires Full Disk Access (Messages database), Contacts permission (for contacts collector).
+- **Security**: Requires Full Disk Access (Messages database), Contacts permission (for contacts collector), Reminders permission (for reminders collector).
 - **Deployment**: Built as macOS app bundle; configuration at `~/.haven/hostagent.yaml` and `~/.haven/collector_enrichment.plist`.
 - **Extensibility**: Modular collector configuration; native macOS integration for best performance.
 

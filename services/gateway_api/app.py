@@ -693,6 +693,10 @@ class IngestRequestModel(BaseModel):
     people: List[DocumentPerson] = Field(default_factory=list)
     thread_id: Optional[uuid.UUID] = None
     thread: Optional[ThreadPayloadModel] = None
+    has_due_date: Optional[bool] = None
+    due_date: Optional[datetime] = None
+    is_completed: Optional[bool] = None
+    completed_at: Optional[datetime] = None
 
 
 class BatchIngestRequest(BaseModel):
@@ -984,6 +988,16 @@ def _prepare_ingest_document_payload(
         catalog_payload["thread_id"] = str(payload.thread_id)
     if thread_payload:
         catalog_payload["thread"] = thread_payload
+    
+    # Reminder-specific fields
+    if payload.has_due_date is not None:
+        catalog_payload["has_due_date"] = payload.has_due_date
+    if payload.due_date:
+        catalog_payload["due_date"] = payload.due_date.isoformat()
+    if payload.is_completed is not None:
+        catalog_payload["is_completed"] = payload.is_completed
+    if payload.completed_at:
+        catalog_payload["completed_at"] = payload.completed_at.isoformat()
 
     return PreparedIngestDocument(payload=catalog_payload, content_sha256=text_hash)
 

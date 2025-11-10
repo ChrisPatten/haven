@@ -111,6 +111,7 @@ public struct CollectorRunRequest: Codable {
     public let redactionOverride: RedactionOverride?
     public let filters: FiltersConfig?
     public let scope: AnyCodable?  // Collector-specific scope object
+    public let force: Bool?  // Force re-ingestion by modifying idempotency keys
 
     enum CodingKeys: String, CodingKey {
         case mode
@@ -124,6 +125,7 @@ public struct CollectorRunRequest: Codable {
         case redactionOverride = "redaction_override"
         case filters
         case scope
+        case force
     }
 
     // Helper dynamic key type to detect unknown fields at top level
@@ -139,7 +141,7 @@ public struct CollectorRunRequest: Codable {
         let container = try decoder.container(keyedBy: DynamicKey.self)
         let providedKeys = Set(container.allKeys.map { $0.stringValue })
     // Allow new fields
-    let allowedKeys: Set<String> = ["mode", "limit", "order", "concurrency", "date_range", "time_window", "batch", "batch_size", "redaction_override", "filters", "scope"]
+    let allowedKeys: Set<String> = ["mode", "limit", "order", "concurrency", "date_range", "time_window", "batch", "batch_size", "redaction_override", "filters", "scope", "force"]
         let unknown = providedKeys.subtracting(allowedKeys)
         if !unknown.isEmpty {
             throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Unknown keys: \(unknown)"))
@@ -200,6 +202,7 @@ public struct CollectorRunRequest: Codable {
         self.redactionOverride = try keyed.decodeIfPresent(RedactionOverride.self, forKey: .redactionOverride)
         self.filters = try keyed.decodeIfPresent(FiltersConfig.self, forKey: .filters)
         self.scope = try keyed.decodeIfPresent(AnyCodable.self, forKey: .scope)
+        self.force = try keyed.decodeIfPresent(Bool.self, forKey: .force)
     }
     
     // Public memberwise initializer for programmatic creation
@@ -214,7 +217,8 @@ public struct CollectorRunRequest: Codable {
         batchSize: Int? = nil,
         redactionOverride: RedactionOverride? = nil,
         filters: FiltersConfig? = nil,
-        scope: AnyCodable? = nil
+        scope: AnyCodable? = nil,
+        force: Bool? = nil
     ) {
         self.mode = mode
         self.limit = limit
@@ -227,6 +231,7 @@ public struct CollectorRunRequest: Codable {
         self.redactionOverride = redactionOverride
         self.filters = filters
         self.scope = scope
+        self.force = force
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -242,6 +247,7 @@ public struct CollectorRunRequest: Codable {
         try container.encodeIfPresent(redactionOverride, forKey: .redactionOverride)
         try container.encodeIfPresent(filters, forKey: .filters)
         try container.encodeIfPresent(scope, forKey: .scope)
+        try container.encodeIfPresent(force, forKey: .force)
     }
 
     // ISO8601 parsing helper used by nested types

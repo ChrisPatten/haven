@@ -104,6 +104,17 @@ else
     /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$INFO_PLIST" || true
 fi
 
+echo "[3.2] Adding permission usage descriptions"
+# Add Reminders permission keys
+/usr/libexec/PlistBuddy -c "Delete :NSRemindersUsageDescription" "$INFO_PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :NSRemindersUsageDescription string Haven needs access to your reminders to index them for search." "$INFO_PLIST" 2>/dev/null || \
+  /usr/libexec/PlistBuddy -c "Set :NSRemindersUsageDescription Haven needs access to your reminders to index them for search." "$INFO_PLIST" || true
+
+# Add Reminders full access key (macOS 14+)
+/usr/libexec/PlistBuddy -c "Delete :NSRemindersFullAccessUsageDescription" "$INFO_PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :NSRemindersFullAccessUsageDescription string Haven needs full access to your reminders to sync changes and keep your data up to date." "$INFO_PLIST" 2>/dev/null || \
+  /usr/libexec/PlistBuddy -c "Set :NSRemindersFullAccessUsageDescription Haven needs full access to your reminders to sync changes and keep your data up to date." "$INFO_PLIST" || true
+
 # Optional legacy .icns generation to satisfy older Dock caching heuristics
 MASTER_1024="$ROOT_DIR/.tmp/appicon/icon_1024.png"
 if [[ -f "$MASTER_1024" ]]; then

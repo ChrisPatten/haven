@@ -69,15 +69,15 @@ purge:
 	fi
 	@echo "✓ Purge complete"
 
-## Create or activate local Python virtualenv in ./env and install local_requirements.txt
+## Create or activate local Python virtualenv using uv and install dependencies from pyproject.toml
 local_setup:
-	@if [ -x ./env/bin/python ]; then \
-		echo "Using existing virtualenv at ./env"; \
-	else \
-		echo "Creating virtualenv at ./env"; python3 -m venv env; \
-	fi
-	@./env/bin/pip install -U pip setuptools wheel
-	@./env/bin/pip install -r local_requirements.txt
+	@echo "Setting up virtual environment with uv..."
+	@uv venv --python 3.11
+	@echo "Installing project dependencies..."
+	@uv pip install -e ".[dev]"
+	@echo "✓ Virtual environment ready at .venv"
+	@echo "  Activate with: source .venv/bin/activate"
+	@echo "  Or use uv run <command> to run commands in the venv automatically"
 
 ## Start docker compose services
 start:

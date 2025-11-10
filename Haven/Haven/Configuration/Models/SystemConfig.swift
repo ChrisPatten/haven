@@ -153,6 +153,7 @@ public struct ModulesEnablementConfig: Codable {
     public var localfs: Bool
     public var contacts: Bool
     public var mail: Bool
+    public var reminders: Bool
     
     public init(
         imessage: Bool = true,
@@ -162,7 +163,8 @@ public struct ModulesEnablementConfig: Codable {
         fswatch: Bool = true,
         localfs: Bool = true,
         contacts: Bool = true,
-        mail: Bool = true
+        mail: Bool = true,
+        reminders: Bool = true
     ) {
         self.imessage = imessage
         self.ocr = ocr
@@ -172,6 +174,7 @@ public struct ModulesEnablementConfig: Codable {
         self.localfs = localfs
         self.contacts = contacts
         self.mail = mail
+        self.reminders = reminders
     }
 }
 

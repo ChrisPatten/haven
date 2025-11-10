@@ -20,6 +20,7 @@ struct SettingsWindow: View {
     @State private var icloudDriveConfig: ICloudDriveInstancesConfig?
     @State private var contactsConfig: ContactsInstancesConfig?
     @State private var imessageConfig: IMessageInstanceConfig?
+    @State private var remindersConfig: RemindersInstanceConfig?
     @State private var schedulesConfig: CollectorSchedulesConfig?
     @State private var isLoading = false
     @State private var errorMessage: String?
@@ -27,6 +28,7 @@ struct SettingsWindow: View {
     enum SettingsSection: String, CaseIterable, Identifiable {
         case general = "General"
         case imessage = "iMessage"
+        case reminders = "Reminders"
         case email = "Email"
         case files = "Files"
         case icloudDrive = "iCloud Drive"
@@ -42,6 +44,7 @@ struct SettingsWindow: View {
             switch self {
             case .general: return "gearshape"
             case .imessage: return "message"
+            case .reminders: return "checklist"
             case .email: return "envelope"
             case .files: return "folder"
             case .icloudDrive: return "icloud"
@@ -78,6 +81,12 @@ struct SettingsWindow: View {
                 case .imessage:
                     IMessageSettingsView(
                         config: $imessageConfig,
+                        configManager: configManagerWrapper.configManager,
+                        errorMessage: $errorMessage
+                    )
+                case .reminders:
+                    RemindersSettingsView(
+                        config: $remindersConfig,
                         configManager: configManagerWrapper.configManager,
                         errorMessage: $errorMessage
                     )
@@ -159,6 +168,12 @@ struct SettingsWindow: View {
                 configManager: manager,
                 errorMessage: $errorMessage
             )
+        case .reminders:
+            RemindersSettingsView(
+                config: $remindersConfig,
+                configManager: manager,
+                errorMessage: $errorMessage
+            )
         case .email:
             EmailSettingsView(
                 config: $emailConfig,
@@ -213,6 +228,7 @@ struct SettingsWindow: View {
             icloudDriveConfig = try await configManagerWrapper.configManager.loadICloudDriveConfig()
             contactsConfig = try await configManagerWrapper.configManager.loadContactsConfig()
             imessageConfig = try await configManagerWrapper.configManager.loadIMessageConfig()
+            remindersConfig = try await configManagerWrapper.configManager.loadRemindersConfig()
             schedulesConfig = try await configManagerWrapper.configManager.loadSchedulesConfig()
             errorMessage = nil
         } catch {
@@ -243,6 +259,9 @@ struct SettingsWindow: View {
                 }
                 if let imessageConfig = imessageConfig {
                     try await configManagerWrapper.configManager.saveIMessageConfig(imessageConfig)
+                }
+                if let remindersConfig = remindersConfig {
+                    try await configManagerWrapper.configManager.saveRemindersConfig(remindersConfig)
                 }
                 if let schedulesConfig = schedulesConfig {
                     try await configManagerWrapper.configManager.saveSchedulesConfig(schedulesConfig)

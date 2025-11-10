@@ -78,7 +78,7 @@ struct CollectorListSidebar: View {
             
             // For IMAP, files, and contacts collectors (including instance-specific ones),
             // only show if they're enabled (configured)
-            // iMessage should always be shown regardless of enabled state
+            // iMessage and Reminders should always be shown regardless of enabled state
             if collector.id == "email_imap" || collector.id.hasPrefix("email_imap:") {
                 return collector.enabled
             }
@@ -89,7 +89,7 @@ struct CollectorListSidebar: View {
                 return collector.enabled
             }
             
-            // Show all other collectors (including iMessage)
+            // Show all other collectors (including iMessage and reminders)
             return true
         }
         .sorted { $0.displayName < $1.displayName }

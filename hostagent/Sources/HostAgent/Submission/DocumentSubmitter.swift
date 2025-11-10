@@ -125,6 +125,11 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
         // For now, we'll store them in the metadata headers or a custom field
         var headers: [String: String] = [:]
         
+        // Preserve all additionalMetadata from the base document (includes reminder metadata)
+        for (key, value) in base.metadata.additionalMetadata {
+            headers[key] = value
+        }
+        
         // Store entity information in headers (temporary solution)
         if let entities = document.documentEnrichment?.entities, !entities.isEmpty {
             let entityData = entities.map { "\($0.type.rawValue):\($0.text)" }.joined(separator: ",")
@@ -158,6 +163,27 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
             bodyProcessed: true
         )
         
+        // Extract reminder-specific fields from additionalMetadata if present
+        var hasDueDate: Bool? = nil
+        var dueDate: Date? = nil
+        var isCompleted: Bool? = nil
+        var completedAt: Date? = nil
+        
+        if let hasDueDateStr = base.metadata.additionalMetadata["has_due_date"] {
+            hasDueDate = hasDueDateStr.lowercased() == "true"
+        }
+        if let dueDateStr = base.metadata.additionalMetadata["due_date"] {
+            let formatter = ISO8601DateFormatter()
+            dueDate = formatter.date(from: dueDateStr)
+        }
+        if let isCompletedStr = base.metadata.additionalMetadata["is_completed"] {
+            isCompleted = isCompletedStr.lowercased() == "true"
+        }
+        if let completedAtStr = base.metadata.additionalMetadata["completed_at"] {
+            let formatter = ISO8601DateFormatter()
+            completedAt = formatter.date(from: completedAtStr)
+        }
+        
         return EmailDocumentPayload(
             sourceType: base.sourceType,
             sourceId: base.sourceId,
@@ -171,7 +197,11 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
             threadId: nil,  // Thread data would come from collector-specific logic
             thread: nil,
             intent: nil,  // Intent would come from collector-specific logic
-            relevanceScore: nil
+            relevanceScore: nil,
+            hasDueDate: hasDueDate,
+            dueDate: dueDate,
+            isCompleted: isCompleted,
+            completedAt: completedAt
         )
     }
     

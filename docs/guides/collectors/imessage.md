@@ -192,11 +192,13 @@ Global enrichment module settings (OCR quality, entity types, captioning models)
 
 ### State Files
 
-All state files are stored in `~/.haven/`:
+All state files are stored in `~/Library/Application Support/Haven/State/`:
 
-- `imessage_collector_state.json` - Last processed message ID
-- `imessage_versions.json` - Message version signatures
-- `chat.db` - Backup of Messages database
+- `imessage_state.json` - Last processed message ID and sync state
+- `imessage_versions.json` - Message version signatures (if using legacy format)
+- `chat.db` - Backup of Messages database (stored in Backups directory)
+
+**Note:** State files are now centralized in the State directory following macOS conventions. The old `~/.haven/` location is deprecated.
 
 ### Resetting State
 
@@ -204,11 +206,11 @@ To reprocess all messages:
 
 ```bash
 # Remove state files
-rm ~/.haven/imessage_collector_state.json
-rm ~/.haven/imessage_versions.json
+rm ~/Library/Application\ Support/Haven/State/imessage_state.json
+rm ~/Library/Application\ Support/Haven/State/imessage_versions.json
 
 # Run collector (will process from beginning)
-python scripts/collectors/collector_imessage.py
+# In Haven.app: Collectors → iMessage → Run
 ```
 
 **Warning:** This will re-ingest all messages. Use with caution.

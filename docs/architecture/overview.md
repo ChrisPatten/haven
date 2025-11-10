@@ -13,7 +13,7 @@ Haven is a personal data plane that runs primarily on the developer’s machine.
 Supporting datastores include Postgres (primary), Qdrant (vectors), and MinIO (binary attachments). All binaries flow through Gateway for deduplication and storage.
 
 ## Data Flow at a Glance
-1. **Collectors emit payloads** — Haven.app (iMessage, Contacts, filesystem watchers) or CLI collectors normalise source data and send them to Gateway. Haven.app runs collectors directly via Swift APIs (no HTTP server required).
+1. **Collectors emit payloads** — Haven.app (iMessage, Contacts, Reminders, filesystem watchers) or CLI collectors normalise source data and send them to Gateway. Haven.app runs collectors directly via Swift APIs (no HTTP server required).
 2. **Enrichment processing** — Haven.app's `EnrichmentOrchestrator` coordinates enrichment services (OCR, face detection, entity extraction, captioning) before submission. Per-collector enrichment settings control whether enrichment is applied. `ImageExtractor` and `TextExtractor` modules extract content from HTML/rich text.
 3. **Gateway validates and queues** — It computes idempotency keys, attaches metadata, and forwards the document payload to Catalog while staging files in MinIO.
 4. **Catalog persists state** — Documents, threads, files, and chunks are written transactionally. Ingest submissions capture status for retries and audit trails. People are normalized via `PeopleRepository`, identifiers canonicalized, and linked to documents via `document_people`.

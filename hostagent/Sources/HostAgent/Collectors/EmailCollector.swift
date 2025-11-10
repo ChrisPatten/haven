@@ -255,6 +255,11 @@ public struct EmailDocumentPayload: Codable, Equatable {
     public var thread: EmailThreadPayload?
     public var intent: EmailIntentPayload?
     public var relevanceScore: Double?
+    // Reminder-specific fields
+    public var hasDueDate: Bool?
+    public var dueDate: Date?
+    public var isCompleted: Bool?
+    public var completedAt: Date?
     
     enum CodingKeys: String, CodingKey {
         case sourceType = "source_type"
@@ -270,6 +275,10 @@ public struct EmailDocumentPayload: Codable, Equatable {
         case thread
         case intent
         case relevanceScore = "relevance_score"
+        case hasDueDate = "has_due_date"
+        case dueDate = "due_date"
+        case isCompleted = "is_completed"
+        case completedAt = "completed_at"
     }
 }
 

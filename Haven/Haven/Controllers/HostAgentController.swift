@@ -206,6 +206,20 @@ public class HostAgentController: ObservableObject {
                 collectors[id] = controller
                 logger.info("Initialized collector", metadata: ["collector": id])
             }
+        case "reminders":
+            // Reminders doesn't require instances, always initialize if requested
+            // Reminders always skip enrichment (no images/attachments)
+            if collectors[id] == nil {
+                let controller = try await RemindersController(
+                    config: config,
+                    serviceController: serviceController,
+                    enrichmentOrchestrator: nil,
+                    submitter: sharedSubmitter,
+                    skipEnrichment: true // Reminders always skip enrichment
+                )
+                collectors[id] = controller
+                logger.info("Initialized collector", metadata: ["collector": id])
+            }
         default:
             throw HostAgentError.collectorNotFound(id)
         }
@@ -781,6 +795,19 @@ public class HostAgentController: ObservableObject {
     public func isIMessageModuleEnabled() async -> Bool {
         // All modules are always enabled - collectors are conditionally enabled based on instances
         return true
+    }
+    
+    /// Check if Reminders collector module is enabled
+    /// - Returns: true if reminders module is enabled in system config
+    public func isRemindersModuleEnabled() async -> Bool {
+        do {
+            let configManager = ConfigManager()
+            let systemConfig = try await configManager.loadSystemConfig()
+            return systemConfig.modules.reminders
+        } catch {
+            logger.error("Failed to load system config for reminders module check", metadata: ["error": error.localizedDescription])
+            return true // Default to enabled
+        }
     }
     
     /// Get all enabled IMAP email instances

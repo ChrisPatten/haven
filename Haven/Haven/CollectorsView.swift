@@ -264,6 +264,8 @@ struct CollectorsView: View {
                 message = "Contacts collector is disabled. Please configure at least one contacts instance to enable it."
             case "localfs":
                 message = "Files collector is disabled. Please configure at least one files instance to enable it."
+            case "reminders":
+                message = "Reminders collector is disabled. Please enable it in Settings → General → Modules."
             default:
                 message = "Collector is disabled and cannot be run."
             }

@@ -207,7 +207,7 @@ Use glob patterns for include/exclude:
 
 ### State File
 
-State is tracked in `~/.haven/localfs_collector_state.json`:
+State is tracked in `~/Library/Application Support/Haven/State/localfs_collector_state.json`:
 
 ```json
 {
@@ -226,10 +226,10 @@ To reprocess all files:
 
 ```bash
 # Remove state file
-rm ~/.haven/localfs_collector_state.json
+rm ~/Library/Application\ Support/Haven/State/localfs_collector_state.json
 
 # Run collector (will process all files)
-python scripts/collectors/collector_localfs.py --watch ~/HavenInbox
+# In Haven.app: Collectors → Local Files → Run
 ```
 
 **Warning:** This will re-upload all files. Use with caution.

@@ -22,6 +22,7 @@ public actor ConfigManager {
     private var icloudDriveConfig: ICloudDriveInstancesConfig?
     private var contactsConfig: ContactsInstancesConfig?
     private var imessageConfig: IMessageInstanceConfig?
+    private var remindersConfig: RemindersInstanceConfig?
     private var schedulesConfig: CollectorSchedulesConfig?
     
     public init(configDirectory: URL? = nil) {
@@ -168,6 +169,28 @@ public actor ConfigManager {
         logger.info("iMessage configuration saved", metadata: ["path": url.path])
     }
     
+    // MARK: - Reminders Configuration
+    
+    /// Load Reminders configuration from reminders.plist
+    public func loadRemindersConfig() throws -> RemindersInstanceConfig {
+        if let cached = remindersConfig {
+            return cached
+        }
+        
+        let url = configDirectory.appendingPathComponent("reminders.plist")
+        let config = try loadConfig(from: url, type: RemindersInstanceConfig.self, default: RemindersInstanceConfig())
+        remindersConfig = config
+        return config
+    }
+    
+    /// Save Reminders configuration to reminders.plist
+    public func saveRemindersConfig(_ config: RemindersInstanceConfig) throws {
+        let url = configDirectory.appendingPathComponent("reminders.plist")
+        try saveConfig(config, to: url)
+        remindersConfig = config
+        logger.info("Reminders configuration saved", metadata: ["path": url.path])
+    }
+    
     // MARK: - Schedules Configuration
     
     /// Load schedules configuration from schedules.plist
@@ -200,6 +223,7 @@ public actor ConfigManager {
         _ = try loadICloudDriveConfig()
         _ = try loadContactsConfig()
         _ = try loadIMessageConfig()
+        _ = try loadRemindersConfig()
         _ = try loadSchedulesConfig()
     }
     
