@@ -126,26 +126,15 @@ public actor IMessageController: CollectorController {
     public func reset() async throws {
         let fm = FileManager.default
         
-        // Get cache directory (same logic as IMessageHandler)
-        let cacheDir: URL
-        if let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            cacheDir = caches.appendingPathComponent("Haven", isDirectory: true)
-        } else {
-            // Fallback for older installations
-            let raw = "~/.haven/cache"
-            let expanded = NSString(string: raw).expandingTildeInPath
-            cacheDir = URL(fileURLWithPath: expanded, isDirectory: true)
-        }
-        
-        // Delete fence state file
-        let fenceFile = cacheDir.appendingPathComponent("imessage_state.json")
+        // Delete fence state file (in State directory)
+        let fenceFile = HavenFilePaths.stateFile("imessage_state.json")
         if fm.fileExists(atPath: fenceFile.path) {
             try fm.removeItem(at: fenceFile)
             logger.info("Deleted iMessage fence state file", metadata: ["path": fenceFile.path])
         }
         
-        // Delete handler state file
-        let handlerStateFile = cacheDir.appendingPathComponent("imessage_handler_state.json")
+        // Delete handler state file (in Caches directory)
+        let handlerStateFile = HavenFilePaths.cacheFile("imessage_handler_state.json")
         if fm.fileExists(atPath: handlerStateFile.path) {
             try fm.removeItem(at: handlerStateFile)
             logger.info("Deleted iMessage handler state file", metadata: ["path": handlerStateFile.path])

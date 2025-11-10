@@ -123,12 +123,8 @@ public actor ICloudDriveController: CollectorController {
     public func reset() async throws {
         let fm = FileManager.default
         
-        // Default state file path
-        let defaultStatePath = "~/.haven/icloud_drive_collector_state.json"
-        let expandedPath = NSString(string: defaultStatePath).expandingTildeInPath
-        let stateFile = URL(fileURLWithPath: expandedPath)
-        
-        // Delete state file if it exists
+        // Delete state file (in State directory)
+        let stateFile = HavenFilePaths.stateFile("icloud_drive_collector_state.json")
         if fm.fileExists(atPath: stateFile.path) {
             try fm.removeItem(at: stateFile)
             logger.info("Deleted iCloud Drive state file", metadata: ["path": stateFile.path])

@@ -18,6 +18,10 @@ public actor IMessageHandler {
     private let enrichmentOrchestrator: EnrichmentOrchestrator?
     private let submitter: DocumentSubmitter?
     private let skipEnrichment: Bool
+    private var enrichmentQueue: EnrichmentQueue?
+    
+    // Completion queue for enriched documents: documentId -> EnrichedDocument
+    private var enrichmentCompletions: [String: EnrichedDocument] = [:]
     
     // State tracking
     private var isRunning: Bool = false
@@ -641,11 +645,22 @@ public actor IMessageHandler {
         var lastFenceSaveTime: Date? = nil
         let fenceSaveInterval: TimeInterval = 5.0  // Save fences every 5 seconds
         
+        // Initialize enrichment queue if enrichment is enabled
+        var enrichmentQueue: EnrichmentQueue? = nil
+        if !skipEnrichment, let orchestrator = enrichmentOrchestrator {
+            enrichmentQueue = EnrichmentQueue(orchestrator: orchestrator, maxConcurrentEnrichments: 3)
+            self.enrichmentQueue = enrichmentQueue
+        }
+        
+        // Track pending enrichments: documentId -> (baseDocument, messageDate, baseCollectorDocument)
+        var pendingEnrichments: [String: ([String: Any], Date, CollectorDocument)] = [:]
+        
         logger.info("Processing messages in batches of \(batchSize)", metadata: [
             "total_rows": String(orderedRowIds.count),
             "limit": params.limit?.description ?? "unlimited",
             "submission_mode": params.batchMode ? "batch" : "single",
-            "existing_fences": String(fences.count)
+            "existing_fences": String(fences.count),
+            "enrichment_queue_enabled": enrichmentQueue != nil ? "true" : "false"
         ])
 
         // Iterate ordered rows and prepare documents in batches
@@ -766,48 +781,96 @@ public actor IMessageHandler {
             let threads = try fetchThreads(db: db!, messageIds: Set([message.chatId]))
             guard let thread = threads.first(where: { $0.rowId == message.chatId }) else { continue }
 
-            // Enrich attachments if present
-            var enrichedAttachments: [[String: Any]] = []
-            if !message.attachments.isEmpty {
-                enrichedAttachments = try await enrichAttachments(message.attachments, db: db!)
-                stats.attachmentsProcessed += message.attachments.count
+            // Build base document (without enrichment)
+            let baseAttachments = message.attachments.map { attachment in
+                [
+                    "row_id": attachment.rowId,
+                    "guid": attachment.guid,
+                    "mime_type": attachment.mimeType ?? "application/octet-stream",
+                    "size_bytes": attachment.totalBytes,
+                    "filename": attachment.filename ?? ""
+                ] as [String: Any]
             }
-
+            
+            let baseDocument = try buildDocument(message: message, thread: thread, attachments: baseAttachments, db: db)
+            stats.attachmentsProcessed += message.attachments.count
+            
+            // Convert to CollectorDocument to check for images
+            let collectorDocument = try convertToCollectorDocument(
+                message: message,
+                thread: thread,
+                baseDocument: baseDocument
+            )
+            
             // Check limit before building/submitting document
             if let lim = params.limit, lim > 0, submittedCount >= lim {
                 logger.info("Reached limit of \(lim) messages, stopping processing")
                 break
             }
-
-            // Build document with new architecture enrichment support
-            // If submitter is used (e.g., debug mode), document may be nil
-            if let document = try await buildDocumentWithEnrichment(
-                message: message,
-                thread: thread,
-                attachments: enrichedAttachments,
-                db: db
-            ) {
-            currentBatch.append(document)
-            currentBatchTimestamps.append(messageDate)
-            allDocuments.append(document)
-            stats.documentsCreated += 1
-            } else {
-                // Document was submitted via submitter (e.g., debug mode), skip HTTP posting
-                // Count it toward the limit since it was successfully submitted
-                submittedCount += 1
-                stats.documentsCreated += 1
-                logger.debug("Document submitted via submitter, counting toward limit", metadata: [
-                    "row_id": String(rowId),
-                    "submitted_count": String(submittedCount),
-                    "limit": params.limit?.description ?? "unlimited"
-                ])
+            
+            // Determine if document has images that need enrichment
+            let hasImages = !collectorDocument.images.isEmpty
+            let documentId = collectorDocument.sourceId
+            
+            if hasImages && enrichmentQueue != nil {
+                // Document has images - queue for enrichment
+                // Store pending enrichment info before queuing
+                pendingEnrichments[documentId] = (baseDocument, messageDate, collectorDocument)
                 
-                // Check if we've reached the limit after this submission
-                if let lim = params.limit, lim > 0, submittedCount >= lim {
-                    logger.info("Reached limit of \(lim) messages after submitter submission, stopping processing")
-                    break
+                // Queue for enrichment with callback
+                let queued = await enrichmentQueue!.queueForEnrichment(
+                    document: collectorDocument,
+                    documentId: documentId
+                ) { completedId, enrichedDoc in
+                    // Callback executed when enrichment completes
+                    // Store completion in actor's completion queue
+                    Task {
+                        await self.addEnrichmentCompletion(documentId: completedId, enrichedDocument: enrichedDoc)
+                    }
+                }
+                
+                if queued {
+                    logger.debug("Queued document for enrichment", metadata: [
+                        "document_id": documentId,
+                        "image_count": String(collectorDocument.images.count)
+                    ])
+                    // Continue processing other messages
+                    continue
+                } else {
+                    // Failed to queue, remove from pending
+                    pendingEnrichments.removeValue(forKey: documentId)
                 }
             }
+            
+            // Document has no images or enrichment is disabled - perform NER immediately and add to batch
+            let enrichedDocument: [String: Any]
+            do {
+                enrichedDocument = try await enrichDocumentWithNER(
+                    baseDocument: baseDocument,
+                    collectorDocument: collectorDocument
+                )
+            } catch {
+                logger.warning("NER enrichment failed, using base document", metadata: [
+                    "document_id": documentId,
+                    "error": error.localizedDescription
+                ])
+                enrichedDocument = baseDocument
+            }
+            
+            // Add to batch
+            currentBatch.append(enrichedDocument)
+            currentBatchTimestamps.append(messageDate)
+            allDocuments.append(enrichedDocument)
+            stats.documentsCreated += 1
+            
+            // Process any completed enrichments before checking batch size
+            processEnrichmentCompletions(
+                pendingEnrichments: &pendingEnrichments,
+                currentBatch: &currentBatch,
+                currentBatchTimestamps: &currentBatchTimestamps,
+                allDocuments: &allDocuments,
+                stats: &stats
+            )
 
             // Process batch when it reaches batch size OR when we've reached the limit
             let shouldFlushBatch: Bool
@@ -934,6 +997,36 @@ public actor IMessageHandler {
         }
         
         // Process any remaining documents in the final batch
+        // Wait for all pending enrichments to complete before final batch
+        if let queue = enrichmentQueue, !pendingEnrichments.isEmpty {
+            logger.info("Waiting for all pending enrichments to complete", metadata: [
+                "pending_count": String(pendingEnrichments.count)
+            ])
+            
+            // Poll for completions until all are done (no timeout)
+            let pollInterval: TimeInterval = 0.5 // Check every 500ms
+            
+            while !pendingEnrichments.isEmpty {
+                // Process any completions that have arrived
+                processEnrichmentCompletions(
+                    pendingEnrichments: &pendingEnrichments,
+                    currentBatch: &currentBatch,
+                    currentBatchTimestamps: &currentBatchTimestamps,
+                    allDocuments: &allDocuments,
+                    stats: &stats
+                )
+                
+                // If still pending, wait a bit before checking again
+                if !pendingEnrichments.isEmpty {
+                    try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+                }
+            }
+            
+            logger.info("All pending enrichments completed", metadata: [
+                "total_processed": String(stats.documentsCreated)
+            ])
+        }
+        
         // But only if we haven't exceeded the limit
         if !currentBatch.isEmpty {
             // Truncate to limit if needed
@@ -1037,8 +1130,8 @@ public actor IMessageHandler {
     }
     
     private func createChatDbSnapshot(sourcePath: String) throws -> String {
-        // Use ~/.haven/chat_backup directory like the Python collector
-        let havenDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".haven/chat_backup")
+        // Use HavenFilePaths for chat backup directory
+        let havenDir = HavenFilePaths.chatBackupDirectory
         try FileManager.default.createDirectory(at: havenDir, withIntermediateDirectories: true)
         
         let snapshotPath = havenDir.appendingPathComponent("chat.db").path
@@ -1684,21 +1777,13 @@ public actor IMessageHandler {
     // MARK: - State persistence for iMessage collector
 
     private func iMessageCacheDirURL() -> URL {
-        // Prefer the user's standard Caches directory: ~/Library/Caches/Haven
-        if let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            return caches.appendingPathComponent("Haven", isDirectory: true)
-        }
-
-        // Fallback for older installations: ~/.haven/cache
-        let raw = "~/.haven/cache"
-        let expanded = NSString(string: raw).expandingTildeInPath
-        return URL(fileURLWithPath: expanded, isDirectory: true)
+        // Use HavenFilePaths for state directory (fence state goes in State, not Cache)
+        return HavenFilePaths.stateDirectory
     }
 
     private func iMessageCacheFileURL() -> URL {
-        let dir = iMessageCacheDirURL()
-        let fileName = "imessage_state.json"
-        return dir.appendingPathComponent(fileName)
+        // State file goes in State directory
+        return HavenFilePaths.stateFile("imessage_state.json")
     }
 
     private func loadIMessageState() throws -> [FenceRange] {
@@ -1727,8 +1812,8 @@ public actor IMessageHandler {
     // MARK: - Handler State Persistence
     
     private func handlerStateFileURL() -> URL {
-        let dir = iMessageCacheDirURL()
-        return dir.appendingPathComponent("imessage_handler_state.json")
+        // Handler status goes in Caches directory
+        return HavenFilePaths.cacheFile("imessage_handler_state.json")
     }
     
     private struct PersistedHandlerState: Codable {
@@ -2175,6 +2260,83 @@ public actor IMessageHandler {
         }
         
         return document
+    }
+    
+    /// Add completed enrichment to the completion queue
+    private func addEnrichmentCompletion(documentId: String, enrichedDocument: EnrichedDocument?) {
+        if let enriched = enrichedDocument {
+            enrichmentCompletions[documentId] = enriched
+        } else {
+            // Enrichment failed, remove from completions (will use base document)
+            enrichmentCompletions.removeValue(forKey: documentId)
+        }
+    }
+    
+    /// Process completed enrichments and add them to batches
+    private func processEnrichmentCompletions(
+        pendingEnrichments: inout [String: ([String: Any], Date, CollectorDocument)],
+        currentBatch: inout [[String: Any]],
+        currentBatchTimestamps: inout [Date],
+        allDocuments: inout [[String: Any]],
+        stats: inout CollectorStats
+    ) {
+        // Find completions that match pending enrichments
+        let completedIds = Set(enrichmentCompletions.keys).intersection(Set(pendingEnrichments.keys))
+        
+        for documentId in completedIds {
+            guard let (baseDocument, messageDate, _) = pendingEnrichments[documentId],
+                  let enrichedDocument = enrichmentCompletions[documentId] else {
+                continue
+            }
+            
+            // Merge enrichment into base document
+            let enrichedDict = mergeEnrichmentIntoDocument(baseDocument, enrichedDocument)
+            
+            // Add to batch
+            currentBatch.append(enrichedDict)
+            currentBatchTimestamps.append(messageDate)
+            allDocuments.append(enrichedDict)
+            stats.documentsCreated += 1
+            
+            // Remove from pending and completions
+            pendingEnrichments.removeValue(forKey: documentId)
+            enrichmentCompletions.removeValue(forKey: documentId)
+            
+            logger.debug("Processed completed enrichment", metadata: [
+                "document_id": documentId
+            ])
+        }
+    }
+    
+    /// Perform NER enrichment on a document without attachments
+    /// Returns enriched document dictionary ready for batch submission
+    private func enrichDocumentWithNER(
+        baseDocument: [String: Any],
+        collectorDocument: CollectorDocument
+    ) async throws -> [String: Any] {
+        // If enrichment is skipped or no orchestrator, return base document
+        guard !skipEnrichment, let orchestrator = enrichmentOrchestrator else {
+            return baseDocument
+        }
+        
+        // Perform NER on document content only (no image enrichment)
+        // Create a document without images for NER
+        let documentForNER = CollectorDocument(
+            content: collectorDocument.content,
+            sourceType: collectorDocument.sourceType,
+            sourceId: collectorDocument.sourceId,
+            metadata: collectorDocument.metadata,
+            images: [],  // No images - just NER
+            contentType: collectorDocument.contentType,
+            title: collectorDocument.title,
+            canonicalUri: collectorDocument.canonicalUri
+        )
+        
+        // Enrich with NER only
+        let enrichedDocument = try await orchestrator.enrich(documentForNER)
+        
+        // Merge NER results into base document
+        return mergeEnrichmentIntoDocument(baseDocument, enrichedDocument)
     }
     
     

@@ -315,8 +315,13 @@ public actor ICloudDriveHandler {
         let dryRun = runRequest?.mode == .simulate
         
         let stateFileString = (scopeDict["state_file"] as? String)?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            ?? "~/.haven/icloud_drive_collector_state.json"
-        let stateFileURL = URL(fileURLWithPath: expandTilde(in: stateFileString))
+        let stateFileURL: URL
+        if let statePath = stateFileString {
+            stateFileURL = URL(fileURLWithPath: expandTilde(in: statePath))
+        } else {
+            // Use HavenFilePaths for default state file
+            stateFileURL = HavenFilePaths.stateFile("icloud_drive_collector_state.json")
+        }
         
         let maxFileBytes = moduleConfig.maxFileBytes
         let requestTimeout: TimeInterval = 30.0 // Default 30 seconds

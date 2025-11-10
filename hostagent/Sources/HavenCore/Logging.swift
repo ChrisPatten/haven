@@ -27,8 +27,8 @@ public struct HavenLogger {
     public static func enableDirectFileLogging() {
         directFileLoggingEnabled = true
 
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let logsDir = homeDir.appendingPathComponent("Library/Logs/Haven")
+        // Use HavenFilePaths for logs directory
+        let logsDir = HavenFilePaths.logsDirectory
 
         // Create logs directory if it doesn't exist
         try? FileManager.default.createDirectory(
@@ -36,7 +36,7 @@ public struct HavenLogger {
             withIntermediateDirectories: true
         )
 
-        let logPath = logsDir.appendingPathComponent("hostagent.log")
+        let logPath = HavenFilePaths.logFile("hostagent.log")
 
         // Open file handle for direct writing with unbuffered I/O
         do {

@@ -12,13 +12,11 @@ public class EnrichmentConfigManager {
     private let configFileURL: URL
     
     public init() {
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let havenDir = homeDir.appendingPathComponent(".haven")
+        // Use HavenFilePaths for macOS-standard directory
+        // Ensure directories exist
+        try? HavenFilePaths.initializeDirectories()
         
-        // Create .haven directory if it doesn't exist
-        try? FileManager.default.createDirectory(at: havenDir, withIntermediateDirectories: true)
-        
-        self.configFileURL = havenDir.appendingPathComponent("collector_enrichment.plist")
+        self.configFileURL = HavenFilePaths.configFile("collector_enrichment")
     }
     
     /// Load enrichment configuration from plist file

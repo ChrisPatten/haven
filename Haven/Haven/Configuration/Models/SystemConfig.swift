@@ -132,13 +132,14 @@ public struct SystemLoggingPathsConfig: Codable {
     public var access: String
     
     public init(
-        app: String = "~/.haven/hostagent.log",
+        app: String = "",
         error: String? = nil,
-        access: String = "~/.haven/hostagent_access.log"
+        access: String = ""
     ) {
-        self.app = app
+        // Default to HavenFilePaths if empty
+        self.app = app.isEmpty ? HavenFilePaths.logFile("hostagent.log").path : app
         self.error = error
-        self.access = access
+        self.access = access.isEmpty ? HavenFilePaths.logFile("hostagent_access.log").path : access
     }
 }
 
@@ -341,9 +342,10 @@ public struct DebugSettings: Codable {
         case outputPath = "output_path"
     }
     
-    public init(enabled: Bool = false, outputPath: String = "~/.haven/debug_documents.jsonl") {
+    public init(enabled: Bool = false, outputPath: String = "") {
         self.enabled = enabled
-        self.outputPath = outputPath
+        // Default to HavenFilePaths debug directory if empty
+        self.outputPath = outputPath.isEmpty ? HavenFilePaths.debugFile("debug_documents.jsonl").path : outputPath
     }
 }
 

@@ -935,13 +935,11 @@ public actor ContactsHandler {
     // MARK: - State Persistence
     
     private func stateFilePath() -> URL {
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let havenDir = homeDir.appendingPathComponent(".haven")
+        // Use HavenFilePaths for state directory
+        // Ensure directories exist
+        try? HavenFilePaths.initializeDirectories()
         
-        // Create directory if it doesn't exist
-        try? FileManager.default.createDirectory(at: havenDir, withIntermediateDirectories: true)
-        
-        return havenDir.appendingPathComponent("contacts_collector_state.json")
+        return HavenFilePaths.stateFile("contacts_collector_state.json")
     }
     
     private func savePersistedState(scanned: Int, submitted: Int) {

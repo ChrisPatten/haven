@@ -398,8 +398,8 @@ public actor LocalFSHandler {
     }
     
     private func defaultStateFileURL() -> URL? {
-        let statePath = "~/.haven/localfs_collector_state.json"
-        return URL(fileURLWithPath: expandTilde(in: statePath))
+        // Use HavenFilePaths for state directory
+        return HavenFilePaths.stateFile("localfs_collector_state.json")
     }
 
     private func resolveStateFileURL(from request: CollectorRunRequest?) -> URL {
@@ -408,6 +408,6 @@ public actor LocalFSHandler {
             let expanded = NSString(string: statePath).expandingTildeInPath
             return URL(fileURLWithPath: expanded)
         }
-        return defaultStateFileURL() ?? URL(fileURLWithPath: "~/.haven/localfs_collector_state.json")
+        return defaultStateFileURL() ?? HavenFilePaths.stateFile("localfs_collector_state.json")
     }
 }

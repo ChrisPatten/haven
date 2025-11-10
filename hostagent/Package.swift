@@ -139,6 +139,7 @@ let package = Package(
             sources: [
                 "Collectors",
                 "Submission",
+                "Enrichment",
                 "DocumentTypes.swift",
                 "EnrichmentOrchestrator.swift"
             ]

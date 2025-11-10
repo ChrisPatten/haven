@@ -34,6 +34,7 @@ struct SettingsWindow: View {
         case schedules = "Schedules"
         case enrichment = "Enrichment"
         case advanced = "Advanced"
+        case dataManagement = "Data Management"
         
         var id: String { rawValue }
         
@@ -48,6 +49,7 @@ struct SettingsWindow: View {
             case .schedules: return "calendar"
             case .enrichment: return "sparkles"
             case .advanced: return "slider.horizontal.3"
+            case .dataManagement: return "externaldrive"
             }
         }
     }
@@ -117,6 +119,8 @@ struct SettingsWindow: View {
                         configManager: configManagerWrapper.configManager,
                         errorMessage: $errorMessage
                     )
+                case .dataManagement:
+                    DataManagementSettingsView(errorMessage: $errorMessage)
                 }
             }
             .frame(minWidth: 600, minHeight: 400)
@@ -193,6 +197,8 @@ struct SettingsWindow: View {
                 configManager: manager,
                 errorMessage: $errorMessage
             )
+        case .dataManagement:
+            DataManagementSettingsView(errorMessage: $errorMessage)
         }
     }
     

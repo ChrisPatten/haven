@@ -151,11 +151,21 @@ public actor EmailController: CollectorController {
     public func reset() async throws {
         let fm = FileManager.default
         
-        // Get cache directory (same logic as EmailImapHandler)
-        let home = fm.homeDirectoryForCurrentUser
-        let cacheDir = home.appendingPathComponent("Library/Caches/Haven/remote_mail")
+        // Delete email collector state files (in State directory)
+        let emailStateFile = HavenFilePaths.stateFile("email_collector_state_run.json")
+        if fm.fileExists(atPath: emailStateFile.path) {
+            try fm.removeItem(at: emailStateFile)
+            logger.info("Deleted email collector state file", metadata: ["path": emailStateFile.path])
+        }
         
-        // Delete all IMAP fence state files (one per account/folder combination)
+        let emailLockFile = HavenFilePaths.stateFile("email_collector.lock")
+        if fm.fileExists(atPath: emailLockFile.path) {
+            try fm.removeItem(at: emailLockFile)
+            logger.info("Deleted email collector lock file", metadata: ["path": emailLockFile.path])
+        }
+        
+        // Delete all IMAP fence state files (one per account/folder combination) in remote_mail cache
+        let cacheDir = HavenFilePaths.remoteMailCacheDirectory
         if fm.fileExists(atPath: cacheDir.path) {
             let files = try fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil)
             for file in files {
@@ -166,8 +176,8 @@ public actor EmailController: CollectorController {
             }
         }
         
-        // Delete handler state file
-        let handlerStateFile = cacheDir.appendingPathComponent("imap_handler_state.json")
+        // Delete handler state file (in remote_mail cache directory)
+        let handlerStateFile = HavenFilePaths.cacheFile("imap_handler_state.json")
         if fm.fileExists(atPath: handlerStateFile.path) {
             try fm.removeItem(at: handlerStateFile)
             logger.info("Deleted IMAP handler state file", metadata: ["path": handlerStateFile.path])

@@ -1282,9 +1282,8 @@ extension EmailImapHandler {
 
 private extension EmailImapHandler {
     func cacheDirURL() -> URL {
-        // Use a default cache directory since we removed the cache config
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent("Library/Caches/Haven/remote_mail")
+        // Use HavenFilePaths for remote mail cache directory
+        return HavenFilePaths.remoteMailCacheDirectory
     }
 
     func cacheFileURL(for account: MailSourceConfig, folder: String) -> URL {

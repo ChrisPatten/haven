@@ -96,39 +96,36 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
             // Captioning for this image (using CaptionService - not email-specific)
             // Note: Caption data is NOT enriched further (no NER on captions)
             // Pass OCR text if available to improve caption quality
-            if captionConfig.enabled {
-                if let captionService = captionService {
-                    do {
-                        let ocrTextForCaption = ocrResult?.ocrText
-                        logger.debug("Attempting to generate caption for image", metadata: [
+            // Only proceed if captioning is enabled AND service is available
+            // Skip silently if disabled (no logging per image to avoid noise)
+            if captionConfig.enabled, let captionService = captionService {
+                do {
+                    let ocrTextForCaption = ocrResult?.ocrText
+                    logger.debug("Attempting to generate caption for image", metadata: [
+                        "image_hash": image.hash,
+                        "has_ocr_text": ocrTextForCaption != nil && !ocrTextForCaption!.isEmpty
+                    ])
+                    captionText = try await performCaptioning(image: image, captionService: captionService, ocrText: ocrTextForCaption)
+                    if let caption = captionText {
+                        logger.info("Caption generated successfully", metadata: [
                             "image_hash": image.hash,
-                            "has_ocr_text": ocrTextForCaption != nil && !ocrTextForCaption!.isEmpty
+                            "caption_length": String(caption.count),
+                            "caption_preview": String(caption.prefix(50))
                         ])
-                        captionText = try await performCaptioning(image: image, captionService: captionService, ocrText: ocrTextForCaption)
-                        if let caption = captionText {
-                            logger.info("Caption generated successfully", metadata: [
-                                "image_hash": image.hash,
-                                "caption_length": String(caption.count),
-                                "caption_preview": String(caption.prefix(50))
-                            ])
-                        } else {
-                            logger.warning("Caption generation returned nil", metadata: [
-                                "image_hash": image.hash
-                            ])
-                        }
-                    } catch {
-                        logger.warning("Caption enrichment failed for image", metadata: [
-                            "image_hash": image.hash,
-                            "error": error.localizedDescription
+                    } else {
+                        logger.warning("Caption generation returned nil", metadata: [
+                            "image_hash": image.hash
                         ])
                     }
-                } else {
-                    logger.warning("Caption config enabled but CaptionService is nil", metadata: [
-                        "image_hash": image.hash
+                } catch {
+                    logger.warning("Caption enrichment failed for image", metadata: [
+                        "image_hash": image.hash,
+                        "error": error.localizedDescription
                     ])
                 }
-            } else {
-                logger.debug("Caption enrichment disabled in config", metadata: [
+            } else if captionConfig.enabled {
+                // Config says enabled but service is nil - this shouldn't happen
+                logger.warning("Caption config enabled but CaptionService is nil", metadata: [
                     "image_hash": image.hash
                 ])
             }

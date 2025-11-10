@@ -19,6 +19,7 @@ dependencies = [
   "orjson>=3.9",
   "minio>=7.2",
   "pdfminer.six>=20231228",
+  "python-dateutil>=2.8",
 ]
 
 [project.optional-dependencies]

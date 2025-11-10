@@ -37,18 +37,37 @@ rebuild:
 %:
 	@:
 
-## Stop compose and remove volumes; remove local caches
+## Stop compose and remove volumes; remove local caches and state files
 purge:
 	@echo "Removing all data from the database..."
 	@docker compose down -v
+	@echo "Clearing collector state files..."
+	@rm -f ~/Library/Application\ Support/Haven/State/localfs_collector_state.json 2>/dev/null || true
+	@rm -f ~/Library/Application\ Support/Haven/State/icloud_drive_collector_state.json 2>/dev/null || true
+	@rm -f ~/Library/Application\ Support/Haven/State/contacts_collector_state.json 2>/dev/null || true
+	@rm -f ~/Library/Application\ Support/Haven/State/imessage_state.json 2>/dev/null || true
+	@rm -f ~/Library/Application\ Support/Haven/State/email_collector_state_run.json 2>/dev/null || true
+	@rm -f ~/Library/Application\ Support/Haven/State/email_collector.lock 2>/dev/null || true
+	@echo "Clearing handler status files..."
+	@rm -f ~/Library/Caches/Haven/imessage_handler_state.json 2>/dev/null || true
+	@rm -f ~/Library/Caches/Haven/imap_handler_state.json 2>/dev/null || true
+	@echo "Clearing IMAP state files..."
+	@rm -f ~/Library/Caches/Haven/remote_mail/imap_state_*.json 2>/dev/null || true
+	@echo "Clearing debug files..."
+	@rm -f ~/Library/Application\ Support/Haven/Debug/* 2>/dev/null || true
+	@echo "Clearing chat backup..."
+	@rm -rf ~/Library/Application\ Support/Haven/Backups/chat_backup/ 2>/dev/null || true
+	@echo "Clearing legacy ~/.haven files (if any)..."
 	@if [ -d ~/.haven ]; then \
-		echo "Removing iMessage backup..."; \
-		rm -rf ~/.haven/chat_backup/; \
-		echo "Removing iMessage cache..."; \
-		rm -f ~/Library/Caches/Haven/imessage_state.json; \
-		echo "Removing IMAP cache..."; \
-		rm -rf ~/Library/Caches/Haven/remote_mail/; \
+		echo "Removing legacy iMessage backup..."; \
+		rm -rf ~/.haven/chat_backup/ 2>/dev/null || true; \
+		echo "Removing legacy state files..."; \
+		rm -f ~/.haven/*_collector_state.json 2>/dev/null || true; \
+		rm -f ~/.haven/email_collector.lock 2>/dev/null || true; \
+		rm -f ~/.haven/cache/imessage_state.json 2>/dev/null || true; \
+		rm -rf ~/.haven/cache/remote_mail/ 2>/dev/null || true; \
 	fi
+	@echo "✓ Purge complete"
 
 ## Create or activate local Python virtualenv in ./env and install local_requirements.txt
 local_setup:

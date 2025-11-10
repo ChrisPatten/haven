@@ -122,12 +122,8 @@ public actor ContactsController: CollectorController {
     public func reset() async throws {
         let fm = FileManager.default
         
-        // State file path (same as ContactsHandler)
-        let homeDir = fm.homeDirectoryForCurrentUser
-        let havenDir = homeDir.appendingPathComponent(".haven")
-        let stateFile = havenDir.appendingPathComponent("contacts_collector_state.json")
-        
-        // Delete state file if it exists
+        // Delete state file (in State directory)
+        let stateFile = HavenFilePaths.stateFile("contacts_collector_state.json")
         if fm.fileExists(atPath: stateFile.path) {
             try fm.removeItem(at: stateFile)
             logger.info("Deleted Contacts state file", metadata: ["path": stateFile.path])

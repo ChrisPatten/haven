@@ -25,16 +25,15 @@ public actor ConfigManager {
     private var schedulesConfig: CollectorSchedulesConfig?
     
     public init(configDirectory: URL? = nil) {
-        // Default to ~/.haven
+        // Use HavenFilePaths for macOS-standard directory
         if let directory = configDirectory {
             self.configDirectory = directory
         } else {
-            let home = FileManager.default.homeDirectoryForCurrentUser
-            self.configDirectory = home.appendingPathComponent(".haven", isDirectory: true)
+            self.configDirectory = HavenFilePaths.configDirectory
         }
         
-        // Ensure directory exists
-        try? FileManager.default.createDirectory(at: self.configDirectory, withIntermediateDirectories: true)
+        // Ensure directories exist
+        try? HavenFilePaths.initializeDirectories()
     }
     
     // MARK: - System Configuration
@@ -241,9 +240,9 @@ public actor ConfigManager {
                 level: "info",
                 format: "json",
                 paths: SystemLoggingPathsConfig(
-                    app: "~/.haven/hostagent.log",
+                    app: HavenFilePaths.logFile("hostagent.log").path,
                     error: nil,
-                    access: "~/.haven/hostagent_access.log"
+                    access: HavenFilePaths.logFile("hostagent_access.log").path
                 )
             ),
             modules: ModulesEnablementConfig(
@@ -287,7 +286,7 @@ public actor ConfigManager {
                 ),
                 debug: DebugSettings(
                     enabled: false,
-                    outputPath: "~/.haven/debug_documents.jsonl"
+                    outputPath: HavenFilePaths.debugFile("debug_documents.jsonl").path
                 )
             )
         )

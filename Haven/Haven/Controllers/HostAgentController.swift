@@ -419,24 +419,24 @@ public class HostAgentController: ObservableObject {
             minConfidence: config.modules.entity.minConfidence
         ) : nil
         
-        // Log caption configuration for debugging
-        logger.info("Caption configuration", metadata: [
-            "enabled": String(config.modules.caption.enabled),
-            "method": config.modules.caption.method,
-            "timeout_ms": String(config.modules.caption.timeoutMs),
-            "model": config.modules.caption.model ?? "nil"
-        ])
-        
+        // Create caption service only if enabled
         let captionService = config.modules.caption.enabled ? CaptionService(
             method: config.modules.caption.method,
             timeoutMs: config.modules.caption.timeoutMs,
             model: config.modules.caption.model
         ) : nil
         
-        if captionService == nil {
-            logger.warning("CaptionService not created - caption module is disabled in config")
-        } else {
-            logger.info("CaptionService created successfully")
+        // Only log caption configuration if enabled (to avoid noise when disabled)
+        if config.modules.caption.enabled {
+            logger.info("Caption configuration", metadata: [
+                "enabled": String(config.modules.caption.enabled),
+                "method": config.modules.caption.method,
+                "timeout_ms": String(config.modules.caption.timeoutMs),
+                "model": config.modules.caption.model ?? "nil"
+            ])
+            if captionService != nil {
+                logger.info("CaptionService created successfully")
+            }
         }
         
         return DocumentEnrichmentOrchestrator(
