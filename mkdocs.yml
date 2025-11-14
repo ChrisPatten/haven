@@ -31,6 +31,7 @@ nav:
       - Backup & Restore: reference/BACKUP_RESTORE.md
       - Relationship Features: reference/relationship_features.md
       - Graph Reference: reference/graph.md
+      - Haven LLM Provider: reference/haven_llm.md
       - Mail.app Information:
           - Mail.app Cache Structure: reference/mail_app_cache_structure.md
           - Envelope Index Schema: reference/Envelope_Index_schema.md

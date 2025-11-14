@@ -735,7 +735,7 @@ public actor ContactsHandler {
     private func submitBatch(batch: [PersonPayloadModel]) async throws {
         // Build payload
         let deviceId = getDeviceId()
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "source": "macos_contacts",
             "device_id": deviceId,
             "batch_id": UUID().uuidString,
@@ -744,6 +744,11 @@ public actor ContactsHandler {
                 personToDict(person: person)
             }
         ]
+        
+        // Add self_identifier if configured
+        if let selfIdentifier = config.selfIdentifier, !selfIdentifier.isEmpty {
+            payload["self_identifier"] = selfIdentifier
+        }
         
         // Check if debug mode is enabled
         if config.debug.enabled {

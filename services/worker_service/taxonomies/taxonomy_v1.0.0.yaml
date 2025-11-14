@@ -8,7 +8,7 @@ intents:
       what:
         type: string
         required: true
-        description: "Short description of the task."
+        description: "The action or task to be completed. Extract the complete verb phrase describing what needs to be done (e.g., 'pick up eggs', 'call the dentist', 'review the proposal'). Include the full action, not just the object."
       due_date:
         type: datetime
         required: false
@@ -27,7 +27,7 @@ intents:
       note: 1.15
       email: 0.9
   schedule.create:
-    description: "Schedule a calendar event, meeting, or appointment."
+    description: "Schedule a calendar event, meeting, appointment, block, or anything else that needs to be added to the calendar."
     slots:
       start_dt:
         type: datetime
@@ -47,6 +47,10 @@ intents:
         type: array[person]
         required: false
         description: "People invited or expected at the event."
+      title:
+        type: string
+        required: false
+        description: "A concise, descriptive title for the calendar event (e.g., 'Meeting with Dr. Jacobs', 'Team Standup', 'Lunch with Sarah'). Generate from context if not explicitly stated."
       source_ref:
         type: string
         required: true
@@ -60,7 +64,7 @@ intents:
       what:
         type: string
         required: true
-        description: "Summary of what the reminder should cover."
+        description: "The action or task to be reminded about. Extract the complete verb phrase describing what needs to be done (e.g., 'pick up eggs', 'call the dentist', 'review the proposal'). Include the full action, not just the object."
       remind_at:
         type: datetime
         required: false

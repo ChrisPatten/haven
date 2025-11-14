@@ -71,6 +71,9 @@ struct IMessageSettingsView: View {
         .onAppear {
             loadConfiguration()
         }
+        .onChange(of: config) { newConfig in
+            loadConfiguration()
+        }
         .onChange(of: ocrEnabled) { _, _ in updateConfiguration() }
         .onChange(of: ingestNonImageAttachments) { _, _ in updateConfiguration() }
         .onChange(of: fswatchEnabled) { _, _ in updateConfiguration() }

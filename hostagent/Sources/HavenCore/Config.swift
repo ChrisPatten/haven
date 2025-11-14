@@ -8,6 +8,7 @@ public struct HavenConfig: Codable {
     public var logging: LoggingConfig
     public var modules: ModulesConfig
     public var debug: DebugConfig
+    public var selfIdentifier: String?
     
     enum CodingKeys: String, CodingKey {
         case service
@@ -16,6 +17,7 @@ public struct HavenConfig: Codable {
         case logging
         case modules
         case debug
+        case selfIdentifier = "self_identifier"
     }
     
     public init(service: ServiceConfig = ServiceConfig(),
@@ -23,13 +25,15 @@ public struct HavenConfig: Codable {
                 gateway: GatewayConfig = GatewayConfig(),
                 logging: LoggingConfig = LoggingConfig(),
                 modules: ModulesConfig = ModulesConfig(),
-                debug: DebugConfig = DebugConfig()) {
+                debug: DebugConfig = DebugConfig(),
+                selfIdentifier: String? = nil) {
         self.service = service
         self.api = api
         self.gateway = gateway
         self.logging = logging
         self.modules = modules
         self.debug = debug
+        self.selfIdentifier = selfIdentifier
     }
     
     public init(from decoder: Decoder) throws {
@@ -42,6 +46,7 @@ public struct HavenConfig: Codable {
         self.logging = try container.decode(LoggingConfig.self, forKey: .logging)
         self.modules = try container.decode(ModulesConfig.self, forKey: .modules)
         self.debug = try container.decodeIfPresent(DebugConfig.self, forKey: .debug) ?? DebugConfig()
+        self.selfIdentifier = try container.decodeIfPresent(String.self, forKey: .selfIdentifier)
     }
 }
 

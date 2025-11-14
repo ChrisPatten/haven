@@ -83,6 +83,14 @@ public actor ServiceController {
         return config
     }
     
+    /// Clear cached configuration and clear ConfigManager cache
+    /// Call this when settings are saved to force fresh reload on next load
+    public func clearConfigCache() async {
+        config = nil
+        await configManager.clearCache()
+        logger.info("Configuration cache cleared in ServiceController")
+    }
+    
     // MARK: - Gateway Client
     
     /// Initialize gateway client

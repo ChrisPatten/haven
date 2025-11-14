@@ -9,7 +9,7 @@
 import Foundation
 
 /// Contacts collector instances configuration
-public struct ContactsInstancesConfig: Codable, @unchecked Sendable {
+public struct ContactsInstancesConfig: Codable, Equatable, @unchecked Sendable {
     public var instances: [ContactsInstance]
     
     public init(instances: [ContactsInstance] = []) {
@@ -18,7 +18,7 @@ public struct ContactsInstancesConfig: Codable, @unchecked Sendable {
 }
 
 /// Individual contacts collector instance
-public struct ContactsInstance: Codable, Identifiable {
+public struct ContactsInstance: Codable, Identifiable, Equatable {
     public var id: String
     public var name: String
     public var enabled: Bool

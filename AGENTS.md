@@ -106,7 +106,6 @@ All inter-service comm via Gateway API. No direct service-to-service calls.
 **Guidelines:**
 - Comprehensive docs in `/docs/`; keep updated with changes.
 - Update `mkdocs.yml` for `/docs/` changes; maintain info architecture.
-- Use `./.tmp` for non-app .md files.
 
 ## Directory Structure
 
@@ -179,6 +178,7 @@ All inter-service comm via Gateway API. No direct service-to-service calls.
 
 ## Miscellaneous
 
-- There is a symlink file `.tmp/hostagent.yaml` that points to the config file for hostagent.
+- Do not create documentation or summary files unless asked.
 - Do not commit changes to git unless asked. If asked to commit, always create a clear, complete message that reflects all of the changes.
 - When building `Haven.app` always use xcodebuild to build the app.
+- Data is primarily persisted in the Postgres service defined in the `compose.yaml` file. You can use the `docker compose exec postgres psql -U postgres -d haven` command to access the database. Review the `schema/init.sql` file to understand the schema if you need to explore the data.

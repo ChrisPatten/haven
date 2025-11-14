@@ -141,6 +141,9 @@ struct ContactsSettingsView: View {
                 }
             }
         }
+        .onChange(of: config) { newConfig in
+            loadConfiguration()
+        }
         .onChange(of: selectedInstance) { _, newValue in
             // Only auto-open edit sheet if selected from table row click, not from pencil button
             // The pencil button sets showingEditSheet directly

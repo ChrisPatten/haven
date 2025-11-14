@@ -190,6 +190,7 @@ public struct EmailDocumentMetadata: Codable, Equatable {
     public var relevanceScore: Double?
     public var imageCaptions: [String]?
     public var bodyProcessed: Bool?
+    public var enrichmentEntities: [String: Any]?
     
     enum CodingKeys: String, CodingKey {
         case messageId = "message_id"
@@ -206,6 +207,109 @@ public struct EmailDocumentMetadata: Codable, Equatable {
         case relevanceScore = "relevance_score"
         case imageCaptions = "image_captions"
         case bodyProcessed = "body_processed"
+        case enrichmentEntities = "enrichment_entities"
+    }
+    
+    public init(
+        messageId: String? = nil,
+        subject: String? = nil,
+        snippet: String? = nil,
+        listUnsubscribe: String? = nil,
+        headers: [String: String],
+        hasAttachments: Bool,
+        attachmentCount: Int,
+        contentHash: String,
+        references: [String],
+        inReplyTo: String? = nil,
+        intent: EmailIntentPayload? = nil,
+        relevanceScore: Double? = nil,
+        imageCaptions: [String]? = nil,
+        bodyProcessed: Bool? = nil,
+        enrichmentEntities: [String: Any]? = nil
+    ) {
+        self.messageId = messageId
+        self.subject = subject
+        self.snippet = snippet
+        self.listUnsubscribe = listUnsubscribe
+        self.headers = headers
+        self.hasAttachments = hasAttachments
+        self.attachmentCount = attachmentCount
+        self.contentHash = contentHash
+        self.references = references
+        self.inReplyTo = inReplyTo
+        self.intent = intent
+        self.relevanceScore = relevanceScore
+        self.imageCaptions = imageCaptions
+        self.bodyProcessed = bodyProcessed
+        self.enrichmentEntities = enrichmentEntities
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        messageId = try container.decodeIfPresent(String.self, forKey: .messageId)
+        subject = try container.decodeIfPresent(String.self, forKey: .subject)
+        snippet = try container.decodeIfPresent(String.self, forKey: .snippet)
+        listUnsubscribe = try container.decodeIfPresent(String.self, forKey: .listUnsubscribe)
+        headers = try container.decode([String: String].self, forKey: .headers)
+        hasAttachments = try container.decode(Bool.self, forKey: .hasAttachments)
+        attachmentCount = try container.decode(Int.self, forKey: .attachmentCount)
+        contentHash = try container.decode(String.self, forKey: .contentHash)
+        references = try container.decode([String].self, forKey: .references)
+        inReplyTo = try container.decodeIfPresent(String.self, forKey: .inReplyTo)
+        intent = try container.decodeIfPresent(EmailIntentPayload.self, forKey: .intent)
+        relevanceScore = try container.decodeIfPresent(Double.self, forKey: .relevanceScore)
+        imageCaptions = try container.decodeIfPresent([String].self, forKey: .imageCaptions)
+        bodyProcessed = try container.decodeIfPresent(Bool.self, forKey: .bodyProcessed)
+        
+        // Decode enrichmentEntities using AnyCodable wrapper
+        if let codableDict = try? container.decodeIfPresent([String: HavenCore.AnyCodable].self, forKey: .enrichmentEntities) {
+            enrichmentEntities = codableDict.mapValues { $0.value }
+        } else {
+            enrichmentEntities = nil
+        }
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(messageId, forKey: .messageId)
+        try container.encodeIfPresent(subject, forKey: .subject)
+        try container.encodeIfPresent(snippet, forKey: .snippet)
+        try container.encodeIfPresent(listUnsubscribe, forKey: .listUnsubscribe)
+        try container.encode(headers, forKey: .headers)
+        try container.encode(hasAttachments, forKey: .hasAttachments)
+        try container.encode(attachmentCount, forKey: .attachmentCount)
+        try container.encode(contentHash, forKey: .contentHash)
+        try container.encode(references, forKey: .references)
+        try container.encodeIfPresent(inReplyTo, forKey: .inReplyTo)
+        try container.encodeIfPresent(intent, forKey: .intent)
+        try container.encodeIfPresent(relevanceScore, forKey: .relevanceScore)
+        try container.encodeIfPresent(imageCaptions, forKey: .imageCaptions)
+        try container.encodeIfPresent(bodyProcessed, forKey: .bodyProcessed)
+        
+        // Encode enrichmentEntities using AnyCodable wrapper
+        if let entities = enrichmentEntities {
+            let codableDict = entities.mapValues { HavenCore.AnyCodable($0) }
+            try container.encodeIfPresent(codableDict, forKey: .enrichmentEntities)
+        }
+    }
+    
+    public static func == (lhs: EmailDocumentMetadata, rhs: EmailDocumentMetadata) -> Bool {
+        // Compare all fields except enrichmentEntities (which is [String: Any] and can't be compared directly)
+        return lhs.messageId == rhs.messageId &&
+               lhs.subject == rhs.subject &&
+               lhs.snippet == rhs.snippet &&
+               lhs.listUnsubscribe == rhs.listUnsubscribe &&
+               lhs.headers == rhs.headers &&
+               lhs.hasAttachments == rhs.hasAttachments &&
+               lhs.attachmentCount == rhs.attachmentCount &&
+               lhs.contentHash == rhs.contentHash &&
+               lhs.references == rhs.references &&
+               lhs.inReplyTo == rhs.inReplyTo &&
+               lhs.intent == rhs.intent &&
+               lhs.relevanceScore == rhs.relevanceScore &&
+               lhs.imageCaptions == rhs.imageCaptions &&
+               lhs.bodyProcessed == rhs.bodyProcessed
+        // enrichmentEntities comparison skipped - would need custom comparison
     }
 }
 

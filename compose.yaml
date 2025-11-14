@@ -77,29 +77,31 @@ services:
       - postgres
       - search
 
-  worker_service:
-    build:
-      context: .
-      args:
-        SERVICE: "worker_service"
-    restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/haven
-      - CATALOG_BASE_URL=http://catalog:8081
-      - WORKER_TYPE=${WORKER_TYPE:-embedding}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-bge-m3}
-      - INTENT_MODEL=${INTENT_MODEL:-qwen2.5vl:3.5b}
-      - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-2.0}
-      - WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE:-16}
-      - INTENT_REQUEST_TIMEOUT=${INTENT_REQUEST_TIMEOUT:-15.0}
-    depends_on:
-      - postgres
-      - qdrant
-      - catalog
-      - minio
+#  worker_service:
+#    build:
+#      context: .
+#      args:
+#        SERVICE: "worker_service"
+#    restart: unless-stopped
+#    extra_hosts:
+#      - "host.docker.internal:host-gateway"
+#    environment:
+#      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/haven
+#      - CATALOG_BASE_URL=http://catalog:8081
+#      - WORKER_TYPE=${WORKER_TYPE:-both}
+#      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+#      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-bge-m3}
+#      - INTENT_MODEL=${INTENT_MODEL:-qwen2.5vl:3b}
+#      - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-2.0}
+#      - WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE:-16}
+#      - INTENT_REQUEST_TIMEOUT=${INTENT_REQUEST_TIMEOUT:-15.0}
+#      - INTENT_MIN_CONFIDENCE=${INTENT_MIN_CONFIDENCE:-0.5}
+#      - TAXONOMY_PATH=${TAXONOMY_PATH:-}
+#    depends_on:
+#      - postgres
+#      - qdrant
+#      - catalog
+#      - minio
 
   minio:
     image: minio/minio:latest

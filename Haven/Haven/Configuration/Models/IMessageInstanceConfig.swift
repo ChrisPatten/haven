@@ -9,7 +9,7 @@
 import Foundation
 
 /// iMessage collector configuration (single instance, system-level)
-public struct IMessageInstanceConfig: Codable, @unchecked Sendable {
+public struct IMessageInstanceConfig: Codable, Equatable, @unchecked Sendable {
     public var ocrEnabled: Bool
     public var chatDbPath: String  // Empty string uses system default
     public var attachmentsPath: String  // Empty string uses system default

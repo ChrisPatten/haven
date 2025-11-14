@@ -9,7 +9,7 @@
 import Foundation
 
 /// Collector schedules configuration
-public struct CollectorSchedulesConfig: Codable, @unchecked Sendable {
+public struct CollectorSchedulesConfig: Codable, Equatable, @unchecked Sendable {
     public var schedules: [CollectorSchedule]
     
     public init(schedules: [CollectorSchedule] = []) {
@@ -18,7 +18,7 @@ public struct CollectorSchedulesConfig: Codable, @unchecked Sendable {
 }
 
 /// Individual collector schedule
-public struct CollectorSchedule: Codable, Identifiable {
+public struct CollectorSchedule: Codable, Identifiable, Equatable {
     public var id: String
     public var name: String
     public var collectorInstanceId: String  // Collector instance to run (e.g., "email:personal-icloud", "localfs:documents")
@@ -57,7 +57,7 @@ public struct CollectorSchedule: Codable, Identifiable {
 }
 
 /// Schedule type
-public enum ScheduleType: String, Codable {
+public enum ScheduleType: String, Codable, Equatable {
     case cron = "cron"
     case interval = "interval"
 }

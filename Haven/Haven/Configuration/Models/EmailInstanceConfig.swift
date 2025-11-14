@@ -9,7 +9,7 @@
 import Foundation
 
 /// Email collector instances configuration
-public struct EmailInstancesConfig: Codable, @unchecked Sendable {
+public struct EmailInstancesConfig: Codable, Equatable, @unchecked Sendable {
     public var instances: [EmailInstance]
     public var moduleRedactPii: RedactionConfig?
     
@@ -25,7 +25,7 @@ public struct EmailInstancesConfig: Codable, @unchecked Sendable {
 }
 
 /// Individual email collector instance (IMAP account or local source)
-public struct EmailInstance: Codable, Identifiable {
+public struct EmailInstance: Codable, Identifiable, Equatable {
     public var id: String
     public var displayName: String?
     public var type: String  // "imap" or "local"
@@ -88,7 +88,7 @@ public struct EmailInstance: Codable, Identifiable {
 }
 
 /// Email authentication configuration
-public struct EmailAuthConfig: Codable {
+public struct EmailAuthConfig: Codable, Equatable {
     public var kind: String  // "app_password", "oauth2", etc.
     public var secretRef: String  // Keychain reference
     
@@ -104,7 +104,7 @@ public struct EmailAuthConfig: Codable {
 }
 
 /// PII redaction configuration (boolean or detailed)
-public enum RedactionConfig: Codable {
+public enum RedactionConfig: Codable, Equatable {
     case boolean(Bool)
     case detailed(RedactionOptions)
     
@@ -145,7 +145,7 @@ public enum RedactionConfig: Codable {
 }
 
 /// Detailed PII redaction options
-public struct RedactionOptions: Codable {
+public struct RedactionOptions: Codable, Equatable {
     public var emails: Bool
     public var phones: Bool
     public var accountNumbers: Bool

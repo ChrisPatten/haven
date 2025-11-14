@@ -213,6 +213,22 @@ public actor ConfigManager {
         logger.info("Schedules configuration saved", metadata: ["path": url.path])
     }
     
+    // MARK: - Cache Management
+    
+    /// Clear all cached configurations to force reload from disk
+    /// Call this after saving configurations to ensure fresh loads
+    public func clearCache() {
+        systemConfig = nil
+        emailConfig = nil
+        filesConfig = nil
+        icloudDriveConfig = nil
+        contactsConfig = nil
+        imessageConfig = nil
+        remindersConfig = nil
+        schedulesConfig = nil
+        logger.info("Configuration cache cleared")
+    }
+    
     // MARK: - Load All
     
     /// Load all configuration files
@@ -277,7 +293,8 @@ public actor ConfigManager {
                 fswatch: true,
                 localfs: true,
                 contacts: true,
-                mail: true
+                mail: true,
+                reminders: true
             ),
             advanced: AdvancedModuleSettings(
                 ocr: OCRModuleSettings(

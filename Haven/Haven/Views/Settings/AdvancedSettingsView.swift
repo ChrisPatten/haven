@@ -81,7 +81,11 @@ struct AdvancedSettingsView: View {
     }
     
     private var baseView: some View {
-        contentView.onAppear(perform: loadConfiguration)
+        contentView
+            .onAppear(perform: loadConfiguration)
+            .onChange(of: systemConfig) { newConfig in
+                loadConfiguration()
+            }
     }
     
     @ViewBuilder

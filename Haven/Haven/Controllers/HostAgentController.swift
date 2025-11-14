@@ -34,6 +34,25 @@ public class HostAgentController: ObservableObject {
         self.serviceController = ServiceController()
         self.jobManager = JobManager(appState: appState)
         // StatusController will be initialized after config is loaded
+        
+        // Listen for settings changes and clear config cache
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(onSettingsConfigSaved),
+            name: NSNotification.Name("settingsConfigSaved"),
+            object: nil
+        )
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+    
+    @objc private func onSettingsConfigSaved() {
+        Task {
+            await serviceController.clearConfigCache()
+            logger.info("Configuration cache cleared after settings save")
+        }
     }
     
     // MARK: - Lifecycle

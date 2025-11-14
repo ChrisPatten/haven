@@ -103,6 +103,9 @@ struct RemindersSettingsView: View {
                 }
             }
         }
+        .onChange(of: config) { newConfig in
+            loadConfiguration()
+        }
         .onChange(of: selectedCalendarIds) { _, _ in updateConfiguration() }
         .onChange(of: remindersPermissionGranted) { _, newValue in
             if newValue {

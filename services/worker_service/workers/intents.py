@@ -23,6 +23,7 @@ from haven.intents.classifier.priors import PriorConfig, apply_channel_priors
 from haven.intents.classifier.taxonomy import IntentTaxonomy, TaxonomyLoader, get_loader
 from haven.intents.models import ClassificationResult
 from haven.intents.slots import SlotFiller, SlotFillerResult, SlotFillerSettings
+from haven.intents.utils import fetch_thread_context
 
 from shared.logging import get_logger
 
@@ -38,7 +39,19 @@ def _default_taxonomy_path() -> str:
     override = os.getenv("TAXONOMY_PATH")
     if override:
         return override
-    return str(DEFAULT_TAXONOMY_PATH)
+    
+    # Try the default path (relative to installed package)
+    default_path = DEFAULT_TAXONOMY_PATH
+    if default_path.exists():
+        return str(default_path)
+    
+    # Fallback: try relative to current working directory (for Docker)
+    cwd_path = Path.cwd() / "services" / "worker_service" / "taxonomies" / "taxonomy_v1.0.0.yaml"
+    if cwd_path.exists():
+        return str(cwd_path)
+    
+    # Return the default path anyway (will raise error if not found)
+    return str(default_path)
 
 
 class IntentsWorkerSettings(WorkerSettings):
@@ -62,6 +75,7 @@ class IntentsJob:
     people: List[Dict[str, Any]]
     thread_id: Optional[UUID] = None
     entities: Optional[Dict[str, Any]] = None
+    content_timestamp: Optional[str] = None
 
     def __str__(self) -> str:
         return f"IntentsJob(doc_id={self.doc_id}, artifact_id={self.artifact_id})"
@@ -118,20 +132,20 @@ class IntentsWorker(BaseWorker[IntentsJob]):
                            updated_at = NOW()
                      WHERE d.doc_id IN (SELECT doc_id FROM candidates)
                  RETURNING d.doc_id,
-                           d.artifact_id,
                            d.text,
                            d.source_type,
                            d.people,
                            d.metadata,
-                           d.thread_id
+                           d.thread_id,
+                           d.content_timestamp
                 )
                 SELECT u.doc_id,
-                       u.artifact_id,
                        u.text,
                        u.source_type,
                        u.people,
                        u.metadata,
-                       u.thread_id
+                       u.thread_id,
+                       u.content_timestamp
                   FROM updated u
                 """,
                 {"limit": limit},
@@ -144,16 +158,26 @@ class IntentsWorker(BaseWorker[IntentsJob]):
             entities = self._extract_entities(metadata)
 
             thread_id = row.get("thread_id")
+            doc_id = UUID(str(row["doc_id"]))
+            content_timestamp = row.get("content_timestamp")
+            content_timestamp_str = None
+            if content_timestamp:
+                if isinstance(content_timestamp, str):
+                    content_timestamp_str = content_timestamp
+                else:
+                    # Convert datetime to ISO string
+                    content_timestamp_str = content_timestamp.isoformat()
             jobs.append(
                 IntentsJob(
-                    doc_id=UUID(str(row["doc_id"])),
-                    artifact_id=UUID(str(row["artifact_id"])),
+                    doc_id=doc_id,
+                    artifact_id=doc_id,  # artifact_id is the same as doc_id for documents
                     text=row.get("text") or "",
                     source_type=row.get("source_type") or "",
                     metadata=metadata,
                     people=people,
                     thread_id=UUID(str(thread_id)) if thread_id else None,
                     entities=entities,
+                    content_timestamp=content_timestamp_str,
                 )
             )
         
@@ -196,6 +220,7 @@ class IntentsWorker(BaseWorker[IntentsJob]):
             artifact_id=str(job.artifact_id),
             source_type=job.source_type,
             thread_context=thread_context,
+            content_timestamp=job.content_timestamp,
         )
         self._log_slot_filling(job, slot_result)
 
@@ -446,56 +471,24 @@ class IntentsWorker(BaseWorker[IntentsJob]):
                 return decoded
         return None
 
+
     def _fetch_thread_context(self, job: IntentsJob) -> Optional[List[Dict[str, Any]]]:
         """Fetch recent messages from the same thread for conversational context.
         
         Returns up to 5 previous messages from the thread, ordered by timestamp.
-        Each message includes text, sender, and timestamp for pronoun resolution.
+        Each message includes text, sender (with resolved person names), and timestamp for pronoun resolution.
         """
-        if not job.thread_id:
-            return None
-        
         try:
-            # Query recent documents from the same thread, excluding the current one
-            with self.settings.get_db_connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute(
-                        """
-                        SELECT text, metadata, content_timestamp
-                        FROM documents
-                        WHERE thread_id = %s
-                          AND doc_id != %s
-                          AND text IS NOT NULL
-                          AND text != ''
-                        ORDER BY content_timestamp DESC
-                        LIMIT 5
-                        """,
-                        (job.thread_id, job.doc_id),
-                    )
-                    rows = cur.fetchall()
-            
-            if not rows:
-                return None
-            
-            context_messages = []
-            for row in rows:
-                msg_metadata = self._coerce_json_dict(row.get("metadata")) or {}
-                channel_meta = self._coerce_json_dict(msg_metadata.get("channel")) or {}
-                sender = channel_meta.get("sender") or channel_meta.get("from")
-                
-                context_messages.append({
-                    "text": row.get("text") or "",
-                    "sender": sender,
-                    "timestamp": str(row.get("content_timestamp", "")),
-                })
-            
-            # Reverse to chronological order (oldest first)
-            return list(reversed(context_messages))
+            return fetch_thread_context(
+                database_url=self.settings.database_url,  # Explicitly pass database_url
+                doc_id=job.doc_id,
+                limit=5,
+            )
         except Exception as exc:
             self.logger.warning(
                 "thread_context_fetch_failed",
                 doc_id=str(job.doc_id),
-                thread_id=str(job.thread_id),
+                thread_id=str(job.thread_id) if job.thread_id else None,
                 error=str(exc),
             )
             return None

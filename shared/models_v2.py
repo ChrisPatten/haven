@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -136,3 +136,19 @@ class CrmRelationship(BaseModel):
     edge_features: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
+
+class Person(BaseModel):
+    person_id: UUID
+    display_name: str
+    given_name: Optional[str] = None
+    family_name: Optional[str] = None
+    organization: Optional[str] = None
+    nicknames: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+    photo_hash: Optional[str] = None
+
+class InferenceContext(BaseModel):
+    document: Document
+    thread_messages: Optional[List[Tuple[Document, str]]] = None
+    sender: Optional[str] = None
+    enrichment_entities: Optional[List[Dict[str, Any]]] = None

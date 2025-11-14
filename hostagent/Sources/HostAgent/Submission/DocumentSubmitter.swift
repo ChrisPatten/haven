@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import HavenCore
+import Entity
 
 /// Protocol for document submission
 public protocol DocumentSubmitter: Sendable {
@@ -110,19 +111,28 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
     private func convertToEmailDocumentPayload(_ document: EnrichedDocument) throws -> EmailDocumentPayload {
         let base = document.base
         
-        // Build content
+        // First, merge enrichment data into the document content
+        // This applies the unified enrichment strategy: image placeholders + enrichment metadata
+        var documentDict: [String: Any] = [
+            "text": base.content,
+            "metadata": [:]
+        ]
+        let mergedDoc = EnrichmentMerger.mergeEnrichmentIntoDocument(documentDict, document, imageAttachments: nil)
+        let mergedContent = mergedDoc["text"] as? String ?? base.content
+        let mergedMetadataDict = mergedDoc["metadata"] as? [String: Any] ?? [:]
+        
+        // Build content with enriched text (includes image placeholders)
         let content = EmailDocumentContent(
             mimeType: base.metadata.mimeType,
-            data: base.content,
+            data: mergedContent,
             encoding: nil
         )
         
         // Extract image captions from enrichment
         let imageCaptions = extractImageCaptions(from: document)
         
-        // Build metadata with enrichment data
-        // Note: Entities from enrichment would need to be stored in a different way
-        // For now, we'll store them in the metadata headers or a custom field
+        // Build metadata with enrichment data from merged document
+        // The mergedMetadataDict contains the unified enrichment structure
         var headers: [String: String] = [:]
         
         // Preserve all additionalMetadata from the base document (includes reminder metadata)
@@ -130,19 +140,58 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
             headers[key] = value
         }
         
-        // Store entity information in headers (temporary solution)
-        if let entities = document.documentEnrichment?.entities, !entities.isEmpty {
-            let entityData = entities.map { "\($0.type.rawValue):\($0.text)" }.joined(separator: ",")
-            headers["x-enrichment-entities"] = entityData
-        }
-        
-        // Store OCR and face detection info in headers (temporary solution)
-        for (index, imageEnrichment) in document.imageEnrichments.enumerated() {
-            if let ocr = imageEnrichment.ocr, !ocr.ocrText.isEmpty {
-                headers["x-image-\(index)-ocr"] = ocr.ocrText.prefix(200).description  // Truncate for header
+        // Extract enrichment data that was merged in
+        var enrichmentEntities: [String: Any]? = nil
+        if let enrichment = mergedMetadataDict["enrichment"] as? [String: Any],
+           let entities = enrichment["entities"] as? [[String: Any]], !entities.isEmpty {
+            // Format entities as EntitySet JSONB structure
+            var entitySet: [String: Any] = [
+                "detected_languages": [] as [String],
+                "people": [] as [[String: Any]],
+                "organizations": [] as [[String: Any]],
+                "places": [] as [[String: Any]],
+                "dates": [] as [[String: Any]],
+                "times": [] as [[String: Any]],
+                "addresses": [] as [[String: Any]],
+                "ner_version": "1.0",
+                "ner_framework": "NaturalLanguage",
+                "processing_timestamp": ISO8601DateFormatter().string(from: Date())
+            ]
+            
+            // Map entity types to EntitySet arrays
+            let typeMapping: [String: String] = [
+                "person": "people",
+                "organization": "organizations",
+                "place": "places",
+                "date": "dates",
+                "time": "times",
+                "address": "addresses"
+            ]
+            
+            for entity in entities {
+                guard let typeStr = entity["type"] as? String,
+                      let targetKey = typeMapping[typeStr] else { continue }
+                
+                // Use entity data as-is (it already has text, range, confidence)
+                if var entityArray = entitySet[targetKey] as? [[String: Any]] {
+                    entityArray.append(entity)
+                    entitySet[targetKey] = entityArray
+                }
             }
-            if let faces = imageEnrichment.faces, !faces.faces.isEmpty {
-                headers["x-image-\(index)-faces"] = "\(faces.faces.count)"
+            
+            // Only include if we have entities
+            let peopleArray = entitySet["people"] as? [[String: Any]] ?? []
+            let orgsArray = entitySet["organizations"] as? [[String: Any]] ?? []
+            let placesArray = entitySet["places"] as? [[String: Any]] ?? []
+            let datesArray = entitySet["dates"] as? [[String: Any]] ?? []
+            let timesArray = entitySet["times"] as? [[String: Any]] ?? []
+            let addressesArray = entitySet["addresses"] as? [[String: Any]] ?? []
+            
+            let hasEntities = !peopleArray.isEmpty || !orgsArray.isEmpty || !placesArray.isEmpty ||
+                             !datesArray.isEmpty || !timesArray.isEmpty || !addressesArray.isEmpty
+            
+            if hasEntities {
+                enrichmentEntities = entitySet
             }
         }
         
@@ -160,7 +209,8 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
             intent: nil,  // Intent would come from collector-specific logic
             relevanceScore: nil,
             imageCaptions: imageCaptions.isEmpty ? nil : imageCaptions,
-            bodyProcessed: true
+            bodyProcessed: true,
+            enrichmentEntities: enrichmentEntities
         )
         
         // Extract reminder-specific fields from additionalMetadata if present

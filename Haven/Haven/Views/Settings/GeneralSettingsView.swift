@@ -29,11 +29,18 @@ struct GeneralSettingsView: View {
     @State private var logErrorPath: String? = nil  // Deprecated: kept for backward compatibility
     @State private var logAccessPath: String = "~/.haven/hostagent_access.log"
     
+    @State private var selfIdentifier: String = ""
+    
     var body: some View {
         ScrollView {
             mainContent
         }
         .onAppear {
+            // Load configuration when view appears
+            loadConfiguration()
+        }
+        .onChange(of: config) { newConfig in
+            // Reload configuration when parent updates the binding
             loadConfiguration()
         }
         .task(id: combinedState) {
@@ -42,7 +49,7 @@ struct GeneralSettingsView: View {
     }
     
     private var combinedState: String {
-        "\(authHeader)|\(authSecret)|\(gatewayBaseUrl)|\(gatewayIngestPath)|\(gatewayIngestFilePath)|\(gatewayTimeoutMs)|\(logLevel)|\(logFormat)|\(logAppPath)|\(logErrorPath ?? "")|\(logAccessPath)"
+        "\(authHeader)|\(authSecret)|\(gatewayBaseUrl)|\(gatewayIngestPath)|\(gatewayIngestFilePath)|\(gatewayTimeoutMs)|\(logLevel)|\(logFormat)|\(logAppPath)|\(logErrorPath ?? "")|\(logAccessPath)|\(selfIdentifier)"
     }
     
     @ViewBuilder
@@ -50,6 +57,7 @@ struct GeneralSettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             gatewayConfigurationSection
             loggingConfigurationSection
+            selfIdentifierSection
             
             if let error = errorMessage {
                 Text(error)
@@ -178,6 +186,26 @@ struct GeneralSettingsView: View {
         }
     }
     
+    @ViewBuilder
+    private var selfIdentifierSection: some View {
+        GroupBox("Self Identification") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Enter your phone number or email address. This will be matched against contacts during ingestion to set your self person ID.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.bottom, 4)
+                
+                HStack {
+                    Text("Phone/Email:")
+                        .frame(width: 120, alignment: .trailing)
+                    TextField("e.g., +15551234567 or email@example.com", text: $selfIdentifier)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+            .padding()
+        }
+    }
+    
     private func loadConfiguration() {
         guard let config = config else {
             // Use defaults
@@ -197,6 +225,9 @@ struct GeneralSettingsView: View {
         logAppPath = config.logging.paths.app
         logErrorPath = config.logging.paths.error  // Optional, deprecated
         logAccessPath = config.logging.paths.access
+        
+        // Treat empty string as nil for display purposes
+        selfIdentifier = (config.selfIdentifier?.isEmpty == false) ? config.selfIdentifier! : ""
     }
     
     private func updateConfiguration() {
@@ -241,7 +272,8 @@ struct GeneralSettingsView: View {
                 contacts: true,
                 mail: true
             ),
-            advanced: existingAdvanced  // Preserve advanced settings (including debug)
+            advanced: existingAdvanced,  // Preserve advanced settings (including debug)
+            selfIdentifier: selfIdentifier.isEmpty ? "" : selfIdentifier
         )
     }
 }

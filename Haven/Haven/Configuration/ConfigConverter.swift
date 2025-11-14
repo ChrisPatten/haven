@@ -133,7 +133,8 @@ public struct ConfigConverter {
             debug: DebugConfig(
                 enabled: systemConfig.advanced.debug.enabled,
                 outputPath: systemConfig.advanced.debug.outputPath
-            )
+            ),
+            selfIdentifier: systemConfig.selfIdentifier
         )
     }
     
@@ -209,7 +210,8 @@ public struct ConfigConverter {
                     enabled: config.debug.enabled,
                     outputPath: config.debug.outputPath
                 )
-            )
+            ),
+            selfIdentifier: config.selfIdentifier
         )
     }
     

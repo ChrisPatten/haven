@@ -46,6 +46,14 @@ def classify_artifact(
         thread_context=thread_context,
         min_confidence=settings.min_confidence,
     )
+    
+    # Print the exact prompt being sent to Ollama
+    print("\n" + "=" * 80)
+    print("INTENT CLASSIFICATION PROMPT (sent to Ollama)")
+    print("=" * 80)
+    print(prompt)
+    print("=" * 80 + "\n")
+    
     payload = {
         "model": settings.model,
         "prompt": prompt,
@@ -87,12 +95,13 @@ def _build_prompt(
     thread_block = ""
     if thread_context:
         thread_messages = []
-        for msg in thread_context[-5:]:  # Last 5 messages for context
+        for msg in thread_context:
             msg_text = msg.get("text", "")
-            sender = msg.get("sender") or msg.get("from")
+            # Prefer resolved sender name, fallback to identifier
+            sender = msg.get("sender") or msg.get("from") or "Unknown"
             if msg_text:
-                sender_str = f" ({sender})" if sender else ""
-                thread_messages.append(f"- {msg_text[:200]}{sender_str}")
+                sender_str = f"{sender}: " if sender and sender != "Unknown" else ""
+                thread_messages.append(f"{sender_str}{msg_text[:200]}")
         if thread_messages:
             thread_block = (
                 "\n\nPrevious messages in this conversation (for context):\n"

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Union, Literal
+from uuid import UUID
 
 import httpx
 from fastapi import (
@@ -304,6 +305,7 @@ class ContactIngestRequest(BaseModel):
     since_token: Optional[str] = None
     batch_id: str
     people: List[PersonPayloadModel] = Field(default_factory=list)
+    self_identifier: Optional[str] = None  # Phone or email to match against contacts for self_person_id
 
     model_config = ConfigDict(extra="ignore")
 
@@ -315,6 +317,123 @@ class ContactIngestResponse(BaseModel):
     conflicts: int
     skipped: int
     since_token_next: Optional[str] = None
+
+
+def _check_and_set_self_person_id(
+    conn: Connection,
+    self_identifier: str,
+    records: List[PersonIngestRecord],
+    source: str,
+) -> None:
+    """Check if self_identifier matches any contact and set self_person_id if found.
+    
+    Args:
+        conn: Database connection
+        self_identifier: Phone number or email address to match
+        records: List of contact records being ingested
+        source: Source of the contacts
+    """
+    from shared.people_normalization import IdentifierKind, normalize_identifier
+    from shared.people_repository import PeopleResolver
+    
+    if not self_identifier or not self_identifier.strip():
+        return
+    
+    identifier = self_identifier.strip()
+    
+    # Try to normalize as email first
+    try:
+        normalized_email = normalize_identifier(IdentifierKind.EMAIL, identifier)
+        email_canonical = normalized_email.value_canonical
+    except Exception:
+        email_canonical = None
+    
+    # Try to normalize as phone
+    try:
+        normalized_phone = normalize_identifier(IdentifierKind.PHONE, identifier, default_region=settings.contacts_default_region)
+        phone_canonical = normalized_phone.value_canonical
+    except Exception:
+        phone_canonical = None
+    
+    if not email_canonical and not phone_canonical:
+        logger.warning(
+            "self_identifier_invalid",
+            identifier=identifier,
+            source=source,
+        )
+        return
+    
+    # Check if any contact in this batch matches
+    matching_person_id = None
+    for record in records:
+        if record.deleted:
+            continue
+        
+        # Check emails
+        if email_canonical:
+            for email in record.emails:
+                try:
+                    normalized = normalize_identifier(IdentifierKind.EMAIL, email.value)
+                    if normalized.value_canonical == email_canonical:
+                        # Found match, resolve person_id
+                        resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
+                        result = resolver.resolve(IdentifierKind.EMAIL, email.value)
+                        if result:
+                            matching_person_id = UUID(result["person_id"])
+                            break
+                except Exception:
+                    continue
+        
+        # Check phones
+        if phone_canonical and not matching_person_id:
+            for phone in record.phones:
+                try:
+                    normalized = normalize_identifier(IdentifierKind.PHONE, phone.value, default_region=settings.contacts_default_region)
+                    if normalized.value_canonical == phone_canonical:
+                        # Found match, resolve person_id
+                        resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
+                        result = resolver.resolve(IdentifierKind.PHONE, phone.value)
+                        if result:
+                            matching_person_id = UUID(result["person_id"])
+                            break
+                except Exception:
+                    continue
+        
+        if matching_person_id:
+            break
+    
+    # If no match in this batch, try to resolve from existing person_identifiers
+    if not matching_person_id:
+        resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
+        if email_canonical:
+            result = resolver.resolve(IdentifierKind.EMAIL, identifier)
+            if result:
+                matching_person_id = UUID(result["person_id"])
+        if not matching_person_id and phone_canonical:
+            result = resolver.resolve(IdentifierKind.PHONE, identifier)
+            if result:
+                matching_person_id = UUID(result["person_id"])
+    
+    if matching_person_id:
+        stored = store_self_person_id_if_needed(
+            conn,
+            matching_person_id,
+            source=source,
+            detected_at=datetime.now(tz=UTC).isoformat(),
+        )
+        if stored:
+            logger.info(
+                "self_person_id_set_from_contacts",
+                person_id=str(matching_person_id),
+                identifier=identifier,
+                source=source,
+            )
+    else:
+        logger.info(
+            "self_identifier_no_match",
+            identifier=identifier,
+            source=source,
+        )
 
 
 def _contact_external_id(source: str, record: PersonIngestRecord) -> str:
@@ -957,6 +1076,9 @@ def _prepare_ingest_document_payload(
     people_payload = _serialize_people(payload.people)
     thread_payload = _serialize_thread(payload.thread)
 
+    # Metadata is already fully formed from Haven.app, including enrichment_entities if present
+    metadata = dict(payload.metadata)  # Copy to avoid mutating original
+
     catalog_payload: Dict[str, Any] = {
         "idempotency_key": idempotency_key,
         "source_type": payload.source_type,
@@ -967,7 +1089,7 @@ def _prepare_ingest_document_payload(
         "text": text_normalized,
         "title": payload.title,
         "canonical_uri": payload.canonical_uri,
-        "metadata": payload.metadata,
+        "metadata": metadata,
         "content_timestamp": content_timestamp.isoformat(),
         "content_timestamp_type": content_timestamp_type,
         "people": people_payload,
@@ -1517,6 +1639,11 @@ def ingest_contacts(
         with get_connection(autocommit=False) as conn:
             repo = PeopleRepository(conn)
             people_stats = repo.upsert_batch(source, records)
+            
+            # Check for self_identifier and set self_person_id if matching contact found
+            if payload.self_identifier:
+                _check_and_set_self_person_id(conn, payload.self_identifier, records, source)
+            
             conn.commit()
             # Log stats; response fields remain focused on document-level ingestion
             logger.info(
@@ -1958,6 +2085,7 @@ async def ingest_document(
     response.status_code = catalog_resp.status_code
     response.headers["X-Content-SHA256"] = text_hash
     submission = _map_catalog_ingest_response(payload_json)
+    
     logger.info(
         "ingest_submitted",
         submission_id=submission.submission_id,
@@ -3224,105 +3352,6 @@ def set_self_person_id(
             success=False,
             error=f"Internal error: {str(e)}",
         )
-
-
-@app.post("/v1/admin/self-person-id/identify")
-def identify_self_person_from_account(
-    request: Dict[str, Any],
-    _: None = Depends(require_token),
-) -> Dict[str, Any]:
-    """
-    Identify and set self_person_id from an account identifier (e.g., email, phone).
-    
-    Used by HostAgent to submit a detected iMessage account and have it resolved to a person_id.
-    
-    Request:
-    - account: Normalized account identifier (email or phone)
-    - source: Optional source label (e.g., "imessage", "contacts")
-    
-    Returns:
-    - success: Whether resolution succeeded
-    - person_id: The resolved person_id (if successful)
-    - display_name: The resolved person's display name (if successful)
-    - error: Error message if failed
-    """
-    correlation_id = _make_correlation_id("identify_self")
-    account = request.get("account")
-    source = request.get("source", "imessage")
-    
-    if not account:
-        return {
-            "success": False,
-            "error": "account parameter required",
-            "correlation_id": correlation_id,
-        }
-    
-    try:
-        from shared.people_normalization import IdentifierKind
-        from shared.people_repository import PeopleResolver
-        
-        with get_connection() as conn:
-            resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
-            
-            # Try to resolve as email first
-            email_result = resolver.resolve(IdentifierKind.EMAIL, account)
-            if email_result:
-                person_id = UUID(email_result["person_id"])
-                store_self_person_id_if_needed(
-                    conn,
-                    person_id,
-                    source=source,
-                    detected_at=datetime.now(tz=UTC).isoformat(),
-                )
-                return {
-                    "success": True,
-                    "person_id": email_result["person_id"],
-                    "display_name": email_result["display_name"],
-                    "source": source,
-                    "correlation_id": correlation_id,
-                }
-            
-            # Try to resolve as phone
-            phone_result = resolver.resolve(IdentifierKind.PHONE, account)
-            if phone_result:
-                person_id = UUID(phone_result["person_id"])
-                store_self_person_id_if_needed(
-                    conn,
-                    person_id,
-                    source=source,
-                    detected_at=datetime.now(tz=UTC).isoformat(),
-                )
-                return {
-                    "success": True,
-                    "person_id": phone_result["person_id"],
-                    "display_name": phone_result["display_name"],
-                    "source": source,
-                    "correlation_id": correlation_id,
-                }
-        
-        logger.info(
-            "self_person_identification_no_match",
-            account=account,
-            source=source,
-            correlation_id=correlation_id,
-        )
-        return {
-            "success": False,
-            "error": f"No person found with identifier: {account}",
-            "correlation_id": correlation_id,
-        }
-    
-    except Exception as e:
-        logger.error(
-            "self_person_identification_failed",
-            error=str(e),
-            correlation_id=correlation_id,
-        )
-        return {
-            "success": False,
-            "error": f"Identification failed: {str(e)}",
-            "correlation_id": correlation_id,
-        }
 
 
 @app.get("/v1/healthz")

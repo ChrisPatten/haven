@@ -9,7 +9,7 @@
 import Foundation
 
 /// iCloud Drive collector instances configuration
-public struct ICloudDriveInstancesConfig: Codable, @unchecked Sendable {
+public struct ICloudDriveInstancesConfig: Codable, Equatable, @unchecked Sendable {
     public var instances: [ICloudDriveInstance]
     
     public init(instances: [ICloudDriveInstance] = []) {
@@ -18,7 +18,7 @@ public struct ICloudDriveInstancesConfig: Codable, @unchecked Sendable {
 }
 
 /// Individual iCloud Drive collector instance
-public struct ICloudDriveInstance: Codable, Identifiable {
+public struct ICloudDriveInstance: Codable, Identifiable, Equatable {
     public var id: String
     public var name: String
     public var enabled: Bool

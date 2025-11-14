@@ -109,6 +109,9 @@ struct ICloudDriveSettingsView: View {
         .onAppear {
             loadConfiguration()
         }
+        .onChange(of: config) { newConfig in
+            loadConfiguration()
+        }
     }
     
     private func loadConfiguration() {

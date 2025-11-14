@@ -64,6 +64,7 @@ dev = [
   "pandas>=2.0",  # Required for notebooks/postgres_query_playground.ipynb
   "ipython>=8.0",  # Required for notebooks/postgres_query_playground.ipynb
   "ipykernel",  # Jupyter kernel for running notebooks
+  "matplotlib>=3.7",  # Required for notebooks/postgres_query_playground.ipynb (charts/visualizations)
 ]
 
 [tool.setuptools]

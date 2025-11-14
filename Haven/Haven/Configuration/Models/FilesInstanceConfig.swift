@@ -9,7 +9,7 @@
 import Foundation
 
 /// LocalFS collector instances configuration
-public struct FilesInstancesConfig: Codable, @unchecked Sendable {
+public struct FilesInstancesConfig: Codable, Equatable, @unchecked Sendable {
     public var instances: [FilesInstance]
     
     public init(instances: [FilesInstance] = []) {
@@ -18,7 +18,7 @@ public struct FilesInstancesConfig: Codable, @unchecked Sendable {
 }
 
 /// Individual LocalFS collector instance
-public struct FilesInstance: Codable, Identifiable {
+public struct FilesInstance: Codable, Identifiable, Equatable {
     public var id: String
     public var name: String
     public var enabled: Bool

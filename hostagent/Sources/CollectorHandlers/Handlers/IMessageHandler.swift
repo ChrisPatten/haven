@@ -1113,13 +1113,6 @@ public actor IMessageHandler {
             logger.debug("Debug mode: skipping fence save (final save)")
         }
 
-        // After collection completes, attempt to detect and store self_person_id
-        if let detectedAccount = detectSelfPersonFromIMessage(db: db!) {
-            // Notify Gateway asynchronously (don't block collection on this)
-            Task {
-                await notifyGatewayOfSelfPerson(account: detectedAccount)
-            }
-        }
 
         // Return pending batch timestamps so caller can handle gaps on cancellation
         // Note: In descending order (default), pending batch messages are older than the latest fence,
@@ -1253,6 +1246,11 @@ public actor IMessageHandler {
         let service: String?
         let account: String?
         let attachments: [AttachmentData]
+        // Reaction/impact flags for filtering out non-content messages
+        let subject: String?  // Indicates reaction type (e.g., "expressivesend", "react")
+        let associatedMessageGuid: String?  // The message this is reacting to
+        let associatedMessageType: Int?  // Type of associated message (2000-2005 = reactions, 1000 = sticker)
+        let threadOriginatorGuid: String?  // For explicit thread replies (when user taps "Reply")
     }
     
     private struct ThreadData {
@@ -1292,7 +1290,8 @@ public actor IMessageHandler {
 
      var query = """
          SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.handle_id, m.date, m.date_read,
-             m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service, m.account
+             m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service, m.account,
+             m.subject, m.associated_message_guid, m.associated_message_type, m.thread_originator_guid
          FROM message m
          JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
 
@@ -1366,6 +1365,34 @@ public actor IMessageHandler {
                 account = nil
             }
             
+            let subject: String?
+            if let subjectPtr = sqlite3_column_text(stmt, 13) {
+                subject = String(cString: subjectPtr)
+            } else {
+                subject = nil
+            }
+            
+            let associatedMessageGuid: String?
+            if let assocGuidPtr = sqlite3_column_text(stmt, 14) {
+                associatedMessageGuid = String(cString: assocGuidPtr)
+            } else {
+                associatedMessageGuid = nil
+            }
+
+            let associatedMessageType: Int?
+            if sqlite3_column_type(stmt, 15) != SQLITE_NULL {
+                associatedMessageType = Int(sqlite3_column_int(stmt, 15))
+            } else {
+                associatedMessageType = nil
+            }
+
+            let threadOriginatorGuid: String?
+            if let threadOriginatorPtr = sqlite3_column_text(stmt, 16) {
+                threadOriginatorGuid = String(cString: threadOriginatorPtr)
+            } else {
+                threadOriginatorGuid = nil
+            }
+            
             // Fetch attachments for this message
             let attachments = try fetchAttachments(db: db, messageRowId: rowId)
             
@@ -1383,7 +1410,11 @@ public actor IMessageHandler {
                 chatId: chatId,
                 service: service,
                 account: account,
-                attachments: attachments
+                attachments: attachments,
+                subject: subject,
+                associatedMessageGuid: associatedMessageGuid,
+                associatedMessageType: associatedMessageType,
+                threadOriginatorGuid: threadOriginatorGuid
             ))
         }
         
@@ -1619,7 +1650,8 @@ public actor IMessageHandler {
     private func fetchMessageByRowId(db: OpaquePointer, rowId: Int64) throws -> MessageData? {
         let query = """
             SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.handle_id, m.date, m.date_read,
-                   m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service, m.account
+                   m.date_delivered, m.is_from_me, m.is_read, cmj.chat_id, m.service, m.account,
+                   m.subject, m.associated_message_guid, m.associated_message_type, m.thread_originator_guid
             FROM message m
             JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
             WHERE m.ROWID = ?
@@ -1682,6 +1714,34 @@ public actor IMessageHandler {
                 account = nil
             }
 
+            let subject: String?
+            if let subjectPtr = sqlite3_column_text(stmt, 13) {
+                subject = String(cString: subjectPtr)
+            } else {
+                subject = nil
+            }
+
+            let associatedMessageGuid: String?
+            if let assocGuidPtr = sqlite3_column_text(stmt, 14) {
+                associatedMessageGuid = String(cString: assocGuidPtr)
+            } else {
+                associatedMessageGuid = nil
+            }
+
+            let associatedMessageType: Int?
+            if sqlite3_column_type(stmt, 15) != SQLITE_NULL {
+                associatedMessageType = Int(sqlite3_column_int(stmt, 15))
+            } else {
+                associatedMessageType = nil
+            }
+
+            let threadOriginatorGuid: String?
+            if let threadOriginatorPtr = sqlite3_column_text(stmt, 16) {
+                threadOriginatorGuid = String(cString: threadOriginatorPtr)
+            } else {
+                threadOriginatorGuid = nil
+            }
+
             let attachments = try fetchAttachments(db: db, messageRowId: rowId)
 
             return MessageData(
@@ -1698,7 +1758,11 @@ public actor IMessageHandler {
                 chatId: chatId,
                 service: service,
                 account: account,
-                attachments: attachments
+                attachments: attachments,
+                subject: subject,
+                associatedMessageGuid: associatedMessageGuid,
+                associatedMessageType: associatedMessageType,
+                threadOriginatorGuid: threadOriginatorGuid
             )
         }
 
@@ -1984,6 +2048,35 @@ public actor IMessageHandler {
         return participants
     }
     
+    /// Fetch the handle identifier (phone number, email, etc.) for a given handle row ID
+    /// This is used to determine the actual sender of received messages
+    private func fetchHandleById(db: OpaquePointer, handleId: Int64) -> String? {
+        let query = """
+            SELECT h.id
+            FROM handle h
+            WHERE h.ROWID = ?
+            """
+        
+        var stmt: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
+        guard prepareResult == SQLITE_OK else {
+            let errorMsg = String(cString: sqlite3_errmsg(db))
+            logger.error("Failed to prepare handle query", metadata: ["error": errorMsg, "code": String(prepareResult)])
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        
+        sqlite3_bind_int64(stmt, 1, handleId)
+        
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            if let idPtr = sqlite3_column_text(stmt, 0) {
+                return String(cString: idPtr)
+            }
+        }
+        
+        return nil
+    }
+    
     
     private func fetchAttachments(db: OpaquePointer, messageRowId: Int64) throws -> [AttachmentData] {
         var attachments: [AttachmentData] = []
@@ -2046,23 +2139,217 @@ public actor IMessageHandler {
         return attachments
     }
     
+    // MARK: - Reaction and Reply Handling
+    
+    /// Mapping of iMessage reaction types (associated_message_type) to emoji
+    private let reactionEmojiMap: [Int: String] = [
+        2000: "❤️",   // Love
+        2001: "👍",   // Like
+        2002: "👎",   // Dislike
+        2003: "🤣",   // Laugh
+        2004: "‼️",   // Emphasize (exclamation)
+        2005: "❓"    // Question
+    ]
+    
+    /// Check if a message is a reaction/tapback (associated_message_type 2000-2005)
+    private func isReactionMessage(message: MessageData) -> Bool {
+        guard let msgType = message.associatedMessageType else { return false }
+        return msgType >= 2000 && msgType <= 2005
+    }
+    
+    /// Check if a message is a sticker (associated_message_type 1000)
+    private func isStickerMessage(message: MessageData) -> Bool {
+        return message.associatedMessageType == 1000
+    }
+    
+    /// Extract the actual message GUID from associated_message_guid format
+    /// iMessage stores associated_message_guid in various formats:
+    /// - "p:0/{guid}" or "p:1/{guid}" etc. - participant/platform format with slash (most common)
+    /// - "bp:0{guid}" or "bp:1{guid}" etc. - binary participant format without slash (hex digits)
+    /// - "{guid}" - direct GUID reference (no prefix)
+    /// The actual message guid in the database is just "{guid}" without any prefix
+    private func extractMessageGuid(from associatedGuid: String) -> String {
+        // Handle "p:X/" format (e.g., "p:0/", "p:1/", "p:2/", etc.)
+        if associatedGuid.hasPrefix("p:") {
+            // Find the first "/" after "p:"
+            if let slashIndex = associatedGuid.firstIndex(of: "/") {
+                let guidStartIndex = associatedGuid.index(after: slashIndex)
+                return String(associatedGuid[guidStartIndex...])
+            }
+            // Handle "p:X" format without slash (e.g., "p:10", "p:11")
+            // This is less common but we should handle it
+            if let colonIndex = associatedGuid.firstIndex(of: ":"), 
+               let nextChar = associatedGuid.index(colonIndex, offsetBy: 1, limitedBy: associatedGuid.endIndex) {
+                // Check if there's a digit after "p:" - if so, skip it and any following digits
+                var guidStartIndex = nextChar
+                while guidStartIndex < associatedGuid.endIndex && associatedGuid[guidStartIndex].isNumber {
+                    guidStartIndex = associatedGuid.index(after: guidStartIndex)
+                }
+                if guidStartIndex < associatedGuid.endIndex {
+                    return String(associatedGuid[guidStartIndex...])
+                }
+            }
+        }
+        
+        // Handle "bp:X" format (e.g., "bp:0", "bp:1", "bp:A", etc.)
+        // These are hexadecimal digits, so we need to skip "bp:" plus one hex character
+        if associatedGuid.hasPrefix("bp:") {
+            // Skip "bp:" (3 chars) plus one hex character (1 char) = 4 chars total
+            let guidStartIndex = associatedGuid.index(associatedGuid.startIndex, offsetBy: 4)
+            if guidStartIndex < associatedGuid.endIndex {
+                return String(associatedGuid[guidStartIndex...])
+            }
+        }
+        
+        // If no recognized prefix, return as-is (might be a direct GUID)
+        return associatedGuid
+    }
+    
+    /// Get the text of the message a reaction is reacting to
+    private func getReactionTargetText(db: OpaquePointer?, guid: String) -> String? {
+        guard let db = db else {
+            logger.debug("Cannot lookup reaction target: database is nil", metadata: [
+                "target_guid": guid
+            ])
+            return nil
+        }
+        
+        // Extract the actual GUID by stripping the "p:0/" or "p:1/" prefix if present
+        let actualGuid = extractMessageGuid(from: guid)
+        
+        let query = """
+            SELECT m.text, m.attributedBody FROM message m WHERE m.guid = ? LIMIT 1
+            """
+        
+        var stmt: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
+        guard prepareResult == SQLITE_OK else {
+            logger.warning("Failed to prepare query for reaction target lookup", metadata: [
+                "target_guid": guid,
+                "actual_guid": actualGuid,
+                "sqlite_error": String(prepareResult)
+            ])
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        
+        // Bind the actual GUID parameter (without prefix)
+        sqlite3_bind_text(stmt, 1, actualGuid, -1, unsafeBitCast(OpaquePointer(bitPattern: -1), to: sqlite3_destructor_type.self))
+        
+        let stepResult = sqlite3_step(stmt)
+        if stepResult == SQLITE_ROW {
+            let text: String?
+            if let textPtr = sqlite3_column_text(stmt, 0) {
+                text = String(cString: textPtr)
+            } else {
+                text = nil
+            }
+            
+            // If there's text, return it truncated
+            if let t = text, !t.isEmpty {
+                let truncated = String(t.prefix(50))
+                logger.debug("Found reaction target text from text field", metadata: [
+                    "target_guid": guid,
+                    "actual_guid": actualGuid,
+                    "text_length": String(t.count),
+                    "truncated_length": String(truncated.count)
+                ])
+                return truncated
+            }
+            
+            // Try attributed body
+            if sqlite3_column_type(stmt, 1) == SQLITE_BLOB {
+                if let bytes = sqlite3_column_blob(stmt, 1) {
+                    let count = sqlite3_column_bytes(stmt, 1)
+                    let data = Data(bytes: bytes, count: Int(count))
+                    if let decoded = decodeAttributedBody(data), !decoded.isEmpty {
+                        let truncated = String(decoded.prefix(50))
+                        logger.debug("Found reaction target text from attributedBody", metadata: [
+                            "target_guid": guid,
+                            "actual_guid": actualGuid,
+                            "text_length": String(decoded.count),
+                            "truncated_length": String(truncated.count)
+                        ])
+                        return truncated
+                    } else {
+                        logger.debug("Reaction target has attributedBody but decoding failed or returned empty", metadata: [
+                            "target_guid": guid,
+                            "actual_guid": actualGuid,
+                            "attributed_body_size": String(count)
+                        ])
+                    }
+                }
+            } else {
+                logger.debug("Reaction target message found but has no text or attributedBody", metadata: [
+                    "target_guid": guid,
+                    "actual_guid": actualGuid,
+                    "has_text": text != nil ? "true" : "false",
+                    "text_empty": text?.isEmpty ?? true ? "true" : "false"
+                ])
+            }
+        } else if stepResult == SQLITE_DONE {
+            // No row found - message doesn't exist in database
+            logger.debug("Reaction target message not found in database", metadata: [
+                "target_guid": guid,
+                "actual_guid": actualGuid
+            ])
+        } else {
+            logger.warning("Error executing query for reaction target lookup", metadata: [
+                "target_guid": guid,
+                "actual_guid": actualGuid,
+                "sqlite_error": String(stepResult)
+            ])
+        }
+        
+        return nil
+    }
+    
+    /// Build reaction text like "Reacted 👍 to: <first 50 characters of the message that was reacted to>"
+    private func buildReactionText(emoji: String, targetText: String?) -> String {
+        if let target = targetText, !target.isEmpty {
+            return "Reacted \(emoji) to: \(target)"
+        } else {
+            return "Reacted \(emoji)"
+        }
+    }
+    
+    /// Get parent message text for thread replies (when user taps "Reply")
+    private func getThreadParentText(db: OpaquePointer?, guid: String) -> String? {
+        // Same implementation as getReactionTargetText since it just fetches message text
+        return getReactionTargetText(db: db, guid: guid)
+    }
+    
     // MARK: - Document Building
     
     private func isMessageEmpty(message: MessageData) -> Bool {
         // Check if message has text
         let hasText = !(message.text?.isEmpty ?? true)
         
-        // Check if message has attributed body (we'll decode it in buildDocument if text is empty)
-        let hasAttributedBody = message.attributedBody != nil && message.attributedBody!.count > 0
+        // Check if message has attributed body with decodable text
+        // We need to actually decode it to verify it contains valid text, not just check existence
+        var hasAttributedBodyText = false
+        if let attrBody = message.attributedBody, attrBody.count > 0 {
+            // Try to decode the attributed body to see if it contains valid text
+            if let decodedText = decodeAttributedBody(attrBody), !decodedText.isEmpty {
+                hasAttributedBodyText = true
+            }
+        }
         
         // Check if message has attachments
         let hasAttachments = !message.attachments.isEmpty
         
-        // Message is empty if it has no text, no attributed body, and no attachments
-        // Note: We check for attributedBody existence but don't decode it here to avoid duplicate work.
-        // If a message has an attributedBody, buildDocument will try to decode it.
-        // Empty messages (unsent/retracted) typically have NULL attributedBody or empty attributedBody
-        return !hasText && !hasAttributedBody && !hasAttachments
+        // Check if message is a reaction (these are handled in buildDocument and converted to readable format)
+        let isReaction = isReactionMessage(message: message)
+        
+        // Message is empty if it has no text, no decodable attributed body text, and no attachments
+        // Note: We decode attributedBody here to ensure we don't filter out messages that have
+        // text only in attributedBody. Some messages (especially short ones like "545" or "Yup")
+        // may only have text in attributedBody, not in the text field.
+        // 
+        // Note: Messages with subject/associated_message_guid (reactions) are handled in buildDocument
+        // and converted to readable format (e.g., "Reacted 👍 to <original message>"), so we don't
+        // filter them here to avoid bypassing that conversion logic.
+        return !hasText && !hasAttributedBodyText && !hasAttachments && !isReaction
     }
     
     /// Build document with enrichment support using new architecture
@@ -2179,87 +2466,13 @@ public actor IMessageHandler {
     }
     
     /// Merge enrichment data from EnrichedDocument into dictionary document
+    /// Uses shared EnrichmentMerger utility to apply uniform enrichment strategy across all collectors
     private func mergeEnrichmentIntoDocument(
         _ baseDocument: [String: Any],
         _ enrichedDocument: EnrichedDocument
     ) -> [String: Any] {
-        var document = baseDocument
-        
-        // Add entity enrichment to metadata
-        if let entities = enrichedDocument.documentEnrichment?.entities, !entities.isEmpty {
-            var metadata = document["metadata"] as? [String: Any] ?? [:]
-            var enrichmentData: [String: Any] = [:]
-            
-            // Convert entities to dictionary format
-            var entitiesArray: [[String: Any]] = []
-            for entity in entities {
-                entitiesArray.append([
-                    "type": entity.type.rawValue,
-                    "text": entity.text,
-                    "confidence": entity.confidence,
-                    "range": entity.range  // Entity.range is [Int] (location, length)
-                ])
-            }
-            enrichmentData["entities"] = entitiesArray
-            metadata["enrichment"] = enrichmentData
-            document["metadata"] = metadata
-        }
-        
-        // Add image enrichments (OCR, faces, captions) to attachments
-        if let attachments = document["attachments"] as? [[String: Any]],
-           !enrichedDocument.imageEnrichments.isEmpty {
-            var updatedAttachments: [[String: Any]] = []
-            for (index, attachment) in attachments.enumerated() {
-                var updatedAttachment = attachment
-                
-                if index < enrichedDocument.imageEnrichments.count {
-                    let imageEnrichment = enrichedDocument.imageEnrichments[index]
-                    
-                    // Add OCR data
-                    if let ocr = imageEnrichment.ocr {
-                        var imageData = updatedAttachment["image"] as? [String: Any] ?? [:]
-                        imageData["ocr"] = [
-                            "text": ocr.ocrText,
-                            "recognition_level": ocr.recognitionLevel ?? "accurate",
-                            "lang": ocr.lang
-                        ]
-                        updatedAttachment["image"] = imageData
-                    }
-                    
-                    // Add face detection data
-                    if let faces = imageEnrichment.faces {
-                        var imageData = updatedAttachment["image"] as? [String: Any] ?? [:]
-                        imageData["faces"] = [
-                            "count": faces.faces.count,
-                            "detections": faces.faces.map { face in
-                                [
-                                    "confidence": face.confidence,
-                                    "bounds": [
-                                        "x": face.boundingBox.x,
-                                        "y": face.boundingBox.y,
-                                        "width": face.boundingBox.width,
-                                        "height": face.boundingBox.height
-                                    ]
-                                ]
-                            }
-                        ]
-                        updatedAttachment["image"] = imageData
-                    }
-                    
-                    // Add caption data
-                    if let caption = imageEnrichment.caption {
-                        var imageData = updatedAttachment["image"] as? [String: Any] ?? [:]
-                        imageData["caption"] = caption
-                        updatedAttachment["image"] = imageData
-                    }
-                }
-                
-                updatedAttachments.append(updatedAttachment)
-            }
-            document["attachments"] = updatedAttachments
-        }
-        
-        return document
+        let attachments = baseDocument["attachments"] as? [[String: Any]]
+        return EnrichmentMerger.mergeEnrichmentIntoDocument(baseDocument, enrichedDocument, imageAttachments: attachments)
     }
     
     /// Add completed enrichment to the completion queue
@@ -2341,10 +2554,45 @@ public actor IMessageHandler {
     
     
     private func buildDocument(message: MessageData, thread: ThreadData, attachments: [[String: Any]], db: OpaquePointer?) throws -> [String: Any] {
-        // Extract message text
+        // Extract message text, handling reactions and thread replies
         var messageText = message.text ?? ""
         if messageText.isEmpty, let attrBody = message.attributedBody {
             messageText = decodeAttributedBody(attrBody) ?? ""
+        }
+        
+        // Handle reactions (tapbacks)
+        if isReactionMessage(message: message) {
+            let emoji = reactionEmojiMap[message.associatedMessageType ?? 0] ?? "👍"
+            if let targetGuid = message.associatedMessageGuid {
+                let targetText = getReactionTargetText(db: db, guid: targetGuid)
+                if targetText == nil {
+                    logger.warning("Reaction message missing target text", metadata: [
+                        "message_guid": message.guid,
+                        "target_guid": targetGuid,
+                        "emoji": emoji
+                    ])
+                }
+                messageText = buildReactionText(emoji: emoji, targetText: targetText)
+            } else {
+                logger.warning("Reaction message missing associatedMessageGuid", metadata: [
+                    "message_guid": message.guid,
+                    "emoji": emoji
+                ])
+                messageText = buildReactionText(emoji: emoji, targetText: nil)
+            }
+        }
+        // Handle threaded replies (when user taps "Reply" on a message)
+        else if let threadParentGuid = message.threadOriginatorGuid, !threadParentGuid.isEmpty {
+            let parentText = getThreadParentText(db: db, guid: threadParentGuid)
+            if let parent = parentText, !parent.isEmpty {
+                if !messageText.isEmpty {
+                    messageText = "Replied to \"\(parent)\" with: \(messageText)"
+                } else if !attachments.isEmpty {
+                    messageText = "Replied to \"\(parent)\" with attachment(s)"
+                } else {
+                    messageText = "Replied to \"\(parent)\""
+                }
+            }
         }
         
         // Safety check: if message is still empty after extraction, log warning
@@ -2366,11 +2614,18 @@ public actor IMessageHandler {
         
         // Build people array
         // When isFromMe, use the message account (your iMessage account) as the sender
+        // When received, use the handle_id to look up the actual sender instead of assuming it's the first participant
         var senderIdentifier: String = "me"
         if message.isFromMe {
             senderIdentifier = message.account ?? "me"
         } else {
-            senderIdentifier = thread.participants.first ?? "unknown"
+            // Try to look up the actual sender using the message's handle_id
+            if let db = db, let handleIdentifier = fetchHandleById(db: db, handleId: message.handleId) {
+                senderIdentifier = handleIdentifier
+            } else {
+                // Fallback to first participant if handle lookup fails
+                senderIdentifier = thread.participants.first ?? "unknown"
+            }
         }
         let people = buildPeople(sender: senderIdentifier, participants: thread.participants, isFromMe: message.isFromMe)
         
@@ -2443,7 +2698,7 @@ public actor IMessageHandler {
         var people: [[String: Any]] = []
         
         // When isFromMe is true, sender will be the account email (e.g., "E:mrwhistler@gmail.com")
-        // When isFromMe is false, sender is the first participant
+        // When isFromMe is false, sender is the handle identifier looked up from the message's handle_id
         if isFromMe {
             // For messages we sent, add the account as the sender
             if !sender.isEmpty && sender != "me" {
@@ -2854,7 +3109,8 @@ public actor IMessageHandler {
                         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
                         // Filter out metadata-like strings
                         if cleaned.count > 3 && !cleaned.hasPrefix("NS") && !cleaned.hasPrefix("__k") &&
-                           !cleaned.contains("streamtyped") && !cleaned.contains("NSObject") {
+                           !cleaned.contains("streamtyped") && !cleaned.contains("NSObject") &&
+                           !cleaned.contains("DDScannerResult") {
                             return cleaned
                         }
                     }
@@ -2917,7 +3173,8 @@ public actor IMessageHandler {
                        !cleaned.contains("streamtyped") &&
                        !cleaned.contains("NSObject") &&
                        !cleaned.contains("NSString") &&
-                       !cleaned.contains("NSDictionary") {
+                       !cleaned.contains("NSDictionary") &&
+                       !cleaned.contains("DDScannerResult") {
                         candidates.append(cleaned)
                     }
                 }
@@ -2953,7 +3210,12 @@ public actor IMessageHandler {
                        !trimmed.contains("streamtyped") &&
                        !trimmed.contains("NSObject") &&
                        !trimmed.contains("NSString") &&
-                       !trimmed.contains("NSDictionary") {
+                       !trimmed.contains("NSDictionary") &&
+                       !trimmed.contains("DDScannerResult") &&
+                       !trimmed.contains("__kIM") &&
+                       !trimmed.contains("AttributeName") &&
+                       !trimmed.contains("NSNumber") &&
+                       !isMetadataAttributePattern(trimmed) {
                         bestText = trimmed
                     }
                 }
@@ -2974,7 +3236,12 @@ public actor IMessageHandler {
                !trimmed.hasPrefix("NS") && 
                !trimmed.hasPrefix("__k") &&
                !trimmed.contains("streamtyped") &&
-               !trimmed.contains("NSObject") {
+               !trimmed.contains("NSObject") &&
+               !trimmed.contains("DDScannerResult") &&
+               !trimmed.contains("__kIM") &&
+               !trimmed.contains("AttributeName") &&
+               !trimmed.contains("NSNumber") &&
+               !isMetadataAttributePattern(trimmed) {
                 bestText = trimmed
             }
         }
@@ -2989,6 +3256,14 @@ public actor IMessageHandler {
                    String(decoding: data, as: UTF8.self)
         
         guard !text.isEmpty else {
+            return nil
+        }
+        
+        // Quick check: if the text contains "streamtyped" or heavy framework markers at the start,
+        // it's likely serialized binary data, not actual text - reject it
+        if text.contains("streamtyped") || text.hasPrefix("NSMutableAttributedString") || 
+           text.hasPrefix("NSAttributedString") || text.hasPrefix("NSObject") ||
+           text.hasPrefix("NSMutableString") {
             return nil
         }
         
@@ -3007,11 +3282,13 @@ public actor IMessageHandler {
         let cleanedString = String(cleaned)
         
         // Split by null bytes and control sequences, extract text segments
-        // Create CharacterSet with control characters (0x00-0x05)
+        // Create CharacterSet with control characters (0x00-0x1F, all ASCII control chars)
         var controlCharSet = CharacterSet()
-        for i in 0...5 {
+        for i in 0...0x1F {
             controlCharSet.insert(UnicodeScalar(i)!)
         }
+        // Also include DEL (0x7F)
+        controlCharSet.insert(UnicodeScalar(0x7F)!)
         
         // Split on control characters
         let segments = cleanedString
@@ -3025,13 +3302,44 @@ public actor IMessageHandler {
                 !segment.contains("streamtyped") &&
                 !segment.contains("NSObject") &&
                 !segment.contains("NSString") &&
-                !segment.contains("NSDictionary")
+                !segment.contains("NSDictionary") &&
+                !segment.contains("DDScannerResult") &&
+                !segment.contains("__kIM") &&  // iMessage framework attributes
+                !segment.contains("AttributeName") &&  // Common attribute suffix
+                !segment.contains("NSNumber") &&  // NSNumber type markers
+                !isMetadataAttributePattern(segment)
             }
         
         // Find the longest segment that looks like actual text
         if let longest = segments.max(by: { $0.count < $1.count }), longest.count > 3 {
             let final = longest.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            return final.isEmpty ? nil : final
+            if final.isEmpty {
+                return nil
+            }
+            // Check if the text looks like corrupted data
+            // Allow: single chars, repeated punctuation, alphanumeric text, and approved special chars
+            // Reject: mixed special chars that look like encoding artifacts ("3<?A", "5.1?!")
+            if final.count > 1 && final.count < 10 {
+                let alphanumericCount = final.filter { $0.isLetter || $0.isNumber || $0.isWhitespace }.count
+                let alphanumericRatio = Double(alphanumericCount) / Double(final.count)
+                
+                // Check if all characters are from the approved set: . ! * ? ^ and whitespace
+                let approvedSpecialChars = CharacterSet(charactersIn: ".!*?^ ")
+                let allApprovedSpecial = final.allSatisfy { char in
+                    approvedSpecialChars.contains(char.unicodeScalars.first!)
+                }
+                
+                // Check if all non-alphanumeric chars are the same (legitimate repeated punctuation)
+                let nonAlphanumeric = final.filter { !$0.isLetter && !$0.isNumber && !$0.isWhitespace }
+                let allSameNonAlphanumeric = Set(nonAlphanumeric).count <= 1
+                
+                // Reject only if: low alphanumeric content AND NOT all-same-punctuation AND NOT all-approved-special
+                if alphanumericRatio < 0.5 && !allSameNonAlphanumeric && !allApprovedSpecial {
+                    // Short text with mixed special chars - likely corrupted
+                    return nil
+                }
+            }
+            return final
         }
         
         // If no segments found, try to find contiguous printable text in the cleaned string
@@ -3051,7 +3359,12 @@ public actor IMessageHandler {
                     // Too many spaces, likely not text - evaluate current candidate
                     let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmed.count > bestCandidate.count && trimmed.count > 3 &&
-                       !trimmed.hasPrefix("NS") && !trimmed.hasPrefix("__k") {
+                       !trimmed.hasPrefix("NS") && !trimmed.hasPrefix("__k") &&
+                       !trimmed.contains("DDScannerResult") &&
+                       !trimmed.contains("__kIM") &&
+                       !trimmed.contains("AttributeName") &&
+                       !trimmed.contains("NSNumber") &&
+                       !isMetadataAttributePattern(trimmed) {
                         bestCandidate = trimmed
                     }
                     candidate = ""
@@ -3061,7 +3374,11 @@ public actor IMessageHandler {
                 // Non-printable, non-whitespace - evaluate current candidate
                 let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.count > bestCandidate.count && trimmed.count > 3 &&
-                   !trimmed.hasPrefix("NS") && !trimmed.hasPrefix("__k") {
+                   !trimmed.hasPrefix("NS") && !trimmed.hasPrefix("__k") &&
+                   !trimmed.contains("__kIM") &&
+                   !trimmed.contains("AttributeName") &&
+                   !trimmed.contains("NSNumber") &&
+                   !isMetadataAttributePattern(trimmed) {
                     bestCandidate = trimmed
                 }
                 candidate = ""
@@ -3072,11 +3389,64 @@ public actor IMessageHandler {
         // Check final candidate
         let finalTrimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         if finalTrimmed.count > bestCandidate.count && finalTrimmed.count > 3 &&
-           !finalTrimmed.hasPrefix("NS") && !finalTrimmed.hasPrefix("__k") {
+           !finalTrimmed.hasPrefix("NS") && !finalTrimmed.hasPrefix("__k") &&
+           !finalTrimmed.contains("DDScannerResult") &&
+           !finalTrimmed.contains("__kIM") &&
+           !finalTrimmed.contains("AttributeName") &&
+           !finalTrimmed.contains("NSNumber") &&
+           !isMetadataAttributePattern(finalTrimmed) {
             bestCandidate = finalTrimmed
         }
         
+        // Validate final result - reject only if it looks like corrupted encoding artifacts
+        // Allow: single chars, repeated punctuation, alphanumeric text, and approved special chars
+        // Reject: mixed special chars that look like encoding artifacts ("3<?A", "5.1?!")
+        if !bestCandidate.isEmpty && bestCandidate.count > 1 && bestCandidate.count < 10 {
+            let alphanumericCount = bestCandidate.filter { $0.isLetter || $0.isNumber || $0.isWhitespace }.count
+            let alphanumericRatio = Double(alphanumericCount) / Double(bestCandidate.count)
+            
+            // Check if all characters are from the approved set: . ! * ? ^ and whitespace
+            let approvedSpecialChars = CharacterSet(charactersIn: ".!*?^ ")
+            let allApprovedSpecial = bestCandidate.allSatisfy { char in
+                approvedSpecialChars.contains(char.unicodeScalars.first!)
+            }
+            
+            // Check if all non-alphanumeric chars are the same (legitimate repeated punctuation)
+            let nonAlphanumeric = bestCandidate.filter { !$0.isLetter && !$0.isNumber && !$0.isWhitespace }
+            let allSameNonAlphanumeric = Set(nonAlphanumeric).count <= 1
+            
+            // Reject only if: low alphanumeric content AND NOT all-same-punctuation AND NOT all-approved-special
+            if alphanumericRatio < 0.5 && !allSameNonAlphanumeric && !allApprovedSpecial {
+                // Short text (2-9 chars) with mixed special chars - likely corrupted
+                return nil
+            }
+        }
+        
         return bestCandidate.isEmpty ? nil : bestCandidate
+    }
+    
+    nonisolated private func isMetadataAttributePattern(_ text: String) -> Bool {
+        // Check for iMessage framework attribute patterns that should be filtered out
+        let metadataPatterns = [
+            "__kIM",  // iMessage framework prefix
+            "AttributeName",
+            "AttributeKey",
+            "NSWritingDirection",
+            "NSParagraphStyle",
+            "NSFont",
+            "NSColor",
+            "NSBackgroundColor",
+            "NSUnderline",
+            "NSStrikethrough"
+        ]
+        
+        for pattern in metadataPatterns {
+            if text.contains(pattern) {
+                return true
+            }
+        }
+        
+        return false
     }
     
     /// Public method for testing attributed body decoding
@@ -3351,67 +3721,6 @@ public actor IMessageHandler {
     }
     
     // MARK: - Collection Logic
-    
-    /// Detect the most common sender account from iMessage messages where is_from_me=true.
-    /// This identifies the current user's iMessage account.
-    /// Returns the normalized identifier (with E: prefix stripped).
-    private func detectSelfPersonFromIMessage(db: OpaquePointer) -> String? {
-        let query = """
-        SELECT m.account, COUNT(*) as count
-        FROM message m
-        WHERE m.is_from_me = 1 AND m.account IS NOT NULL
-        GROUP BY m.account
-        ORDER BY count DESC
-        LIMIT 1
-        """
-        
-        var stmt: OpaquePointer? = nil
-        defer { if stmt != nil { sqlite3_finalize(stmt) } }
-        
-        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else {
-            logger.warning("Failed to prepare self-detection query")
-            return nil
-        }
-        
-        if sqlite3_step(stmt) == SQLITE_ROW,
-           let accountPtr = sqlite3_column_text(stmt, 0) {
-            let account = String(cString: accountPtr)
-            
-            // Normalize the account: strip E: prefix if present
-            let normalized: String
-            if account.hasPrefix("E:") {
-                normalized = String(account.dropFirst(2))
-            } else {
-                normalized = account
-            }
-            
-            logger.info("Detected self person account", metadata: [
-                "raw_account": account,
-                "normalized": normalized
-            ])
-            return normalized
-        }
-        
-        logger.warning("No iMessage account found for self-detection")
-        return nil
-    }
-    
-    /// Call Gateway to store the detected self_person_id if not already set.
-    /// This is idempotent; if already set, Gateway returns success without change.
-    private func notifyGatewayOfSelfPerson(account: String) async {
-        logger.info("Notifying Gateway of detected self person", metadata: ["account": account])
-        
-        let payload = ["account": account, "source": "imessage"] as [String: Any]
-        let (statusCode, _) = await gatewayClient.postAdmin(path: "/v1/admin/self-person-id/identify", payload: payload)
-        
-        if (200...299).contains(statusCode) {
-            logger.info("Successfully notified Gateway of self person")
-        } else {
-            logger.warning("Gateway returned unexpected status when setting self person", metadata: [
-                "status": String(statusCode)
-            ])
-        }
-    }
 }
 
 // MARK: - Error Types

@@ -268,7 +268,9 @@ struct SettingsWindow: View {
                 }
                 errorMessage = nil
                 
-                // Post notification that config was saved so collectors view can refresh
+                // Post notification that config was saved
+                // This triggers HostAgentController to clear its config cache
+                // and CollectorsView to refresh
                 NotificationCenter.default.post(name: .settingsConfigSaved, object: nil)
             } catch {
                 errorMessage = "Failed to save configuration: \(error.localizedDescription)"

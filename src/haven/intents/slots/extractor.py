@@ -49,6 +49,7 @@ class LLMSlotExtractor:
         missing_slots: List[str],
         classification_notes: Optional[List[str]] = None,
         thread_context: Optional[List[Dict[str, Any]]] = None,
+        content_timestamp: Optional[str] = None,
     ) -> SlotExtractionResult:
         if not missing_slots:
             return SlotExtractionResult(slots={}, notes=[])
@@ -62,7 +63,17 @@ class LLMSlotExtractor:
             missing_slots=missing_slots,
             classification_notes=classification_notes or [],
             thread_context=thread_context,
+            content_timestamp=content_timestamp,
         )
+        
+        # Print the exact prompt being sent to Ollama
+        print("\n" + "=" * 80)
+        print(f"SLOT EXTRACTION PROMPT (sent to Ollama) - Intent: {intent_name}")
+        print(f"Missing slots: {missing_slots}")
+        print("=" * 80)
+        print(prompt)
+        print("=" * 80 + "\n")
+        
         payload = {
             "model": self.settings.model,
             "prompt": prompt,
@@ -123,6 +134,7 @@ class LLMSlotExtractor:
         missing_slots: List[str],
         classification_notes: List[str],
         thread_context: Optional[List[Dict[str, Any]]] = None,
+        content_timestamp: Optional[str] = None,
     ) -> str:
         slot_instructions = []
         for slot_name in missing_slots:
@@ -148,9 +160,10 @@ class LLMSlotExtractor:
             thread_messages = []
             for msg in thread_context[-5:]:  # Last 5 messages for context
                 msg_text = msg.get("text", "")
-                sender = msg.get("sender") or msg.get("from")
+                # Prefer resolved sender name, fallback to identifier
+                sender = msg.get("sender") or msg.get("from") or "Unknown"
                 if msg_text:
-                    sender_str = f" ({sender})" if sender else ""
+                    sender_str = f" ({sender})" if sender and sender != "Unknown" else ""
                     thread_messages.append(f"- {msg_text[:200]}{sender_str}")
             if thread_messages:
                 thread_block = (
@@ -175,6 +188,32 @@ class LLMSlotExtractor:
                     "- 'we' / 'us' refers to the conversation participants\n"
                 )
 
+        # Add specific guidance for reminder/task "what" slots
+        action_extraction_hint = ""
+        if intent_name in ("reminder.create", "task.create") and "what" in missing_slots:
+            action_extraction_hint = (
+                "\n"
+                "IMPORTANT: For the 'what' slot, extract the complete action or task being requested. "
+                "Look for verb phrases that describe what needs to be done (e.g., 'pick up eggs', "
+                "'call the dentist', 'review the proposal'). Include the full action phrase, not just "
+                "the object. If the text says 'pick up eggs', extract 'pick up eggs' (not just 'eggs').\n"
+            )
+        
+        # Add specific guidance for schedule.create "title" slot
+        title_extraction_hint = ""
+        if intent_name == "schedule.create" and "title" in missing_slots:
+            title_extraction_hint = (
+                "\n"
+                "IMPORTANT: For the 'title' slot, generate a concise, descriptive title for the calendar event "
+                "(maximum 60 characters). The title should be:\n"
+                "- Based on participants, location, or purpose mentioned in the text (e.g., 'Meeting with Dr. Friedman', 'Team Standup', 'Lunch with Sarah')\n"
+                "- Professional and appropriate for a calendar event\n"
+                "- If the text mentions a specific purpose (e.g., 'chat with Dr. Friedman'), use that\n"
+                "- If participants are mentioned, include them in the title\n"
+                "- Do not include dates or times in the title\n"
+                "- If no explicit title is mentioned, generate one from the context\n"
+            )
+        
         return (
             "You are an assistant that extracts missing slot values for intents.\n"
             f"Intent: {intent_name}\n"
@@ -186,19 +225,23 @@ class LLMSlotExtractor:
             "- Only include the slots requested. Do not include already known slots unless a better value is available.\n"
             "- Extract values from the artifact text, entities, or conversation context.\n"
             "- For datetime slots, return ISO 8601 strings with timezone offsets (e.g., 2025-11-09T15:04:00-05:00). If timezone unknown, assume UTC and append 'Z'.\n"
+            "- For time ranges, parse common formats: '12 to 1230' = 12:00 PM to 12:30 PM, '9-10' = 9:00 AM to 10:00 AM, '2pm to 3pm' = 14:00 to 15:00. When both start_dt and end_dt are needed, extract both from the range.\n"
             "- For person slots, return objects with at least a 'name' property. Include 'role' (e.g., 'sender', 'recipient', 'assignee') and 'identifier' if available from entities or channel context.\n"
             "- For array[person] slots, return a list of person objects as described above.\n"
             "- For location slots, prefer structured references from entities; otherwise, extract from the artifact text.\n"
             "- For string slots, preserve the full semantic meaning (e.g., 'pick up eggs for me' not just 'eggs').\n"
+            f"{action_extraction_hint}"
+            f"{title_extraction_hint}"
             "- Do not hallucinate values. If information is unavailable, omit the slot and explain in notes.\n"
             f"{channel_context_hint}"
             f"{thread_block}"
             f"\nExisting slots (already filled):\n{existing_block}\n\n"
             f"Entities (pre-extracted):\n{entities_block}\n\n"
             f"Classifier notes: {notes_block}\n\n"
-            "Current artifact text:\n"
+            + (f"Document timestamp (when message was sent/received): {content_timestamp}\n\n" if content_timestamp else "")
+            + "Current artifact text:\n"
             "-----\n"
             f"{text.strip()}\n"
-            "-----"
+            "-----\n"
         )
 

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
 
 from haven.intents.classifier.taxonomy import IntentDefinition, IntentTaxonomy, SlotDefinition
 from haven.intents.models import ClassificationResult, IntentCandidate
@@ -65,6 +68,7 @@ class SlotFiller:
         artifact_id: str,
         source_type: str,
         thread_context: Optional[List[Dict[str, Any]]] = None,
+        content_timestamp: Optional[str] = None,
     ) -> SlotFillerResult:
         assignments: List[SlotAssignment] = []
         notes: List[str] = []
@@ -87,6 +91,7 @@ class SlotFiller:
                 source_type=source_type,
                 classification_notes=classification.processing_notes,
                 thread_context=thread_context,
+                content_timestamp=content_timestamp,
             )
             assignments.append(assignment)
             notes.extend(assignment.notes)
@@ -104,6 +109,7 @@ class SlotFiller:
         source_type: str,
         classification_notes: List[str],
         thread_context: Optional[List[Dict[str, Any]]] = None,
+        content_timestamp: Optional[str] = None,
     ) -> SlotAssignment:
         slots: Dict[str, Any] = {}
         slot_sources: Dict[str, str] = {}
@@ -151,6 +157,15 @@ class SlotFiller:
             for name, definition in slot_defs.items()
             if not definition.required and name not in slots
         ]
+        # For schedule.create, always prioritize title extraction if not present
+        if candidate.intent_name == "schedule.create" and "title" not in slots:
+            if "title" in optional_missing:
+                # Move title to the front if it's already in the list
+                optional_missing.remove("title")
+                optional_missing.insert(0, "title")
+            elif "title" in slot_defs:
+                # Add title if it exists in slot definitions but wasn't included
+                optional_missing.insert(0, "title")
         extraction_targets = missing_slots + optional_missing
 
         if extraction_targets:
@@ -164,10 +179,22 @@ class SlotFiller:
                     missing_slots=extraction_targets,
                     classification_notes=classification_notes,
                     thread_context=thread_context,
+                    content_timestamp=content_timestamp,
                 )
             except SlotExtractionError as exc:
                 notes.append(f"slot extraction failed: {exc}")
             else:
+                # Log what was requested vs what was returned (for debugging)
+                if candidate.intent_name == "schedule.create":
+                    requested_slots = set(extraction_targets)
+                    returned_slots = set(extraction.slots.keys())
+                    missing_from_response = requested_slots - returned_slots
+                    if missing_from_response:
+                        notes.append(
+                            f"LLM was asked to extract {sorted(requested_slots)} but only returned {sorted(returned_slots)}. "
+                            f"Missing from response: {sorted(missing_from_response)}"
+                        )
+                
                 for slot_name, raw_value in extraction.slots.items():
                     if slot_name not in slot_defs:
                         notes.append(f"LLM returned unknown slot '{slot_name}'")
@@ -356,4 +383,5 @@ class SlotFiller:
         if not person:
             return None
         return person
+
 

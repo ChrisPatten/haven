@@ -9,7 +9,7 @@
 import Foundation
 
 /// Reminders collector configuration (single instance, system-level)
-public struct RemindersInstanceConfig: Codable, @unchecked Sendable {
+public struct RemindersInstanceConfig: Codable, Equatable, @unchecked Sendable {
     /// Selected reminder calendar identifiers to collect from
     /// Empty array means collect from all calendars
     public var selectedCalendarIds: [String]

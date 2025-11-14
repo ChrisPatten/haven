@@ -9,13 +9,14 @@
 import Foundation
 
 /// System-level configuration matching system.plist structure
-public struct SystemConfig: Codable, @unchecked Sendable {
+public struct SystemConfig: Codable, Equatable, @unchecked Sendable {
     public var service: SystemServiceConfig
     public var api: SystemApiConfig
     public var gateway: SystemGatewayConfig
     public var logging: SystemLoggingConfig
     public var modules: ModulesEnablementConfig
     public var advanced: AdvancedModuleSettings
+    public var selfIdentifier: String?
     
     enum CodingKeys: String, CodingKey {
         case service
@@ -24,6 +25,7 @@ public struct SystemConfig: Codable, @unchecked Sendable {
         case logging
         case modules
         case advanced
+        case selfIdentifier = "self_identifier"
     }
     
     public init(
@@ -32,7 +34,8 @@ public struct SystemConfig: Codable, @unchecked Sendable {
         gateway: SystemGatewayConfig = SystemGatewayConfig(),
         logging: SystemLoggingConfig = SystemLoggingConfig(),
         modules: ModulesEnablementConfig = ModulesEnablementConfig(),
-        advanced: AdvancedModuleSettings = AdvancedModuleSettings()
+        advanced: AdvancedModuleSettings = AdvancedModuleSettings(),
+        selfIdentifier: String? = nil
     ) {
         self.service = service
         self.api = api
@@ -40,11 +43,12 @@ public struct SystemConfig: Codable, @unchecked Sendable {
         self.logging = logging
         self.modules = modules
         self.advanced = advanced
+        self.selfIdentifier = selfIdentifier
     }
 }
 
 /// Service configuration (port, auth)
-public struct SystemServiceConfig: Codable {
+public struct SystemServiceConfig: Codable, Equatable {
     public var port: Int
     public var auth: SystemAuthConfig
     
@@ -55,7 +59,7 @@ public struct SystemServiceConfig: Codable {
 }
 
 /// Authentication configuration
-public struct SystemAuthConfig: Codable {
+public struct SystemAuthConfig: Codable, Equatable {
     public var header: String
     public var secret: String
     
@@ -66,7 +70,7 @@ public struct SystemAuthConfig: Codable {
 }
 
 /// API configuration (timeouts, TTL)
-public struct SystemApiConfig: Codable {
+public struct SystemApiConfig: Codable, Equatable {
     public var responseTimeoutMs: Int
     public var statusTtlMinutes: Int
     
@@ -82,7 +86,7 @@ public struct SystemApiConfig: Codable {
 }
 
 /// Gateway configuration
-public struct SystemGatewayConfig: Codable {
+public struct SystemGatewayConfig: Codable, Equatable {
     public var baseUrl: String
     public var ingestPath: String
     public var ingestFilePath: String
@@ -109,7 +113,7 @@ public struct SystemGatewayConfig: Codable {
 }
 
 /// Logging configuration
-public struct SystemLoggingConfig: Codable {
+public struct SystemLoggingConfig: Codable, Equatable {
     public var level: String
     public var format: String
     public var paths: SystemLoggingPathsConfig
@@ -126,7 +130,7 @@ public struct SystemLoggingConfig: Codable {
 }
 
 /// Logging paths configuration
-public struct SystemLoggingPathsConfig: Codable {
+public struct SystemLoggingPathsConfig: Codable, Equatable {
     public var app: String
     public var error: String?  // Deprecated: kept for backward compatibility, not used
     public var access: String
@@ -144,7 +148,7 @@ public struct SystemLoggingPathsConfig: Codable {
 }
 
 /// Module enablement flags
-public struct ModulesEnablementConfig: Codable {
+public struct ModulesEnablementConfig: Codable, Equatable {
     public var imessage: Bool
     public var ocr: Bool
     public var entity: Bool
@@ -179,7 +183,7 @@ public struct ModulesEnablementConfig: Codable {
 }
 
 /// Advanced module settings
-public struct AdvancedModuleSettings: Codable {
+public struct AdvancedModuleSettings: Codable, Equatable {
     public var ocr: OCRModuleSettings
     public var entity: EntityModuleSettings
     public var face: FaceModuleSettings
@@ -208,7 +212,7 @@ public struct AdvancedModuleSettings: Codable {
 }
 
 /// OCR module settings
-public struct OCRModuleSettings: Codable {
+public struct OCRModuleSettings: Codable, Equatable {
     public var languages: [String]
     public var timeoutMs: Int
     public var recognitionLevel: String
@@ -235,7 +239,7 @@ public struct OCRModuleSettings: Codable {
 }
 
 /// Entity module settings
-public struct EntityModuleSettings: Codable {
+public struct EntityModuleSettings: Codable, Equatable {
     public var types: [String]
     public var minConfidence: Float
     
@@ -254,7 +258,7 @@ public struct EntityModuleSettings: Codable {
 }
 
 /// Face module settings
-public struct FaceModuleSettings: Codable {
+public struct FaceModuleSettings: Codable, Equatable {
     public var minFaceSize: Double
     public var minConfidence: Double
     public var includeLandmarks: Bool
@@ -277,7 +281,7 @@ public struct FaceModuleSettings: Codable {
 }
 
 /// Caption module settings
-public struct CaptionModuleSettings: Codable {
+public struct CaptionModuleSettings: Codable, Equatable {
     public var enabled: Bool
     public var method: String
     public var timeoutMs: Int
@@ -304,7 +308,7 @@ public struct CaptionModuleSettings: Codable {
 }
 
 /// FSWatch module settings
-public struct FSWatchModuleSettings: Codable {
+public struct FSWatchModuleSettings: Codable, Equatable {
     public var eventQueueSize: Int
     public var debounceMs: Int
     
@@ -323,7 +327,7 @@ public struct FSWatchModuleSettings: Codable {
 }
 
 /// LocalFS module settings
-public struct LocalFSModuleSettings: Codable {
+public struct LocalFSModuleSettings: Codable, Equatable {
     public var maxFileBytes: Int
     
     enum CodingKeys: String, CodingKey {
@@ -336,7 +340,7 @@ public struct LocalFSModuleSettings: Codable {
 }
 
 /// Debug settings
-public struct DebugSettings: Codable {
+public struct DebugSettings: Codable, Equatable {
     public var enabled: Bool
     public var outputPath: String
     

@@ -22,11 +22,9 @@ from shared.db import (
     get_connection,
 )
 from shared.logging import get_logger, setup_logging
-from shared.people_repository import PeopleResolver
+from shared.people_repository import PeopleResolver, get_self_person_id_from_settings
 from shared.people_normalization import IdentifierKind
 from shared.context import fetch_context_overview
-from shared.people_repository import PeopleResolver
-from shared.people_normalization import IdentifierKind
 from services.catalog_api.models_v2 import (
     DeleteDocumentResponse,
     DocumentBatchIngestError,
@@ -106,9 +104,10 @@ def on_startup() -> None:
 
 def _link_document_people(conn, doc_id: uuid.UUID, people_json: List[Dict[str, Any]]) -> None:
     """Resolve identifiers to person_id and insert into document_people.
-    Supports: phone, email, imessage, social, shortcode. Logs others.
+    Supports: phone, email, imessage, social, shortcode, self. Logs others.
     """
     from shared.people_normalization import IdentifierKind
+    from shared.people_repository import get_self_person_id_from_settings
     resolver = PeopleResolver(conn)
     resolved: Dict[tuple[uuid.UUID, uuid.UUID], str] = {}
     kind_map = {
@@ -124,6 +123,20 @@ def _link_document_people(conn, doc_id: uuid.UUID, people_json: List[Dict[str, A
         role = person_entry.get("role") or "participant"
         if not identifier:
             continue
+        
+        # Handle "self" identifier_type specially
+        if identifier_type == "self":
+            self_person_id = get_self_person_id_from_settings(conn)
+            if self_person_id:
+                resolved[(doc_id, self_person_id)] = role
+            else:
+                logger.info(
+                    "people_link_self_no_person_id",
+                    doc_id=str(doc_id),
+                    role=role,
+                )
+            continue
+        
         kind = kind_map.get(identifier_type)
         if not kind:
             logger.info(
