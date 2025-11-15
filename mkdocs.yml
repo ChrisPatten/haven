@@ -28,6 +28,7 @@ nav:
       - Functional Guide: reference/functional_guide.md
   - Reference:
       - Schema v2 Reference: reference/SCHEMA_V2_REFERENCE.md
+      - Data Dictionary: reference/data-dictionary.md
       - Backup & Restore: reference/BACKUP_RESTORE.md
       - Relationship Features: reference/relationship_features.md
       - Graph Reference: reference/graph.md

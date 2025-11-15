@@ -14,11 +14,11 @@
 
 ### Document Instance Creation (Standardized Format):
 - Each document is created as a `CollectorDocument` struct with standardized fields:
-  - `content: String` - Markdown text extracted from source (enriched with image placeholders)
+  - `content: String` - Markdown text extracted from source (image placeholders added during enrichment pipeline)
   - `sourceType: String` - document origin ("imessage", "email", "localfs", etc.)
-  - `sourceId: String` - unique ID within source
+  - `externalId: String` - unique ID within source (e.g. "imessage:1234567890")
   - `metadata: DocumentMetadata` - content hash, MIME type, timestamps (created/modified), additional metadata dict
-  - `images: [ImageAttachment]` - extracted images with temporary data or path refs (files NOT retained, only metadata)
+  - `images: [ImageAttachment]` - extracted images with temporary data or path refs (files NOT retained, only metadata). If original image was embedded in the message (does not have a file on disk that can be referenced), include the base64 encoded image data here. For embedded images, collectors should create temporary placeholder text in content that will be replaced with enriched placeholders at the end of the enrichment pipeline.
   - `contentType: DocumentContentType` - enum-based type
   - `title: String?`, `canonicalUri: String?` - optional fields
 
@@ -35,27 +35,36 @@
 
 ### Queue Architecture:
 - `EnrichmentQueue` actor manages concurrent enrichment of documents with attachments
-- Configurable concurrency via `maxConcurrentEnrichments` (default: 1)
-- Only documents with images are queued; others proceed directly to enrichment orchestrator or submission
+- **Queue Population**: Collectors fill the queue by calling `queueForEnrichment()` for each document as they traverse data sources
+- Configurable concurrency via `maxConcurrentEnrichments` (default: 1) - determines number of enrichment workers
+- All documents are queued for enrichment
 - Queue maintains: `enrichmentTasks` (document ID → Task), `activeEnrichmentCount`, `waitingQueue` (FIFO buffer when at capacity)
 
 ### Queue Operations:
-- `queueForEnrichment(document, documentId, onComplete)` - enqueues if document has images and not already queued
-  - Returns `true` if queued successfully, `false` if no images or already queued
+- `queueForEnrichment(document, documentId, onComplete)` - called by collectors to enqueue documents for enrichment
+  - Returns `true` if queued successfully, `false` if already queued
+  - All documents go through enrichment; image-related steps (OCR, face detection, captioning) are skipped if document has no images
+  - NER runs on all documents (if enabled), regardless of image presence
+  - NER runs after all other enrichment steps are complete and includes OCR text if available.
   - Callback `onComplete: (String, EnrichedDocument?) -> Void` invoked when enrichment completes
 - `waitForEnrichment(documentId)` - synchronous wait for enrichment completion
 - `cancelEnrichment(documentId)` / `cancelAll()` - cleanup
 
 ### Enrichment Worker Model:
-- Pulled from queue by consumers (currently in Haven.app: 1+ controller workers per collector run)
-- Workers execute the enrichment orchestrator pipeline asynchronously
-- On success: pass enriched document to document submitter
-- On retryable error: increment retry count in metadata, re-queue (configurable max retries)
-- On non-retryable error: send to error log/output (logging system)
+- **Worker Creation**: A configurable number of enrichment workers are created when the first collector starts (controlled by `maxConcurrentEnrichments`)
+- **Worker Lifecycle**: Workers persist across all collectors and are destroyed when the last collector completes (multiple collectors may run simultaneously, all posting documents to the same queue)
+- **Document Claiming**: Workers claim documents from the queue (FIFO order), marking them as active
+- **Enrichment Pipeline**: Each worker executes the enrichment orchestrator pipeline asynchronously on the claimed document
+- **Submission**: On success, worker asynchronously posts the enriched document to the document submitter for collection into batches (worker does not block; continues processing next document immediately)
+- **Error Handling**:
+  - On retryable error: increment retry count in metadata, re-queue (configurable max retries)
+  - On non-retryable error: send to error log/output (logging system)
 
 ### Key Implementation Detail:
 - `EnrichmentQueue` uses async Task-based concurrency control with `AsyncSemaphore` to limit parallel enrichments
+- Workers operate independently, claiming and processing documents concurrently up to the configured limit
 - Completion callbacks allow handlers to track enriched documents without blocking the queue
+- Collector tracks incremental progress as documents are enriched and published; collector is not terminated until all documents have been submitted
 
 ---
 
@@ -67,24 +76,23 @@
 - Each service is optional; pipeline is determined by what services exist + config flags
 
 ### Sequential Enrichment Steps:
-1. **OCR** (if enabled & OCRService exists) - processes each image attachment
+1. **OCR** (if enabled & OCRService exists & document has images) - processes each image attachment
+   - Skipped if document has no images
    - Returns `OCRResult` with `ocrText`, `recognitionLevel`, `lang`
-2. **Face Detection** (if enabled & FaceService exists) - processes each image
+2. **Face Detection** (if enabled & FaceService exists & document has images) - processes each image
+   - Skipped if document has no images
    - Returns `FaceDetectionResult` with face count, bounding boxes, confidence scores, landmarks
-3. **Captioning** (if enabled & CaptionService exists) - generates description per image
-   - Takes image data + optional OCR text as context
+3. **Captioning** (if enabled & CaptionService exists & document has images) - generates description per image
+   - Skipped if document has no images
+   - Takes image url or base64 encoded image data as context
    - Returns `String` caption (NOT further enriched; no NER applied to captions)
-4. **NER** (if enabled & EntityService exists) - extracts entities from:
-   - Document primary text (`document.content`)
-   - All OCR results combined (across all images)
+   - Settings control which type of captioner is used (Ollama, OpenAI, etc.). Different captioners handle images in different ways, per the requirements of the captioning service.
+4. **NER** (if enabled & EntityService exists) - extracts entities from ALL documents:
+   - Always runs on every document (if enabled), regardless of image presence
+   - Extracts entities from document primary text (`document.content`)
+   - If images exist: also extracts from all OCR results combined (across all images)
    - Caption text is NOT included in NER
    - Returns `[Entity]` with type, text, confidence, range metadata
-
-### Image Processing:
-- Images processed in parallel using `TaskGroup` with configurable concurrency (clamped 1-16)
-- Image data loaded temporarily (from `temporaryData` or `temporaryPath` fields)
-- Image data is NOT retained after enrichment (memory efficiency)
-- Each image enrichment stored as `ImageEnrichment` struct with optional `ocr`, `faces`, `caption` fields
 
 ### Result Structure:
 - Returns `EnrichedDocument` containing:
@@ -97,8 +105,9 @@
 ## 4. Message Formatting & Image Placeholder Embedding
 
 ### Image Placeholder Format:
-- `[Image: <filename> | <caption> | <ocr_text>]` - inline text representation
-- Applied to document text via `EnrichmentMerger.mergeEnrichmentIntoDocument()`
+- `[Image: <filename> | <caption> | <ocr_text>]` - inline text representation. If the image was embedded in the message (does not have a file on disk that can be referenced), this replaces the image data.
+- Applied to document text via `EnrichmentMerger.mergeEnrichmentIntoDocument()` as the final step in the enrichment pipeline (after all enrichment steps including NER are complete).
+- For embedded images: collectors create temporary placeholder text in document content during document creation; these are replaced with enriched placeholders (containing caption and OCR text) at the end of the enrichment pipeline.
 
 ### Enrichment Metadata Structure:
 - Merged into `metadata.enrichment` JSONB field:
@@ -143,22 +152,29 @@
 
 ### Batch Document Submitter:
 - `BatchDocumentSubmitter` actor collects `EnrichedDocument` instances
-- `submitBatch([EnrichedDocument])` - converts to `EmailDocumentPayload` format + submits
+- `submitBatch([EnrichedDocument])` - converts to `EmailDocumentPayload` format (to be renamed to `DocumentPayload`) + submits
 - Converts enriched documents to gateway payload via `convertToEmailDocumentPayload()`
 - Handles batch size negotiation: tries batch endpoint; falls back to individual submissions if unavailable
 
 ### Batch Submission Flow:
-1. Collect documents until batch size reached OR timeout
-2. Convert each `EnrichedDocument` → `EmailDocumentPayload` (generic payload format)
-3. Call `gatewayClient.submitDocumentsBatch(payloads)` (tries batch endpoint)
+1. Collect documents until batch size reached (default: 200, configurable in gateway settings) OR queue is empty and all enrichment pipelines are complete (no timeout; submit final batch when processing is done)
+2. Convert each `EnrichedDocument` → `EmailDocumentPayload` (Swift payload type that represents the gateway API format; to be renamed to `DocumentPayload`)
+3. Serialize `EmailDocumentPayload` to JSON and call `gatewayClient.submitDocumentsBatch(payloads)` (tries `/v1/ingest:batch` endpoint)
 4. On success: return `SubmissionResult.success(submission: GatewaySubmissionResponse)`
 5. On failure: parse error, determine if retryable (HTTP 5xx → retryable), return `SubmissionResult.failure(error, statusCode, retryable)`
+6. Update CollectorStats (per-instance, updated in real-time) with submission results (number of documents submitted, number of documents failed, number of documents retried). CollectorStats drives progress information shown to users (progress bar, count, or percentage).
 
-### Gateway Payload Structure:
-- `sourceType`, `sourceId`, `title` - document identity
-- `content: EmailDocumentContent` - text with MIME type (includes image placeholders)
-- `metadata: EmailDocumentMetadata` - enrichment entities, image captions, additional metadata
-- Idempotency key: SHA256(`sourceType:sourceId:textHash`)
+### Gateway Payload Structure (`EmailDocumentPayload`):
+- `EmailDocumentPayload` is the Swift representation of the payload submitted to the gateway service
+- **Note**: The following types should be renamed to reflect their generic use across all document types (not just email):
+  - `EmailDocumentPayload` → `DocumentPayload`
+  - `EmailDocumentContent` → `DocumentContent`
+  - `EmailDocumentMetadata` → `DocumentMetadata`
+- When serialized to JSON, it matches the gateway API's `IngestRequestModel` format
+- Key fields: `sourceType`, `externalId`, `title` - document identity (`externalId` is transmitted to the gateway as `source_id` for backwards compatibility)
+- `content: EmailDocumentContent` (to be renamed to `DocumentContent`) - text with MIME type (includes image placeholders)
+- `metadata: EmailDocumentMetadata` (to be renamed to `DocumentMetadata`) - enrichment entities, image captions, additional metadata
+- Idempotency key: SHA256(`sourceType:externalId:textHash`) sent in the `Idempotency-Key` header
 
 ---
 
@@ -169,32 +185,28 @@
 - Mapping: 2000→❤️, 2001→😂, 2002→😮, 2003→😢, 2004→😡, 2005→👍
 
 ### Reaction Document Creation:
-- Reactions converted to readable text in `buildDocument()` method
-- Text format: `"Reacted 👍 to: <first 50 chars of target message>"`
-- Lookup target message from DB to embed context
+- Reactions: document's `content` field contains the reaction emoji (e.g., "👍", "❤️", "😂")
+- Replies: document's `content` field contains the reply text
+- Catalog service handles formatting as "Reacted <emoji> to: <target message>" or "Replied <text> to: <target message>" in post-processing phase
 
 ### Reply Document Creation:
-- `in_reply_to` metadata field captures parent message reference
-- Parent message GUID stored for later resolution
-
-### Metadata for Later Resolution:
-- Documents with `reply_to_message_external_id` metadata key (external IDs formatted as `imessage:<guid>`) marked as unresolved
-- `reply_unprocessed: true` flag set on document creation
-- These are stored in `documents.metadata` JSONB field
+- `documents.metadata.in_reply_to` metadata field captures parent message reference
+- Parent message GUID stored as `in_reply_to.reply_to_message_external_id` for later resolution
+- `in_reply_to.reply_unprocessed: true` flag set on document creation
 
 ### Catalog Post-Processing (After Batch Ingestion):
 - After gateway accepts document batch, catalog processes ingested documents in background job
 - **Catalog Resolution Job:**
-  1. Query documents WHERE `metadata->>'reply_unprocessed' = 'true'`
-  2. For each, extract `reply_to_message_external_id` from metadata
+  1. Query documents WHERE `metadata->'in_reply_to'->>'reply_unprocessed' = 'true'`
+  2. For each, extract `reply_to_message_external_id` from `metadata.in_reply_to.reply_to_message_external_id`
   3. Look up referenced document by external ID in catalog
   4. If found: update `parent_doc_id` field in documents table
-  5. Remove `reply_unprocessed` key from metadata JSONB
+  5. Remove `reply_unprocessed` key from `metadata.in_reply_to` JSONB object
   6. Mark resolution as complete
 
 ### Data Model:
 - `documents.parent_doc_id UUID` - foreign key to parent document
-- `documents.metadata JSONB` contains: `{"reply_to_message_external_id": "imessage:...", "reply_unprocessed": true}`
+- `documents.metadata JSONB` contains: `{"in_reply_to": {"reply_to_message_external_id": "imessage:...", "reply_unprocessed": true}}`
 - After resolution: `reply_unprocessed` key deleted, `parent_doc_id` populated
 
 ---
@@ -205,12 +217,18 @@
 - Tracked in `EnrichedDocument` with optional error details
 - Retryable errors (network, timeout): re-queued with incremented `retryAttempts` counter
 - Non-retryable errors (validation, data corruption): logged to error output; not re-queued
-- Configurable max retries (e.g., `maxRetries: 3`) before sending to error log
+- Configurable max retries (default: 3) before sending to error log
 
 ### Submission Errors:
 - Gateway returns: `statusCode`, `errorMessage`, `retryable: Bool`
 - HTTP 5xx errors marked as retryable; 4xx usually not
-- Batch submission failures propagate error to all documents in batch
+- **Batch Retry Behavior**:
+  - If batch fails with `retryable=true`: entire batch is retried (up to configured max retries, default: 3). Assumes transport error that prevented batch processing.
+  - If batch fails with `retryable=false`: attempt to identify partial success. If gateway provides per-document results:
+    - Log errors for failed documents
+    - Submit remaining documents individually (those that succeeded in batch or weren't processed)
+  - If partial success cannot be determined: submit all documents individually, log errors for failing documents (not retried)
+
 
 ### Logging:
 - Structured logging via `HavenLogger(category: "enrichment-queue")`, etc.
@@ -228,9 +246,9 @@
 - `modules.caption.enabled` - enable Image captioning (OpenAI, Ollama, etc.)
 - `modules.entity.types` - list of entity types to extract
 - `modules.entity.minConfidence` - confidence threshold for entities
-- Concurrency limits for enrichment workers
-- Retry limits for failed enrichments
-- Batch size for document submission
+- Concurrency limits for enrichment workers (`maxConcurrentEnrichments`)
+- Retry limits for failed enrichments (default: 3)
+- Batch size for document submission (default: 200, configurable in gateway settings under `settings->general`)
 
 ### Per-Collector Settings:
 - `messageLookbackDays` - iMessage lookback window
@@ -245,7 +263,6 @@ This architecture creates a highly modular, testable pipeline where:
 1. Collectors create standardized `CollectorDocument` instances
 2. FIFO queue manages backpressure for enrichment
 3. Enrichment pipeline is configurable per module
-4. Image data never leaves host; only metadata transmitted
+4. Image data never submitted to gateway; only metadata transmitted
 5. Batch submitter handles idempotency and error recovery
 6. Replies/reactions resolved asynchronously in catalog post-processing phase
-

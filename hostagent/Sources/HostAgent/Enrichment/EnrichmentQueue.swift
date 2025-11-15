@@ -1,9 +1,9 @@
 import Foundation
 import HavenCore
 
-/// Queue for asynchronous attachment enrichment
-/// Processes documents with attachments in the background while allowing
-/// non-attachment documents to proceed immediately with NER and batch submission
+/// Queue for asynchronous enrichment of collector documents.
+/// All documents pass through this queue so that enrichment order is preserved
+/// and concurrency is controlled centrally.
 public actor EnrichmentQueue {
     private let orchestrator: EnrichmentOrchestrator
     private let logger = HavenLogger(category: "enrichment-queue")
@@ -25,21 +25,16 @@ public actor EnrichmentQueue {
     ///   - document: The document to enrich
     ///   - documentId: Unique identifier for this document
     ///   - onComplete: Callback invoked when enrichment completes (may be called from any context)
-    /// - Returns: True if queued, false if already queued or no attachments
+    /// - Returns: True if queued, false if already queued
     @discardableResult
     public func queueForEnrichment(
         document: CollectorDocument,
         documentId: String,
         onComplete: @escaping EnrichmentCompletion
     ) -> Bool {
-        // Check if document has images that need enrichment
-        guard !document.images.isEmpty else {
-            // No images, don't queue
-            return false
-        }
-        
-        // Check if already queued
-        guard enrichmentTasks[documentId] == nil else {
+        // Check if already queued or waiting
+        guard enrichmentTasks[documentId] == nil,
+              !waitingQueue.contains(where: { $0.documentId == documentId }) else {
             logger.debug("Document already queued for enrichment", metadata: ["document_id": documentId])
             return false
         }
@@ -131,6 +126,18 @@ public actor EnrichmentQueue {
         }
         return try await task.value
     }
+
+    /// Queue a document and suspend until enrichment completes
+    public func enqueueAndWait(document: CollectorDocument, documentId: String) async -> EnrichedDocument? {
+        await withCheckedContinuation { continuation in
+            let queued = queueForEnrichment(document: document, documentId: documentId) { _, enriched in
+                continuation.resume(returning: enriched)
+            }
+            if !queued {
+                continuation.resume(returning: nil)
+            }
+        }
+    }
     
     /// Cancel enrichment for a document
     public func cancelEnrichment(documentId: String) {
@@ -155,4 +162,3 @@ public actor EnrichmentQueue {
         enrichmentTasks.removeValue(forKey: documentId)
     }
 }
-

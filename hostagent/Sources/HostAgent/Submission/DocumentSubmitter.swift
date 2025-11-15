@@ -44,7 +44,7 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
             } catch {
                 logger.error("Failed to convert document to payload", metadata: [
                     "source_type": document.base.sourceType,
-                    "source_id": document.base.sourceId,
+                    "source_id": document.base.externalId,
                     "error": error.localizedDescription
                 ])
                 // Continue with other documents even if one fails conversion
@@ -84,7 +84,7 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
                         let textHash = payload.metadata.contentHash
                         let idempotencyKey = makeDocumentIdempotencyKey(
                             sourceType: payload.sourceType,
-                            sourceId: payload.sourceId,
+                            externalId: payload.sourceId,
                             textHash: textHash
                         )
                         let submission = try await gatewayClient.submitDocument(payload: payload, idempotencyKey: idempotencyKey)
@@ -242,7 +242,7 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
         
         return EmailDocumentPayload(
             sourceType: base.sourceType,
-            sourceId: base.sourceId,
+            sourceId: base.externalId,
             title: base.title,
             canonicalUri: base.canonicalUri,
             content: content,
@@ -273,8 +273,8 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
     }
     
     /// Make document idempotency key
-    private func makeDocumentIdempotencyKey(sourceType: String, sourceId: String, textHash: String) -> String {
-        let combined = "\(sourceType):\(sourceId):\(textHash)"
+    private func makeDocumentIdempotencyKey(sourceType: String, externalId: String, textHash: String) -> String {
+        let combined = "\(sourceType):\(externalId):\(textHash)"
         return sha256Hex(of: combined.data(using: .utf8)!)
     }
     
@@ -284,4 +284,3 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
         return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
 }
-

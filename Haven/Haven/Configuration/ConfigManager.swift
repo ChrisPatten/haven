@@ -359,6 +359,10 @@ public actor ConfigManager {
             throw ConfigError.validationError("Gateway base URL cannot be empty")
         }
         
+        if config.maxConcurrentEnrichments < 1 || config.maxConcurrentEnrichments > 16 {
+            throw ConfigError.validationError("Max concurrent enrichments must be between 1 and 16")
+        }
+
         // Validate auth secret
         if config.service.auth.secret.isEmpty || config.service.auth.secret == "changeme" {
             logger.warning("Using default auth secret - this is insecure!")
@@ -426,4 +430,3 @@ public enum ConfigError: LocalizedError {
         }
     }
 }
-

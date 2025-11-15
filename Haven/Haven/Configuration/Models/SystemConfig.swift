@@ -17,6 +17,7 @@ public struct SystemConfig: Codable, Equatable, @unchecked Sendable {
     public var modules: ModulesEnablementConfig
     public var advanced: AdvancedModuleSettings
     public var selfIdentifier: String?
+    public var maxConcurrentEnrichments: Int
     
     enum CodingKeys: String, CodingKey {
         case service
@@ -26,8 +27,9 @@ public struct SystemConfig: Codable, Equatable, @unchecked Sendable {
         case modules
         case advanced
         case selfIdentifier = "self_identifier"
+        case maxConcurrentEnrichments = "max_concurrent_enrichments"
     }
-    
+
     public init(
         service: SystemServiceConfig = SystemServiceConfig(),
         api: SystemApiConfig = SystemApiConfig(),
@@ -35,7 +37,8 @@ public struct SystemConfig: Codable, Equatable, @unchecked Sendable {
         logging: SystemLoggingConfig = SystemLoggingConfig(),
         modules: ModulesEnablementConfig = ModulesEnablementConfig(),
         advanced: AdvancedModuleSettings = AdvancedModuleSettings(),
-        selfIdentifier: String? = nil
+        selfIdentifier: String? = nil,
+        maxConcurrentEnrichments: Int = 1
     ) {
         self.service = service
         self.api = api
@@ -44,6 +47,20 @@ public struct SystemConfig: Codable, Equatable, @unchecked Sendable {
         self.modules = modules
         self.advanced = advanced
         self.selfIdentifier = selfIdentifier
+        self.maxConcurrentEnrichments = max(1, min(maxConcurrentEnrichments, 16))
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.service = try container.decodeIfPresent(SystemServiceConfig.self, forKey: .service) ?? SystemServiceConfig()
+        self.api = try container.decodeIfPresent(SystemApiConfig.self, forKey: .api) ?? SystemApiConfig()
+        self.gateway = try container.decodeIfPresent(SystemGatewayConfig.self, forKey: .gateway) ?? SystemGatewayConfig()
+        self.logging = try container.decodeIfPresent(SystemLoggingConfig.self, forKey: .logging) ?? SystemLoggingConfig()
+        self.modules = try container.decodeIfPresent(ModulesEnablementConfig.self, forKey: .modules) ?? ModulesEnablementConfig()
+        self.advanced = try container.decodeIfPresent(AdvancedModuleSettings.self, forKey: .advanced) ?? AdvancedModuleSettings()
+        self.selfIdentifier = try container.decodeIfPresent(String.self, forKey: .selfIdentifier)
+        let workers = try container.decodeIfPresent(Int.self, forKey: .maxConcurrentEnrichments) ?? 1
+        self.maxConcurrentEnrichments = max(1, min(workers, 16))
     }
 }
 
@@ -377,4 +394,3 @@ public struct DebugSettings: Codable, Equatable {
         self.outputPath = outputPath.isEmpty ? HavenFilePaths.debugFile("debug_documents.jsonl").path : outputPath
     }
 }
-

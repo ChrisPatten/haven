@@ -18,6 +18,7 @@ struct GeneralSettingsView: View {
             VStack(alignment: .leading, spacing: 20) {
                 gatewayConfigurationSection
                 loggingConfigurationSection
+                enrichmentSettingsSection
                 selfIdentifierSection
                 
                 if let error = viewModel.errorMessage {
@@ -134,6 +135,28 @@ struct GeneralSettingsView: View {
             .padding()
         }
     }
+
+    @ViewBuilder
+    private var enrichmentSettingsSection: some View {
+        GroupBox("Enrichment Workers") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Controls how many documents can be enriched in parallel across all collectors. Higher values speed up processing but use more CPU/GPU resources.")
+                    .foregroundColor(.secondary)
+                    .font(.caption)
+
+                HStack {
+                    Text("Max Concurrent:")
+                        .frame(width: 120, alignment: .trailing)
+                    Stepper(value: maxConcurrentEnrichmentsBinding, in: 1...16) {
+                        Text("\(viewModel.systemConfig?.maxConcurrentEnrichments ?? 1)")
+                            .frame(alignment: .leading)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding()
+        }
+    }
     
     @ViewBuilder
     private var selfIdentifierSection: some View {
@@ -195,6 +218,17 @@ struct GeneralSettingsView: View {
             set: { newValue in
                 viewModel.updateSystemConfig { config in
                     config.gateway.timeoutMs = newValue
+                }
+            }
+        )
+    }
+
+    private var maxConcurrentEnrichmentsBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.systemConfig?.maxConcurrentEnrichments ?? 1 },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.maxConcurrentEnrichments = max(1, min(newValue, 16))
                 }
             }
         )

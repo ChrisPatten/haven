@@ -10,6 +10,7 @@ public actor ICloudDriveHandler {
     
     // Enrichment support
     private let enrichmentOrchestrator: EnrichmentOrchestrator?
+    private let enrichmentQueue: EnrichmentQueue?
     private let submitter: DocumentSubmitter?
     private let skipEnrichment: Bool
     
@@ -50,11 +51,13 @@ public actor ICloudDriveHandler {
     public init(
         config: HavenConfig,
         enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        enrichmentQueue: EnrichmentQueue? = nil,
         submitter: DocumentSubmitter? = nil,
         skipEnrichment: Bool = false
     ) {
         self.config = config
         self.enrichmentOrchestrator = enrichmentOrchestrator
+        self.enrichmentQueue = enrichmentQueue
         self.submitter = submitter
         self.skipEnrichment = skipEnrichment
     }
@@ -68,6 +71,7 @@ public actor ICloudDriveHandler {
         idempotencyKey: String,
         mimeType: String,
         orchestrator: EnrichmentOrchestrator,
+        enrichmentQueue: EnrichmentQueue?,
         submitter: DocumentSubmitter,
         gatewayConfig: GatewayConfig,
         authToken: String
@@ -94,7 +98,7 @@ public actor ICloudDriveHandler {
         let document = CollectorDocument(
             content: content.isEmpty ? "[File: \(filename)]" : content,
             sourceType: "icloud_drive",
-            sourceId: "icloud_drive:\(idempotencyKey)",
+            externalId: "icloud_drive:\(idempotencyKey)",
             metadata: DocumentMetadata(
                 contentHash: contentHash,
                 mimeType: mimeType,
@@ -109,8 +113,17 @@ public actor ICloudDriveHandler {
             canonicalUri: fileURL.path
         )
         
-        // Enrich document
-        let enrichedDocument = try await orchestrator.enrich(document)
+        // Enrich document using shared queue when available
+        let enrichedDocument: EnrichedDocument
+        if let queue = enrichmentQueue {
+            if let queuedResult = await queue.enqueueAndWait(document: document, documentId: document.externalId) {
+                enrichedDocument = queuedResult
+            } else {
+                enrichedDocument = try await orchestrator.enrich(document)
+            }
+        } else {
+            enrichedDocument = try await orchestrator.enrich(document)
+        }
         
         // Submit via DocumentSubmitter
         let submissionResult = try await submitter.submit(enrichedDocument)
@@ -547,6 +560,7 @@ public actor ICloudDriveHandler {
                             idempotencyKey: idempotencyKey,
                             mimeType: mimeType,
                             orchestrator: orchestrator,
+                            enrichmentQueue: enrichmentQueue,
                             submitter: submitter,
                             gatewayConfig: gatewayConfig,
                             authToken: config.service.auth.secret
@@ -755,4 +769,3 @@ struct ICloudDriveScope {
     let includeGlobs: [String]?
     let excludeGlobs: [String]?
 }
-

@@ -134,7 +134,8 @@ public struct ConfigConverter {
                 enabled: systemConfig.advanced.debug.enabled,
                 outputPath: systemConfig.advanced.debug.outputPath
             ),
-            selfIdentifier: systemConfig.selfIdentifier
+            selfIdentifier: systemConfig.selfIdentifier,
+            maxConcurrentEnrichments: systemConfig.maxConcurrentEnrichments
         )
     }
     
@@ -211,7 +212,8 @@ public struct ConfigConverter {
                     outputPath: config.debug.outputPath
                 )
             ),
-            selfIdentifier: config.selfIdentifier
+            selfIdentifier: config.selfIdentifier,
+            maxConcurrentEnrichments: config.maxConcurrentEnrichments
         )
     }
     
@@ -258,4 +260,3 @@ public struct ConfigConverter {
         )
     }
 }
-

@@ -9,6 +9,7 @@ public struct HavenConfig: Codable {
     public var modules: ModulesConfig
     public var debug: DebugConfig
     public var selfIdentifier: String?
+    public var maxConcurrentEnrichments: Int
     
     enum CodingKeys: String, CodingKey {
         case service
@@ -18,15 +19,17 @@ public struct HavenConfig: Codable {
         case modules
         case debug
         case selfIdentifier = "self_identifier"
+        case maxConcurrentEnrichments = "max_concurrent_enrichments"
     }
-    
+
     public init(service: ServiceConfig = ServiceConfig(),
                 api: ApiConfig = ApiConfig(),
                 gateway: GatewayConfig = GatewayConfig(),
                 logging: LoggingConfig = LoggingConfig(),
                 modules: ModulesConfig = ModulesConfig(),
                 debug: DebugConfig = DebugConfig(),
-                selfIdentifier: String? = nil) {
+                selfIdentifier: String? = nil,
+                maxConcurrentEnrichments: Int = 1) {
         self.service = service
         self.api = api
         self.gateway = gateway
@@ -34,6 +37,7 @@ public struct HavenConfig: Codable {
         self.modules = modules
         self.debug = debug
         self.selfIdentifier = selfIdentifier
+        self.maxConcurrentEnrichments = max(1, min(maxConcurrentEnrichments, 16))
     }
     
     public init(from decoder: Decoder) throws {
@@ -47,6 +51,8 @@ public struct HavenConfig: Codable {
         self.modules = try container.decode(ModulesConfig.self, forKey: .modules)
         self.debug = try container.decodeIfPresent(DebugConfig.self, forKey: .debug) ?? DebugConfig()
         self.selfIdentifier = try container.decodeIfPresent(String.self, forKey: .selfIdentifier)
+        let workers = try container.decodeIfPresent(Int.self, forKey: .maxConcurrentEnrichments) ?? 1
+        self.maxConcurrentEnrichments = max(1, min(workers, 16))
     }
 }
 

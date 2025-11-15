@@ -20,8 +20,18 @@ public actor IMessageHandler {
     private let skipEnrichment: Bool
     private var enrichmentQueue: EnrichmentQueue?
     
-    // Completion queue for enriched documents: documentId -> EnrichedDocument
-    private var enrichmentCompletions: [String: EnrichedDocument] = [:]
+    private enum EnrichmentCompletionResult {
+        case success(EnrichedDocument)
+        case failure
+        
+        var isSuccess: Bool {
+            if case .success = self { return true }
+            return false
+        }
+    }
+    
+    // Completion queue for enriched documents: documentId -> completion result
+    private var enrichmentCompletions: [String: EnrichmentCompletionResult] = [:]
     
     // State tracking
     private var isRunning: Bool = false
@@ -101,6 +111,7 @@ public actor IMessageHandler {
         config: HavenConfig,
         gatewayClient: GatewayClient,
         enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        enrichmentQueue: EnrichmentQueue? = nil,
         submitter: DocumentSubmitter? = nil,
         skipEnrichment: Bool = false
     ) {
@@ -111,6 +122,7 @@ public actor IMessageHandler {
         self.config = config
         self.gatewayClient = gatewayClient
         self.enrichmentOrchestrator = enrichmentOrchestrator
+        self.enrichmentQueue = enrichmentQueue
         self.submitter = submitter
         self.skipEnrichment = skipEnrichment
         
@@ -645,13 +657,6 @@ public actor IMessageHandler {
         var lastFenceSaveTime: Date? = nil
         let fenceSaveInterval: TimeInterval = 5.0  // Save fences every 5 seconds
         
-        // Initialize enrichment queue if enrichment is enabled
-        var enrichmentQueue: EnrichmentQueue? = nil
-        if !skipEnrichment, let orchestrator = enrichmentOrchestrator {
-            enrichmentQueue = EnrichmentQueue(orchestrator: orchestrator, maxConcurrentEnrichments: 1)
-            self.enrichmentQueue = enrichmentQueue
-        }
-        
         // Track pending enrichments: documentId -> (baseDocument, messageDate, baseCollectorDocument)
         var pendingEnrichments: [String: ([String: Any], Date, CollectorDocument)] = [:]
         
@@ -660,7 +665,7 @@ public actor IMessageHandler {
             "limit": params.limit?.description ?? "unlimited",
             "submission_mode": params.batchMode ? "batch" : "single",
             "existing_fences": String(fences.count),
-            "enrichment_queue_enabled": enrichmentQueue != nil ? "true" : "false"
+            "enrichment_queue_enabled": self.enrichmentQueue != nil ? "true" : "false"
         ])
 
         // Iterate ordered rows and prepare documents in batches
@@ -808,22 +813,17 @@ public actor IMessageHandler {
                 break
             }
             
-            // Determine if document has images that need enrichment
-            let hasImages = !collectorDocument.images.isEmpty
-            let documentId = collectorDocument.sourceId
+            let documentId = collectorDocument.externalId
             
-            if hasImages && enrichmentQueue != nil {
-                // Document has images - queue for enrichment
+            if let queue = self.enrichmentQueue {
                 // Store pending enrichment info before queuing
                 pendingEnrichments[documentId] = (baseDocument, messageDate, collectorDocument)
                 
                 // Queue for enrichment with callback
-                let queued = await enrichmentQueue!.queueForEnrichment(
+                let queued = await queue.queueForEnrichment(
                     document: collectorDocument,
                     documentId: documentId
                 ) { completedId, enrichedDoc in
-                    // Callback executed when enrichment completes
-                    // Store completion in actor's completion queue
                     Task {
                         await self.addEnrichmentCompletion(documentId: completedId, enrichedDocument: enrichedDoc)
                     }
@@ -834,23 +834,33 @@ public actor IMessageHandler {
                         "document_id": documentId,
                         "image_count": String(collectorDocument.images.count)
                     ])
-                    // Continue processing other messages
+                    
+                    processEnrichmentCompletions(
+                        pendingEnrichments: &pendingEnrichments,
+                        currentBatch: &currentBatch,
+                        currentBatchTimestamps: &currentBatchTimestamps,
+                        allDocuments: &allDocuments,
+                        stats: &stats
+                    )
                     continue
                 } else {
-                    // Failed to queue, remove from pending
+                    // Failed to queue, remove from pending and fall back to synchronous enrichment
                     pendingEnrichments.removeValue(forKey: documentId)
+                    logger.warning("Failed to queue document for enrichment, falling back to synchronous path", metadata: [
+                        "document_id": documentId
+                    ])
                 }
             }
             
-            // Document has no images or enrichment is disabled - perform NER immediately and add to batch
+            // Enrichment queue unavailable - process synchronously (may skip enrichment)
             let enrichedDocument: [String: Any]
             do {
-                enrichedDocument = try await enrichDocumentWithNER(
+                enrichedDocument = try await enrichDocumentSynchronously(
                     baseDocument: baseDocument,
                     collectorDocument: collectorDocument
                 )
             } catch {
-                logger.warning("NER enrichment failed, using base document", metadata: [
+                logger.warning("Synchronous enrichment failed, using base document", metadata: [
                     "document_id": documentId,
                     "error": error.localizedDescription
                 ])
@@ -998,7 +1008,7 @@ public actor IMessageHandler {
         
         // Process any remaining documents in the final batch
         // Wait for all pending enrichments to complete before final batch
-        if let queue = enrichmentQueue, !pendingEnrichments.isEmpty {
+        if let queue = self.enrichmentQueue, !pendingEnrichments.isEmpty {
             logger.info("Waiting for all pending enrichments to complete", metadata: [
                 "pending_count": String(pendingEnrichments.count)
             ])
@@ -2384,13 +2394,13 @@ public actor IMessageHandler {
                 do {
                     _ = try await submitter.submit(enrichedDocument)
                     logger.debug("Submitted document via submitter", metadata: [
-                        "source_id": enrichedDocument.base.sourceId
+                        "source_id": enrichedDocument.base.externalId
                     ])
                     // Return nil to indicate this was submitted via submitter and shouldn't be posted via HTTP
                     return nil
                 } catch {
                     logger.error("Failed to submit document via submitter", metadata: [
-                        "source_id": enrichedDocument.base.sourceId,
+                        "source_id": enrichedDocument.base.externalId,
                         "error": error.localizedDescription
                     ])
                     // Fall through to merge and post via HTTP as fallback
@@ -2449,7 +2459,7 @@ public actor IMessageHandler {
         return CollectorDocument(
             content: content,
             sourceType: "imessage",
-            sourceId: baseDocument["source_id"] as? String ?? "",
+            externalId: baseDocument["source_id"] as? String ?? "",
             metadata: DocumentMetadata(
                 contentHash: contentHash,
                 mimeType: "text/plain",
@@ -2478,10 +2488,12 @@ public actor IMessageHandler {
     /// Add completed enrichment to the completion queue
     private func addEnrichmentCompletion(documentId: String, enrichedDocument: EnrichedDocument?) {
         if let enriched = enrichedDocument {
-            enrichmentCompletions[documentId] = enriched
+            enrichmentCompletions[documentId] = .success(enriched)
         } else {
-            // Enrichment failed, remove from completions (will use base document)
-            enrichmentCompletions.removeValue(forKey: documentId)
+            logger.warning("Enrichment failed; using base document", metadata: [
+                "document_id": documentId
+            ])
+            enrichmentCompletions[documentId] = .failure
         }
     }
     
@@ -2498,17 +2510,22 @@ public actor IMessageHandler {
         
         for documentId in completedIds {
             guard let (baseDocument, messageDate, _) = pendingEnrichments[documentId],
-                  let enrichedDocument = enrichmentCompletions[documentId] else {
+                  let completion = enrichmentCompletions[documentId] else {
                 continue
             }
             
-            // Merge enrichment into base document
-            let enrichedDict = mergeEnrichmentIntoDocument(baseDocument, enrichedDocument)
+            let documentToAppend: [String: Any]
+            switch completion {
+            case .success(let enrichedDocument):
+                documentToAppend = mergeEnrichmentIntoDocument(baseDocument, enrichedDocument)
+            case .failure:
+                documentToAppend = baseDocument
+            }
             
             // Add to batch
-            currentBatch.append(enrichedDict)
+            currentBatch.append(documentToAppend)
             currentBatchTimestamps.append(messageDate)
-            allDocuments.append(enrichedDict)
+            allDocuments.append(documentToAppend)
             stats.documentsCreated += 1
             
             // Remove from pending and completions
@@ -2516,14 +2533,15 @@ public actor IMessageHandler {
             enrichmentCompletions.removeValue(forKey: documentId)
             
             logger.debug("Processed completed enrichment", metadata: [
-                "document_id": documentId
+                "document_id": documentId,
+                "completion_state": completion.isSuccess ? "success" : "failure"
             ])
         }
     }
     
-    /// Perform NER enrichment on a document without attachments
+    /// Perform synchronous enrichment when the shared queue is unavailable
     /// Returns enriched document dictionary ready for batch submission
-    private func enrichDocumentWithNER(
+    private func enrichDocumentSynchronously(
         baseDocument: [String: Any],
         collectorDocument: CollectorDocument
     ) async throws -> [String: Any] {
@@ -2532,23 +2550,7 @@ public actor IMessageHandler {
             return baseDocument
         }
         
-        // Perform NER on document content only (no image enrichment)
-        // Create a document without images for NER
-        let documentForNER = CollectorDocument(
-            content: collectorDocument.content,
-            sourceType: collectorDocument.sourceType,
-            sourceId: collectorDocument.sourceId,
-            metadata: collectorDocument.metadata,
-            images: [],  // No images - just NER
-            contentType: collectorDocument.contentType,
-            title: collectorDocument.title,
-            canonicalUri: collectorDocument.canonicalUri
-        )
-        
-        // Enrich with NER only
-        let enrichedDocument = try await orchestrator.enrich(documentForNER)
-        
-        // Merge NER results into base document
+        let enrichedDocument = try await orchestrator.enrich(collectorDocument)
         return mergeEnrichmentIntoDocument(baseDocument, enrichedDocument)
     }
     

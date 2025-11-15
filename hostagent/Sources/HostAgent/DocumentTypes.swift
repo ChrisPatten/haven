@@ -45,7 +45,7 @@ public struct DocumentMetadata: Codable, Sendable {
 public struct CollectorDocument: Sendable {
     public let content: String  // Markdown text extracted from source
     public let sourceType: String
-    public let sourceId: String
+    public let externalId: String
     public let metadata: DocumentMetadata
     public let images: [ImageAttachment]  // Array of extracted images (files not retained, only metadata)
     public let contentType: DocumentContentType
@@ -55,7 +55,7 @@ public struct CollectorDocument: Sendable {
     public init(
         content: String,
         sourceType: String,
-        sourceId: String,
+        externalId: String,
         metadata: DocumentMetadata,
         images: [ImageAttachment] = [],
         contentType: DocumentContentType,
@@ -64,7 +64,7 @@ public struct CollectorDocument: Sendable {
     ) {
         self.content = content
         self.sourceType = sourceType
-        self.sourceId = sourceId
+        self.externalId = externalId
         self.metadata = metadata
         self.images = images
         self.contentType = contentType
@@ -154,4 +154,3 @@ public struct SubmissionResult: Sendable {
         SubmissionResult(success: false, statusCode: statusCode, error: error, retryable: retryable)
     }
 }
-

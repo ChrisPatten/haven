@@ -22,6 +22,7 @@ public actor ICloudDriveController: CollectorController {
         config: HavenConfig,
         serviceController: ServiceController,
         enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        enrichmentQueue: EnrichmentQueue? = nil,
         submitter: DocumentSubmitter? = nil,
         skipEnrichment: Bool = false
     ) async throws {
@@ -31,6 +32,7 @@ public actor ICloudDriveController: CollectorController {
         self.handler = ICloudDriveHandler(
             config: config,
             enrichmentOrchestrator: enrichmentOrchestrator,
+            enrichmentQueue: enrichmentQueue,
             submitter: submitter,
             skipEnrichment: skipEnrichment
         )
@@ -137,5 +139,4 @@ public actor ICloudDriveController: CollectorController {
         baseState.lastRunError = nil
     }
 }
-
 

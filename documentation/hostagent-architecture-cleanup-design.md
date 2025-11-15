@@ -80,7 +80,7 @@ This document proposes a refactoring of the HostAgent architecture to separate c
 
 **Output**: `CollectorDocument` - A standardized document structure containing:
 - Content (markdown text from TextExtractor)
-- Source metadata (sourceType, sourceId, timestamps)
+- Source metadata (sourceType, externalId, timestamps)
 - Images (array of image attachments extracted by ImageExtractor, ready for enrichment)
 - Basic metadata (hashes, mime types)
 
@@ -202,7 +202,7 @@ File attachments from LocalFS or email:
 public struct CollectorDocument: Sendable {
     let content: String  // Markdown text extracted from source
     let sourceType: String
-    let sourceId: String
+    let externalId: String
     let metadata: DocumentMetadata
     let images: [ImageAttachment]  // Array of extracted images (files not retained, only metadata)
     let contentType: DocumentContentType  // email, imessage, localfs, contact
@@ -505,7 +505,7 @@ public func collectAndSubmit(email: EmailMessage) async throws {
     let document = CollectorDocument(
         content: markdownContent,
         sourceType: "email",
-        sourceId: email.messageId,
+        externalId: email.messageId,
         attachments: extractedImages,  // Images ready for enrichment
         // ... other metadata
     )
@@ -534,7 +534,7 @@ public func collectAndSubmit(file: URL) async throws {
     let document = CollectorDocument(
         content: markdownContent,
         sourceType: "localfs",
-        sourceId: file.path,
+        externalId: file.path,
         images: extractedImages,  // Array of ImageAttachment (metadata only, no file data)
         // ... other metadata
     )
@@ -747,5 +747,3 @@ The Submitter service has no batch size configuration - it accepts whatever batc
 2. Create implementation tasks in beads
 3. Begin Phase 1 implementation (extract submission logic)
 4. Iterate based on feedback and testing
-
-

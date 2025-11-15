@@ -22,6 +22,7 @@ public actor IMessageController: CollectorController {
         config: HavenConfig,
         serviceController: ServiceController,
         enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        enrichmentQueue: EnrichmentQueue? = nil,
         submitter: DocumentSubmitter? = nil,
         skipEnrichment: Bool = false
     ) async throws {
@@ -33,6 +34,7 @@ public actor IMessageController: CollectorController {
             config: config,
             gatewayClient: gatewayClient,
             enrichmentOrchestrator: enrichmentOrchestrator,
+            enrichmentQueue: enrichmentQueue,
             submitter: submitter,
             skipEnrichment: skipEnrichment
         )

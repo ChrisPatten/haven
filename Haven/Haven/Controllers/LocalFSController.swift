@@ -22,6 +22,7 @@ public actor LocalFSController: CollectorController {
         config: HavenConfig,
         serviceController: ServiceController,
         enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        enrichmentQueue: EnrichmentQueue? = nil,
         submitter: DocumentSubmitter? = nil,
         skipEnrichment: Bool = false
     ) async throws {
@@ -31,6 +32,7 @@ public actor LocalFSController: CollectorController {
         self.handler = LocalFSHandler(
             config: config,
             enrichmentOrchestrator: enrichmentOrchestrator,
+            enrichmentQueue: enrichmentQueue,
             submitter: submitter,
             skipEnrichment: skipEnrichment
         )

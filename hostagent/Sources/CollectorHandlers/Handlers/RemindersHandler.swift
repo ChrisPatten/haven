@@ -553,7 +553,7 @@ public actor RemindersHandler {
         let collectorDocument = CollectorDocument(
             content: reminder.text,
             sourceType: reminder.sourceType,
-            sourceId: reminder.sourceId,
+            externalId: reminder.externalId ?? reminder.sourceId,
             metadata: documentMetadata,
             images: [], // Reminders don't have images
             contentType: .contact, // Using contact as closest match (no reminder type yet)
@@ -668,4 +668,3 @@ struct ReminderDocumentPayload {
     let completedAt: Date?
     let metadata: [String: Any]
 }
-

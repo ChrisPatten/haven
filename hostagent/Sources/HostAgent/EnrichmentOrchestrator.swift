@@ -123,7 +123,7 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
                         image: image,
                         enrichmentStartTime: enrichmentStartTime,
                         sourceType: document.sourceType,
-                        sourceId: document.sourceId,
+                        externalId: document.externalId,
                         ocrService: ocrSvc,
                         faceService: faceSvc,
                         captionService: captionSvc,
@@ -185,7 +185,7 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
         image: ImageAttachment,
         enrichmentStartTime: Date,
         sourceType: String,
-        sourceId: String,
+        externalId: String,
         ocrService: OCRService?,
         faceService: FaceService?,
         captionService: CaptionService?,
@@ -331,4 +331,3 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
         throw EnrichmentError.imageDataUnavailable
     }
 }
-

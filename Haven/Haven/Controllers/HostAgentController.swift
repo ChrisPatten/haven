@@ -28,6 +28,8 @@ public class HostAgentController: ObservableObject {
     private var isRunning: Bool = false
     private let logger = HavenLogger(category: "hostagent-controller")
     private let jobManager: JobManager
+    private var sharedEnrichmentOrchestrator: DocumentEnrichmentOrchestrator?
+    private var sharedEnrichmentQueue: EnrichmentQueue?
     
     @Published public var appState: AppState
     
@@ -59,6 +61,9 @@ public class HostAgentController: ObservableObject {
             // This is important for caption settings that affect enrichment orchestrators
             collectors.removeAll()
             logger.info("Collectors cache cleared - will be recreated with new settings on next use")
+            sharedEnrichmentOrchestrator = nil
+            sharedEnrichmentQueue = nil
+            logger.info("Cleared shared enrichment orchestrator and queue")
             
             // Reload configs if HostAgent is running so it picks up new settings
             // This is important for settings like OpenAI API key that are used at runtime
@@ -118,6 +123,8 @@ public class HostAgentController: ObservableObject {
             // This ensures cache consistency and that we get the same config that was used for HavenConfig
             let systemConfig = try await serviceController.loadSystemConfig()
             self.systemConfig = systemConfig
+            sharedEnrichmentOrchestrator = nil
+            sharedEnrichmentQueue = nil
             
             // Initialize services
             try await serviceController.initializeServices()
@@ -161,6 +168,8 @@ public class HostAgentController: ObservableObject {
         
         // Clear collectors
         collectors.removeAll()
+        sharedEnrichmentOrchestrator = nil
+        sharedEnrichmentQueue = nil
         
         isRunning = false
         appState.updateProcessState(.stopped)
@@ -202,11 +211,13 @@ public class HostAgentController: ObservableObject {
         case "imessage":
             // iMessage doesn't require instances, always initialize if requested
                 let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "imessage")
-                let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+                let orchestrator = skipEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+                let queue = skipEnrichment ? nil : getSharedEnrichmentQueue(config: config)
                 let controller = try await IMessageController(
                     config: config,
                     serviceController: serviceController,
                     enrichmentOrchestrator: orchestrator,
+                    enrichmentQueue: queue,
                     submitter: sharedSubmitter,
                     skipEnrichment: skipEnrichment
                 )
@@ -232,11 +243,13 @@ public class HostAgentController: ObservableObject {
             let hasFilesInstances = await hasFilesInstancesConfigured()
             if hasFilesInstances && collectors[id] == nil {
                 let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "localfs")
-                let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+                let orchestrator = skipEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+                let queue = skipEnrichment ? nil : getSharedEnrichmentQueue(config: config)
                 let controller = try await LocalFSController(
                     config: config,
                     serviceController: serviceController,
                     enrichmentOrchestrator: orchestrator,
+                    enrichmentQueue: queue,
                     submitter: sharedSubmitter,
                     skipEnrichment: skipEnrichment
                 )
@@ -248,11 +261,13 @@ public class HostAgentController: ObservableObject {
             let hasImapSources = await hasImapSourcesConfigured()
             if hasImapSources && collectors[id] == nil {
                 let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "email_imap")
-                let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+                let orchestrator = skipEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+                let queue = skipEnrichment ? nil : getSharedEnrichmentQueue(config: config)
                 let controller = try await EmailController(
                     config: config,
                     serviceController: serviceController,
                     enrichmentOrchestrator: orchestrator,
+                    enrichmentQueue: queue,
                     submitter: sharedSubmitter,
                     skipEnrichment: skipEnrichment
                 )
@@ -264,11 +279,13 @@ public class HostAgentController: ObservableObject {
             let hasICloudDriveInstances = await hasICloudDriveInstancesConfigured()
             if hasICloudDriveInstances && collectors[id] == nil {
                 let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "icloud_drive")
-                let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+                let orchestrator = skipEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+                let queue = skipEnrichment ? nil : getSharedEnrichmentQueue(config: config)
                 let controller = try await ICloudDriveController(
                     config: config,
                     serviceController: serviceController,
                     enrichmentOrchestrator: orchestrator,
+                    enrichmentQueue: queue,
                     submitter: sharedSubmitter,
                     skipEnrichment: skipEnrichment
                 )
@@ -317,11 +334,13 @@ public class HostAgentController: ObservableObject {
         // Initialize all collectors that have instances configured (all modules are enabled)
         if collectors["imessage"] == nil {
             let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "imessage")
-            let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let orchestrator = skipEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+            let queue = skipEnrichment ? nil : getSharedEnrichmentQueue(config: config)
             let controller = try await IMessageController(
                 config: config,
                 serviceController: serviceController,
                 enrichmentOrchestrator: orchestrator,
+                enrichmentQueue: queue,
                 submitter: sharedSubmitter,
                 skipEnrichment: skipEnrichment
             )
@@ -343,11 +362,13 @@ public class HostAgentController: ObservableObject {
         let hasFilesInstances = await hasFilesInstancesConfigured()
         if hasFilesInstances && collectors["localfs"] == nil {
             let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "localfs")
-            let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let orchestrator = skipEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+            let queue = skipEnrichment ? nil : getSharedEnrichmentQueue(config: config)
             let controller = try await LocalFSController(
                 config: config,
                 serviceController: serviceController,
                 enrichmentOrchestrator: orchestrator,
+                enrichmentQueue: queue,
                 submitter: sharedSubmitter,
                 skipEnrichment: skipEnrichment
             )
@@ -357,11 +378,13 @@ public class HostAgentController: ObservableObject {
         let hasImapSources = await hasImapSourcesConfigured()
         if hasImapSources && collectors["email_imap"] == nil {
             let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "email_imap")
-            let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let orchestrator = skipEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+            let queue = skipEnrichment ? nil : getSharedEnrichmentQueue(config: config)
             let controller = try await EmailController(
                 config: config,
                 serviceController: serviceController,
                 enrichmentOrchestrator: orchestrator,
+                enrichmentQueue: queue,
                 submitter: sharedSubmitter,
                 skipEnrichment: skipEnrichment
             )
@@ -371,11 +394,13 @@ public class HostAgentController: ObservableObject {
         let hasICloudDriveInstances = await hasICloudDriveInstancesConfigured()
         if hasICloudDriveInstances && collectors["icloud_drive"] == nil {
             let skipEnrichment = enrichmentConfig.getSkipEnrichment(for: "icloud_drive")
-            let orchestrator = skipEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let orchestrator = skipEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+            let queue = skipEnrichment ? nil : getSharedEnrichmentQueue(config: config)
             let controller = try await ICloudDriveController(
                 config: config,
                 serviceController: serviceController,
                 enrichmentOrchestrator: orchestrator,
+                enrichmentQueue: queue,
                 submitter: sharedSubmitter,
                 skipEnrichment: skipEnrichment
             )
@@ -396,11 +421,13 @@ public class HostAgentController: ObservableObject {
         
         // Initialize iMessage collector (always available, no instances needed)
         let skipIMessageEnrichment = enrichmentConfig.getSkipEnrichment(for: "imessage")
-        let imessageOrchestrator = skipIMessageEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+        let imessageOrchestrator = skipIMessageEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+        let imessageQueue = skipIMessageEnrichment ? nil : getSharedEnrichmentQueue(config: config)
         let controller = try await IMessageController(
             config: config,
             serviceController: serviceController,
             enrichmentOrchestrator: imessageOrchestrator,
+            enrichmentQueue: imessageQueue,
             submitter: sharedSubmitter,
             skipEnrichment: skipIMessageEnrichment
         )
@@ -424,11 +451,13 @@ public class HostAgentController: ObservableObject {
         let hasFilesInstances = await hasFilesInstancesConfigured()
         if hasFilesInstances {
             let skipLocalFSEnrichment = enrichmentConfig.getSkipEnrichment(for: "localfs")
-            let localfsOrchestrator = skipLocalFSEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let localfsOrchestrator = skipLocalFSEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+            let localfsQueue = skipLocalFSEnrichment ? nil : getSharedEnrichmentQueue(config: config)
             let localfsController = try await LocalFSController(
                 config: config,
                 serviceController: serviceController,
                 enrichmentOrchestrator: localfsOrchestrator,
+                enrichmentQueue: localfsQueue,
                 submitter: sharedSubmitter,
                 skipEnrichment: skipLocalFSEnrichment
             )
@@ -439,11 +468,13 @@ public class HostAgentController: ObservableObject {
         let hasICloudDriveInstances = await hasICloudDriveInstancesConfigured()
         if hasICloudDriveInstances {
             let skipICloudDriveEnrichment = enrichmentConfig.getSkipEnrichment(for: "icloud_drive")
-            let icloudDriveOrchestrator = skipICloudDriveEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let icloudDriveOrchestrator = skipICloudDriveEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+            let icloudQueue = skipICloudDriveEnrichment ? nil : getSharedEnrichmentQueue(config: config)
             let icloudDriveController = try await ICloudDriveController(
                 config: config,
                 serviceController: serviceController,
                 enrichmentOrchestrator: icloudDriveOrchestrator,
+                enrichmentQueue: icloudQueue,
                 submitter: sharedSubmitter,
                 skipEnrichment: skipICloudDriveEnrichment
             )
@@ -454,11 +485,13 @@ public class HostAgentController: ObservableObject {
         let hasImapSources = await hasImapSourcesConfigured()
         if hasImapSources {
             let skipEmailEnrichment = enrichmentConfig.getSkipEnrichment(for: "email_imap")
-            let emailOrchestrator = skipEmailEnrichment ? nil : createEnrichmentOrchestrator(config: config)
+            let emailOrchestrator = skipEmailEnrichment ? nil : getSharedEnrichmentOrchestrator(config: config)
+            let emailQueue = skipEmailEnrichment ? nil : getSharedEnrichmentQueue(config: config)
             let emailController = try await EmailController(
                 config: config,
                 serviceController: serviceController,
                 enrichmentOrchestrator: emailOrchestrator,
+                enrichmentQueue: emailQueue,
                 submitter: sharedSubmitter,
                 skipEnrichment: skipEmailEnrichment
             )
@@ -555,6 +588,29 @@ public class HostAgentController: ObservableObject {
             captionConfig: config.modules.caption,
             concurrency: enrichmentConcurrency
         )
+    }
+
+    private func getSharedEnrichmentOrchestrator(config: HavenConfig) -> DocumentEnrichmentOrchestrator {
+        if let orchestrator = sharedEnrichmentOrchestrator {
+            return orchestrator
+        }
+        let orchestrator = createEnrichmentOrchestrator(config: config)
+        sharedEnrichmentOrchestrator = orchestrator
+        return orchestrator
+    }
+    
+    private func getSharedEnrichmentQueue(config: HavenConfig) -> EnrichmentQueue {
+        if let queue = sharedEnrichmentQueue {
+            return queue
+        }
+        let orchestrator = getSharedEnrichmentOrchestrator(config: config)
+        let workers = max(1, min(config.maxConcurrentEnrichments, 16))
+        let queue = EnrichmentQueue(orchestrator: orchestrator, maxConcurrentEnrichments: workers)
+        sharedEnrichmentQueue = queue
+        logger.info("Shared enrichment queue initialized", metadata: [
+            "max_concurrent_enrichments": String(workers)
+        ])
+        return queue
     }
     
     /// Extract base collector ID and instance ID from instance-specific collector ID
@@ -997,4 +1053,3 @@ public enum HostAgentError: LocalizedError {
         }
     }
 }
-

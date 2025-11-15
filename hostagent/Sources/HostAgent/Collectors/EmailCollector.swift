@@ -972,6 +972,7 @@ public actor EmailCollector {
     public func collectAndSubmit(
         email: EmailMessage,
         enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        enrichmentQueue: EnrichmentQueue? = nil,
         submitter: DocumentSubmitter? = nil,
         skipEnrichment: Bool = false,
         config: HavenConfig? = nil,
@@ -1018,7 +1019,7 @@ public actor EmailCollector {
         let document = CollectorDocument(
             content: redacted,
             sourceType: resolvedSourceType,
-            sourceId: sourceId,
+            externalId: sourceId,
             metadata: DocumentMetadata(
                 contentHash: textHash,
                 mimeType: "text/plain",
@@ -1034,38 +1035,35 @@ public actor EmailCollector {
         )
         
         // 5. Enrich (if not skipped)
-        let enriched: EnrichedDocument
-        if !skipEnrichment {
-            let orchestrator: EnrichmentOrchestrator
+        func performDirectEnrichment() async throws -> EnrichedDocument {
             if let provided = enrichmentOrchestrator {
-                orchestrator = provided
+                return try await provided.enrich(document)
             } else if let config = config {
-                // Create orchestrator from config
                 let ocrService = config.modules.ocr.enabled ? OCRService(
                     timeoutMs: config.modules.ocr.timeoutMs,
                     languages: config.modules.ocr.languages,
                     recognitionLevel: config.modules.ocr.recognitionLevel,
                     includeLayout: config.modules.ocr.includeLayout
                 ) : nil
-                
+
                 let faceService = config.modules.face.enabled ? FaceService(
                     minFaceSize: config.modules.face.minFaceSize,
                     minConfidence: config.modules.face.minConfidence,
                     includeLandmarks: config.modules.face.includeLandmarks
                 ) : nil
-                
+
                 let entityService = config.modules.entity.enabled ? EntityService(
                     enabledTypes: config.modules.entity.types.compactMap { EntityType(rawValue: $0) },
                     minConfidence: config.modules.entity.minConfidence
                 ) : nil
-                
+
                 let captionService = config.modules.caption.enabled ? CaptionService(
                     method: config.modules.caption.method,
                     timeoutMs: config.modules.caption.timeoutMs,
                     model: config.modules.caption.model
                 ) : nil
-                
-                orchestrator = DocumentEnrichmentOrchestrator(
+
+                let orchestrator = DocumentEnrichmentOrchestrator(
                     ocrService: ocrService,
                     faceService: faceService,
                     entityService: entityService,
@@ -1075,13 +1073,23 @@ public actor EmailCollector {
                     entityConfig: config.modules.entity,
                     captionConfig: config.modules.caption
                 )
+                return try await orchestrator.enrich(document)
             } else {
-                // No config provided and no orchestrator provided - skip enrichment
-                enriched = EnrichedDocument(base: document)
-                let docSubmitter = submitter ?? BatchDocumentSubmitter(gatewayClient: gatewayClient)
-                return try await docSubmitter.submit(enriched)
+                return EnrichedDocument(base: document)
             }
-            enriched = try await orchestrator.enrich(document)
+        }
+
+        let enriched: EnrichedDocument
+        if !skipEnrichment {
+            if let queue = enrichmentQueue {
+                if let queuedResult = await queue.enqueueAndWait(document: document, documentId: document.externalId) {
+                    enriched = queuedResult
+                } else {
+                    enriched = try await performDirectEnrichment()
+                }
+            } else {
+                enriched = try await performDirectEnrichment()
+            }
         } else {
             enriched = EnrichedDocument(base: document)
         }

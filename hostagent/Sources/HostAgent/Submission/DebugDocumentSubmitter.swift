@@ -43,7 +43,7 @@ public actor DebugDocumentSubmitter: DocumentSubmitter {
             } catch {
                 logger.error("Failed to convert document to payload", metadata: [
                     "source_type": document.base.sourceType,
-                    "source_id": document.base.sourceId,
+                    "source_id": document.base.externalId,
                     "error": error.localizedDescription
                 ])
                 // Continue with other documents even if one fails conversion
@@ -157,7 +157,7 @@ public actor DebugDocumentSubmitter: DocumentSubmitter {
         
         return EmailDocumentPayload(
             sourceType: base.sourceType,
-            sourceId: base.sourceId,
+            sourceId: base.externalId,
             title: base.title,
             canonicalUri: base.canonicalUri,
             content: content,
@@ -183,4 +183,3 @@ public actor DebugDocumentSubmitter: DocumentSubmitter {
         return captions
     }
 }
-

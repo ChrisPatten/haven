@@ -22,6 +22,7 @@ public actor EmailController: CollectorController {
         config: HavenConfig,
         serviceController: ServiceController,
         enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        enrichmentQueue: EnrichmentQueue? = nil,
         submitter: DocumentSubmitter? = nil,
         skipEnrichment: Bool = false
     ) async throws {
@@ -32,6 +33,7 @@ public actor EmailController: CollectorController {
         self.handler = EmailImapHandler(
             config: config,
             enrichmentOrchestrator: enrichmentOrchestrator,
+            enrichmentQueue: enrichmentQueue,
             submitter: submitter,
             skipEnrichment: skipEnrichment
         )

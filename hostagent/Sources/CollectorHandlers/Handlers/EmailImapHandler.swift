@@ -14,6 +14,7 @@ public actor EmailImapHandler {
     // Enrichment support
     private let enrichmentOrchestrator: EnrichmentOrchestrator?
     private let submitter: DocumentSubmitter?
+    private let enrichmentQueue: EnrichmentQueue?
     private let skipEnrichment: Bool
     
     // State tracking
@@ -64,6 +65,7 @@ public actor EmailImapHandler {
         emailService: EmailService? = nil,
         secretResolver: SecretResolving = KeychainSecretResolver(),
         enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        enrichmentQueue: EnrichmentQueue? = nil,
         submitter: DocumentSubmitter? = nil,
         skipEnrichment: Bool = false
     ) {
@@ -83,6 +85,7 @@ public actor EmailImapHandler {
         self.emailService = emailService ?? EmailService()
         self.baseSecretResolver = secretResolver
         self.enrichmentOrchestrator = enrichmentOrchestrator
+        self.enrichmentQueue = enrichmentQueue
         self.submitter = submitter
         self.skipEnrichment = skipEnrichment
         
@@ -546,6 +549,7 @@ public actor EmailImapHandler {
                                     let submissionResult = try await emailCollectorActor.collectAndSubmit(
                                         email: message,
                                         enrichmentOrchestrator: enrichmentOrchestrator,
+                                        enrichmentQueue: enrichmentQueue,
                                         submitter: submitter,
                                         skipEnrichment: skipEnrichment,
                                         config: config,
