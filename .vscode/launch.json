@@ -59,6 +59,24 @@
             "preLaunchTask": "swift: Build Release HavenUI (HavenUI)",
             "target": "HavenUI",
             "configuration": "release"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/hostagent",
+            "name": "Debug CaptionComparison (hostagent)",
+            "program": "${workspaceFolder:haven}/hostagent/.build/debug/CaptionComparison",
+            "preLaunchTask": "swift: Build Debug CaptionComparison (hostagent)"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/hostagent",
+            "name": "Release CaptionComparison (hostagent)",
+            "program": "${workspaceFolder:haven}/hostagent/.build/release/CaptionComparison",
+            "preLaunchTask": "swift: Build Release CaptionComparison (hostagent)"
         }
     ]
 }

@@ -184,6 +184,7 @@ public struct ModulesEnablementConfig: Codable, Equatable {
 
 /// Advanced module settings
 public struct AdvancedModuleSettings: Codable, Equatable {
+    public var enrichmentConcurrency: Int
     public var ocr: OCRModuleSettings
     public var entity: EntityModuleSettings
     public var face: FaceModuleSettings
@@ -192,7 +193,19 @@ public struct AdvancedModuleSettings: Codable, Equatable {
     public var localfs: LocalFSModuleSettings
     public var debug: DebugSettings
     
+    enum CodingKeys: String, CodingKey {
+        case enrichmentConcurrency = "enrichment_concurrency"
+        case ocr
+        case entity
+        case face
+        case caption
+        case fswatch
+        case localfs
+        case debug
+    }
+    
     public init(
+        enrichmentConcurrency: Int = 4,
         ocr: OCRModuleSettings = OCRModuleSettings(),
         entity: EntityModuleSettings = EntityModuleSettings(),
         face: FaceModuleSettings = FaceModuleSettings(),
@@ -201,6 +214,7 @@ public struct AdvancedModuleSettings: Codable, Equatable {
         localfs: LocalFSModuleSettings = LocalFSModuleSettings(),
         debug: DebugSettings = DebugSettings()
     ) {
+        self.enrichmentConcurrency = max(1, min(enrichmentConcurrency, 16)) // Clamp between 1 and 16
         self.ocr = ocr
         self.entity = entity
         self.face = face
@@ -286,24 +300,32 @@ public struct CaptionModuleSettings: Codable, Equatable {
     public var method: String
     public var timeoutMs: Int
     public var model: String?
+    public var openaiApiKey: String?
+    public var openaiModel: String?
     
     enum CodingKeys: String, CodingKey {
         case enabled
         case method
         case timeoutMs = "timeout_ms"
         case model
+        case openaiApiKey = "openai_api_key"
+        case openaiModel = "openai_model"
     }
     
     public init(
         enabled: Bool = true,
         method: String = "ollama",
         timeoutMs: Int = 60000,
-        model: String? = "llava:7b"
+        model: String? = "llava:7b",
+        openaiApiKey: String? = nil,
+        openaiModel: String? = nil
     ) {
         self.enabled = enabled
         self.method = method
         self.timeoutMs = timeoutMs
         self.model = model
+        self.openaiApiKey = openaiApiKey
+        self.openaiModel = openaiModel
     }
 }
 

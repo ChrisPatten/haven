@@ -1,0 +1,22 @@
+# Example configuration file for caption comparison tool
+# Place this file as "caption-config.yaml" in the directory with images to process
+
+ollama:
+  # Ollama API URL (default: http://localhost:11434/api/generate)
+  url: "http://localhost:11434/api/generate"
+  
+  # Vision model to use (default: llava:7b)
+  model: "llava:7b"
+  
+  # Timeout in milliseconds (default: 60000)
+  timeoutMs: 60000
+
+openai:
+  # OpenAI API key (required for OpenAI captioning)
+  # Can also be set via OPENAI_API_KEY environment variable
+  apiKey: "sk-..."
+  
+  # Model to use (default: gpt-4o)
+  # Can also be set via OPENAI_MODEL environment variable
+  model: "gpt-4o"
+

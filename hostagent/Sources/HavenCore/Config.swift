@@ -339,9 +339,9 @@ public struct FaceModuleConfig: Codable {
 
 public struct CaptionModuleConfig: Codable {
     public var enabled: Bool
-    public var method: String  // "ollama", "vision", etc.
+    public var method: String  // "ollama", "apple", "foundation", etc.
     public var timeoutMs: Int
-    public var model: String?  // Optional model name for captioning service
+    public var model: String?  // Optional model name for captioning service (only used for ollama)
     
     enum CodingKeys: String, CodingKey {
         case enabled

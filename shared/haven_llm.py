@@ -484,8 +484,10 @@ class OpenAIProvider(LLMProvider):
         if not model.startswith("gpt-5-nano"):
             payload["temperature"] = temperature
 
-        if self.settings.max_tokens:
-            payload["max_tokens"] = self.settings.max_tokens
+        # Note: Responses API doesn't support max_tokens parameter
+        # Response length is controlled by the model's default behavior
+        # if self.settings.max_tokens:
+        #     payload["max_tokens"] = self.settings.max_tokens
 
         # Allow kwargs to override
         payload.update(kwargs)

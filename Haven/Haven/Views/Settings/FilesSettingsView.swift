@@ -10,9 +10,7 @@ import AppKit
 
 /// Files settings view for managing LocalFS instances
 struct FilesSettingsView: View {
-    @Binding var config: FilesInstancesConfig?
-    var configManager: ConfigManager
-    @Binding var errorMessage: String?
+    @ObservedObject var viewModel: SettingsViewModel
     
     @State private var instances: [FilesInstance] = []
     @State private var selectedInstance: FilesInstance.ID?
@@ -106,11 +104,8 @@ struct FilesSettingsView: View {
                 )
             }
         }
-        .onAppear {
-            loadConfiguration()
-        }
-        .onChange(of: config) { newConfig in
-            loadConfiguration()
+        .task {
+            await loadConfiguration()
         }
         .onChange(of: selectedInstance) { _, newValue in
             // Only auto-open edit sheet if selected from table row click, not from pencil button
@@ -118,8 +113,8 @@ struct FilesSettingsView: View {
         }
     }
     
-    private func loadConfiguration() {
-        guard let config = config else {
+    private func loadConfiguration() async {
+        guard let config = viewModel.filesConfig else {
             instances = []
             return
         }
@@ -128,7 +123,9 @@ struct FilesSettingsView: View {
     }
     
     private func updateConfiguration() {
-        config = FilesInstancesConfig(instances: instances)
+        viewModel.updateFilesConfig { config in
+            config.instances = instances
+        }
     }
     
     private func removeSelectedInstance() {

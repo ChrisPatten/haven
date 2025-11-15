@@ -648,7 +648,7 @@ public actor IMessageHandler {
         // Initialize enrichment queue if enrichment is enabled
         var enrichmentQueue: EnrichmentQueue? = nil
         if !skipEnrichment, let orchestrator = enrichmentOrchestrator {
-            enrichmentQueue = EnrichmentQueue(orchestrator: orchestrator, maxConcurrentEnrichments: 3)
+            enrichmentQueue = EnrichmentQueue(orchestrator: orchestrator, maxConcurrentEnrichments: 1)
             self.enrichmentQueue = enrichmentQueue
         }
         

@@ -297,6 +297,7 @@ public actor ConfigManager {
                 reminders: true
             ),
             advanced: AdvancedModuleSettings(
+                enrichmentConcurrency: 4,
                 ocr: OCRModuleSettings(
                     languages: ["en"],
                     timeoutMs: 15000,

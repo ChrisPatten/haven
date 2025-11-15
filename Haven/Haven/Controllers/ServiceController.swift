@@ -91,6 +91,12 @@ public actor ServiceController {
         logger.info("Configuration cache cleared in ServiceController")
     }
     
+    /// Load SystemConfig using the same ConfigManager instance
+    /// This ensures cache consistency across the app
+    public func loadSystemConfig() async throws -> SystemConfig {
+        return try await configManager.loadSystemConfig()
+    }
+    
     // MARK: - Gateway Client
     
     /// Initialize gateway client

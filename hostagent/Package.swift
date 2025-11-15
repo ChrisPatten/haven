@@ -88,6 +88,11 @@ let package = Package(
             dependencies: ["HavenCore"],
             path: "Sources/Caption"
         ),
+        .executableTarget(
+            name: "CaptionComparison",
+            dependencies: ["Caption", "HavenCore", .product(name: "Yams", package: "Yams")],
+            path: "Sources/CaptionComparison"
+        ),
         .target(
             name: "Email",
             dependencies: ["HavenCore", "OCR", .product(name: "SwiftSoup", package: "SwiftSoup"), .product(name: "Demark", package: "Demark"), .product(name: "HTMLEntities", package: "swift-html-entities")],

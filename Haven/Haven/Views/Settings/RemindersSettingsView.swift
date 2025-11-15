@@ -10,11 +10,8 @@ import EventKit
 
 /// Reminders settings view
 struct RemindersSettingsView: View {
-    @Binding var config: RemindersInstanceConfig?
-    var configManager: ConfigManager
-    @Binding var errorMessage: String?
+    @ObservedObject var viewModel: SettingsViewModel
     
-    @State private var selectedCalendarIds: Set<String> = []
     @State private var availableCalendars: [EKCalendar] = []
     @State private var remindersPermissionGranted: Bool = false
     @State private var isLoadingCalendars: Bool = false
@@ -56,7 +53,7 @@ struct RemindersSettingsView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 
-                                List(availableCalendars, id: \.calendarIdentifier, selection: $selectedCalendarIds) { calendar in
+                                List(availableCalendars, id: \.calendarIdentifier, selection: selectedCalendarIdsBinding) { calendar in
                                     HStack {
                                         // Calendar color indicator
                                         Circle()
@@ -68,7 +65,7 @@ struct RemindersSettingsView: View {
                                         
                                         Spacer()
                                         
-                                        if selectedCalendarIds.contains(calendar.calendarIdentifier) {
+                                        if selectedCalendarIdsBinding.wrappedValue.contains(calendar.calendarIdentifier) {
                                             Image(systemName: "checkmark")
                                                 .foregroundStyle(.blue)
                                         }
@@ -78,15 +75,14 @@ struct RemindersSettingsView: View {
                                         toggleCalendar(calendar.calendarIdentifier)
                                     }
                                 }
-                                .listStyle(.inset)
-                                .frame(height: min(CGFloat(availableCalendars.count * 30), 300))
+                                .frame(height: 200)
                             }
                         }
                     }
                     .padding()
                 }
                 
-                if let error = errorMessage {
+                if let error = viewModel.errorMessage {
                     Text(error)
                         .foregroundColor(.red)
                         .padding()
@@ -94,59 +90,35 @@ struct RemindersSettingsView: View {
             }
             .padding()
         }
-        .onAppear {
-            loadConfiguration()
-            Task {
-                await checkRemindersPermission()
-                if remindersPermissionGranted {
-                    await loadCalendars()
-                }
-            }
-        }
-        .onChange(of: config) { newConfig in
-            loadConfiguration()
-        }
-        .onChange(of: selectedCalendarIds) { _, _ in updateConfiguration() }
-        .onChange(of: remindersPermissionGranted) { _, newValue in
-            if newValue {
-                Task {
-                    await loadCalendars()
-                }
-            }
+        .task {
+            await loadCalendars()
         }
     }
     
-    private func toggleCalendar(_ calendarId: String) {
-        if selectedCalendarIds.contains(calendarId) {
-            selectedCalendarIds.remove(calendarId)
+    // MARK: - Bindings
+    
+    private var selectedCalendarIdsBinding: Binding<Set<String>> {
+        Binding(
+            get: { Set(viewModel.remindersConfig?.selectedCalendarIds ?? []) },
+            set: { newValue in
+                viewModel.updateRemindersConfig { config in
+                    config.selectedCalendarIds = Array(newValue)
+                }
+            }
+        )
+    }
+    
+    // MARK: - Helpers
+    
+    private func toggleCalendar(_ id: String) {
+        var ids = Set(viewModel.remindersConfig?.selectedCalendarIds ?? [])
+        if ids.contains(id) {
+            ids.remove(id)
         } else {
-            selectedCalendarIds.insert(calendarId)
+            ids.insert(id)
         }
-    }
-    
-    private func loadConfiguration() {
-        guard let config = config else {
-            // Use defaults
-            return
-        }
-        
-        selectedCalendarIds = Set(config.selectedCalendarIds)
-    }
-    
-    private func updateConfiguration() {
-        config = RemindersInstanceConfig(selectedCalendarIds: Array(selectedCalendarIds))
-    }
-    
-    private func checkRemindersPermission() async {
-        let store = EKEventStore()
-        let status = EKEventStore.authorizationStatus(for: .reminder)
-        
-        await MainActor.run {
-            if #available(macOS 14.0, *) {
-                remindersPermissionGranted = status == .fullAccess
-            } else {
-                remindersPermissionGranted = status == .authorized
-            }
+        viewModel.updateRemindersConfig { config in
+            config.selectedCalendarIds = Array(ids)
         }
     }
     
@@ -154,11 +126,17 @@ struct RemindersSettingsView: View {
         isLoadingCalendars = true
         defer { isLoadingCalendars = false }
         
-        let store = EKEventStore()
-        let calendars = store.calendars(for: .reminder)
+        let eventStore = EKEventStore()
         
-        await MainActor.run {
-            availableCalendars = calendars.sorted { $0.title < $1.title }
+        do {
+            let calendarsAccess = try await eventStore.requestWriteOnlyAccessToEvents()
+            remindersPermissionGranted = calendarsAccess
+            
+            if calendarsAccess {
+                availableCalendars = eventStore.calendars(for: .reminder)
+            }
+        } catch {
+            remindersPermissionGranted = false
         }
     }
 }
@@ -192,17 +170,9 @@ struct RemindersPermissionBanner: View {
                     await requestRemindersPermission()
                 }
             }) {
-                Label("Request Access", systemImage: "lock.open")
+                Label("Request Access", systemImage: "hand.raised.fill")
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            
-            Button(action: {
-                openSystemSettings()
-            }) {
-                Label("Open Settings", systemImage: "arrow.right.circle.fill")
-            }
-            .buttonStyle(.bordered)
             .controlSize(.small)
         }
         .padding(.horizontal, 16)
@@ -214,120 +184,21 @@ struct RemindersPermissionBanner: View {
     
     @MainActor
     private func requestRemindersPermission() async {
-        let store = EKEventStore()
-        let status = EKEventStore.authorizationStatus(for: .reminder)
+        let eventStore = EKEventStore()
         
-        print("🔔 Reminders permission status: \(status.rawValue)")
-        
-        // Handle different authorization states
-        if #available(macOS 14.0, *) {
-            switch status {
-            case .fullAccess:
-                // Already authorized
-                print("🔔 Already has full access")
-                remindersPermissionGranted = true
+        do {
+            let access = try await eventStore.requestWriteOnlyAccessToEvents()
+            remindersPermissionGranted = access
+            
+            if access {
                 onPermissionGranted()
-                return
-                
-            case .notDetermined:
-                // Request permission - this will show the native dialog
-                print("🔔 Requesting full access to reminders...")
-                do {
-                    let granted = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
-                        print("🔔 Calling requestFullAccessToReminders...")
-                        store.requestFullAccessToReminders { granted, error in
-                            print("🔔 requestFullAccessToReminders callback: granted=\(granted), error=\(error?.localizedDescription ?? "none")")
-                            if let error = error {
-                                continuation.resume(throwing: error)
-                            } else {
-                                continuation.resume(returning: granted)
-                            }
-                        }
-                    }
-                    remindersPermissionGranted = granted
-                    
-                    // Re-check status after request to ensure it's updated
-                    let newStatus = EKEventStore.authorizationStatus(for: .reminder)
-                    remindersPermissionGranted = (newStatus == .fullAccess)
-                    
-                    if remindersPermissionGranted {
-                        onPermissionGranted()
-                    }
-                } catch {
-                    // If request fails, check if we need to open System Settings
-                    let currentStatus = EKEventStore.authorizationStatus(for: .reminder)
-                    if currentStatus == .denied || currentStatus == .restricted {
-                        openSystemSettings()
-                    }
-                    remindersPermissionGranted = false
-                }
-                
-            case .denied, .restricted:
-                // Permission was previously denied or restricted - must go to System Settings
-                openSystemSettings()
-                
-            @unknown default:
-                remindersPermissionGranted = false
             }
-        } else {
-            // Pre-macOS 14 handling
-            switch status {
-            case .authorized:
-                remindersPermissionGranted = true
-                onPermissionGranted()
-                return
-                
-            case .notDetermined:
-                do {
-                    let granted = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
-                        store.requestAccess(to: .reminder) { granted, error in
-                            if let error = error {
-                                continuation.resume(throwing: error)
-                            } else {
-                                continuation.resume(returning: granted)
-                            }
-                        }
-                    }
-                    remindersPermissionGranted = granted
-                    
-                    // Re-check status after request
-                    let newStatus = EKEventStore.authorizationStatus(for: .reminder)
-                    remindersPermissionGranted = (newStatus == .authorized)
-                    
-                    if remindersPermissionGranted {
-                        onPermissionGranted()
-                    }
-                } catch {
-                    let currentStatus = EKEventStore.authorizationStatus(for: .reminder)
-                    if currentStatus == .denied || currentStatus == .restricted {
-                        openSystemSettings()
-                    }
-                    remindersPermissionGranted = false
-                }
-                
-            case .denied, .restricted:
-                openSystemSettings()
-                
-            @unknown default:
-                remindersPermissionGranted = false
-            }
+        } catch {
+            remindersPermissionGranted = false
         }
-    }
-    
-    private func openSystemSettings() {
-        // Deep link to Reminders privacy settings pane
-        let urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders"
-        
-        guard let url = URL(string: urlString) else {
-            // Fallback: try to open System Settings app directly
-            if let settingsURL = URL(string: "x-apple.systempreferences:") {
-                NSWorkspace.shared.open(settingsURL)
-            }
-            return
-        }
-        
-        // Open the deep link to Reminders privacy settings
-        NSWorkspace.shared.open(url)
     }
 }
 
+#Preview {
+    RemindersSettingsView(viewModel: SettingsViewModel(configManager: ConfigManager()))
+}

@@ -67,6 +67,11 @@ public struct HavenFilePaths {
         cacheDirectory.appendingPathComponent("remote_mail", isDirectory: true)
     }
     
+    /// Caption cache directory: ~/Library/Caches/Haven/caption_cache
+    public static var captionCacheDirectory: URL {
+        cacheDirectory.appendingPathComponent("caption_cache", isDirectory: true)
+    }
+    
     // MARK: - Backup Files
     
     /// Backups directory: ~/Library/Application Support/Haven/Backups
@@ -112,6 +117,7 @@ public struct HavenFilePaths {
             stateDirectory,
             cacheDirectory,
             remoteMailCacheDirectory,
+            captionCacheDirectory,
             backupsDirectory,
             chatBackupDirectory,
             logsDirectory,

@@ -12,9 +12,7 @@ import IMAP
 
 /// Email settings view for managing IMAP account instances
 struct EmailSettingsView: View {
-    @Binding var config: EmailInstancesConfig?
-    var configManager: ConfigManager
-    @Binding var errorMessage: String?
+    @ObservedObject var viewModel: SettingsViewModel
     
     @State private var instances: [EmailInstance] = []
     @State private var selectedInstance: EmailInstance.ID?
@@ -94,7 +92,7 @@ struct EmailSettingsView: View {
                     instances.append(instance)
                     updateConfiguration()
                 },
-                configManager: configManager
+                configManager: viewModel.configManager
             )
         }
         .sheet(isPresented: $showingEditSheet) {
@@ -108,15 +106,12 @@ struct EmailSettingsView: View {
                             updateConfiguration()
                         }
                     },
-                    configManager: configManager
+                    configManager: viewModel.configManager
                 )
             }
         }
-        .onAppear {
-            loadConfiguration()
-        }
-        .onChange(of: config) { newConfig in
-            loadConfiguration()
+        .task {
+            await loadConfiguration()
         }
         .onChange(of: selectedInstance) { _, newValue in
             // Only auto-open edit sheet if selected from table row click, not from pencil button
@@ -124,8 +119,8 @@ struct EmailSettingsView: View {
         }
     }
     
-    private func loadConfiguration() {
-        guard let config = config else {
+    private func loadConfiguration() async {
+        guard let config = viewModel.emailConfig else {
             instances = []
             return
         }
@@ -134,10 +129,9 @@ struct EmailSettingsView: View {
     }
     
     private func updateConfiguration() {
-        config = EmailInstancesConfig(
-            instances: instances,
-            moduleRedactPii: config?.moduleRedactPii
-        )
+        viewModel.updateEmailConfig { config in
+            config.instances = instances
+        }
     }
     
     private func removeSelectedInstance() {
@@ -152,7 +146,7 @@ struct EmailSettingsView: View {
 struct EmailInstanceEditSheet: View {
     let instance: EmailInstance?
     let onSave: (EmailInstance) -> Void
-    var configManager: ConfigManager
+    let configManager: ConfigManager
     
     @Environment(\.dismiss) private var dismiss
     

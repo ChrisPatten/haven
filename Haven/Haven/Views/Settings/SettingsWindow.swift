@@ -12,18 +12,8 @@ import Combine
 
 /// Main Settings window with sidebar navigation
 struct SettingsWindow: View {
-    @StateObject private var configManagerWrapper = ConfigManagerWrapper()
+    @StateObject private var viewModel = SettingsViewModel(configManager: ConfigManager())
     @State private var selectedSection: SettingsSection = .general
-    @State private var systemConfig: SystemConfig?
-    @State private var emailConfig: EmailInstancesConfig?
-    @State private var filesConfig: FilesInstancesConfig?
-    @State private var icloudDriveConfig: ICloudDriveInstancesConfig?
-    @State private var contactsConfig: ContactsInstancesConfig?
-    @State private var imessageConfig: IMessageInstanceConfig?
-    @State private var remindersConfig: RemindersInstanceConfig?
-    @State private var schedulesConfig: CollectorSchedulesConfig?
-    @State private var isLoading = false
-    @State private var errorMessage: String?
     
     enum SettingsSection: String, CaseIterable, Identifiable {
         case general = "General"
@@ -73,77 +63,49 @@ struct SettingsWindow: View {
             Group {
                 switch selectedSection {
                 case .general:
-                    GeneralSettingsView(
-                        config: $systemConfig,
-                        configManager: configManagerWrapper.configManager,
-                        errorMessage: $errorMessage
-                    )
+                    GeneralSettingsView(viewModel: viewModel)
                 case .imessage:
-                    IMessageSettingsView(
-                        config: $imessageConfig,
-                        configManager: configManagerWrapper.configManager,
-                        errorMessage: $errorMessage
-                    )
+                    IMessageSettingsView(viewModel: viewModel)
                 case .reminders:
-                    RemindersSettingsView(
-                        config: $remindersConfig,
-                        configManager: configManagerWrapper.configManager,
-                        errorMessage: $errorMessage
-                    )
+                    RemindersSettingsView(viewModel: viewModel)
                 case .email:
-                    EmailSettingsView(
-                        config: $emailConfig,
-                        configManager: configManagerWrapper.configManager,
-                        errorMessage: $errorMessage
-                    )
+                    EmailSettingsView(viewModel: viewModel)
                 case .files:
-                    FilesSettingsView(
-                        config: $filesConfig,
-                        configManager: configManagerWrapper.configManager,
-                        errorMessage: $errorMessage
-                    )
+                    FilesSettingsView(viewModel: viewModel)
                 case .icloudDrive:
-                    ICloudDriveSettingsView(
-                        config: $icloudDriveConfig,
-                        configManager: configManagerWrapper.configManager,
-                        errorMessage: $errorMessage
-                    )
+                    ICloudDriveSettingsView(viewModel: viewModel)
                 case .contacts:
-                    ContactsSettingsView(
-                        config: $contactsConfig,
-                        configManager: configManagerWrapper.configManager,
-                        errorMessage: $errorMessage
-                    )
+                    ContactsSettingsView(viewModel: viewModel)
                 case .schedules:
-                    SchedulesSettingsView(
-                        config: $schedulesConfig,
-                        configManager: configManagerWrapper.configManager,
-                        errorMessage: $errorMessage
-                    )
+                    SchedulesSettingsView(viewModel: viewModel)
                 case .enrichment:
-                    EnrichmentSettingsView(errorMessage: $errorMessage)
+                    EnrichmentSettingsView(errorMessage: .constant(viewModel.errorMessage))
                 case .advanced:
-                    AdvancedSettingsView(
-                        systemConfig: $systemConfig,
-                        configManager: configManagerWrapper.configManager,
-                        errorMessage: $errorMessage
-                    )
+                    AdvancedSettingsView(viewModel: viewModel)
                 case .dataManagement:
-                    DataManagementSettingsView(errorMessage: $errorMessage)
+                    DataManagementSettingsView(errorMessage: .constant(viewModel.errorMessage))
                 }
             }
             .frame(minWidth: 600, minHeight: 400)
         }
         .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button("Save") {
-                    saveAllConfigurations()
+            ToolbarItem(placement: .primaryAction) {
+                HStack(spacing: 12) {
+                    if viewModel.isLoading || viewModel.isSaving {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                    }
+                    Button("Save") {
+                        Task {
+                            await viewModel.saveAllConfigurations()
+                        }
+                    }
+                    .disabled(viewModel.isLoading || viewModel.isSaving)
                 }
-                .disabled(isLoading)
             }
         }
         .task {
-            await loadAllConfigurations()
+            await viewModel.loadAllConfigurations()
         }
         .onReceive(NotificationCenter.default.publisher(for: .openSettingsToSection)) { notification in
             if let section = notification.object as? SettingsSection {
@@ -151,140 +113,8 @@ struct SettingsWindow: View {
             }
         }
     }
-    
-    @ViewBuilder
-    private func detailView(for section: SettingsSection) -> some View {
-        let manager = configManagerWrapper.configManager
-        switch section {
-        case .general:
-            GeneralSettingsView(
-                config: $systemConfig,
-                configManager: manager,
-                errorMessage: $errorMessage
-            )
-        case .imessage:
-            IMessageSettingsView(
-                config: $imessageConfig,
-                configManager: manager,
-                errorMessage: $errorMessage
-            )
-        case .reminders:
-            RemindersSettingsView(
-                config: $remindersConfig,
-                configManager: manager,
-                errorMessage: $errorMessage
-            )
-        case .email:
-            EmailSettingsView(
-                config: $emailConfig,
-                configManager: manager,
-                errorMessage: $errorMessage
-            )
-        case .files:
-            FilesSettingsView(
-                config: $filesConfig,
-                configManager: manager,
-                errorMessage: $errorMessage
-            )
-        case .icloudDrive:
-            ICloudDriveSettingsView(
-                config: $icloudDriveConfig,
-                configManager: manager,
-                errorMessage: $errorMessage
-            )
-        case .contacts:
-            ContactsSettingsView(
-                config: $contactsConfig,
-                configManager: manager,
-                errorMessage: $errorMessage
-            )
-        case .schedules:
-            SchedulesSettingsView(
-                config: $schedulesConfig,
-                configManager: manager,
-                errorMessage: $errorMessage
-            )
-        case .enrichment:
-            EnrichmentSettingsView(errorMessage: $errorMessage)
-        case .advanced:
-            AdvancedSettingsView(
-                systemConfig: $systemConfig,
-                configManager: manager,
-                errorMessage: $errorMessage
-            )
-        case .dataManagement:
-            DataManagementSettingsView(errorMessage: $errorMessage)
-        }
-    }
-    
-    private func loadAllConfigurations() async {
-        isLoading = true
-        defer { isLoading = false }
-        
-        do {
-            systemConfig = try await configManagerWrapper.configManager.loadSystemConfig()
-            emailConfig = try await configManagerWrapper.configManager.loadEmailConfig()
-            filesConfig = try await configManagerWrapper.configManager.loadFilesConfig()
-            icloudDriveConfig = try await configManagerWrapper.configManager.loadICloudDriveConfig()
-            contactsConfig = try await configManagerWrapper.configManager.loadContactsConfig()
-            imessageConfig = try await configManagerWrapper.configManager.loadIMessageConfig()
-            remindersConfig = try await configManagerWrapper.configManager.loadRemindersConfig()
-            schedulesConfig = try await configManagerWrapper.configManager.loadSchedulesConfig()
-            errorMessage = nil
-        } catch {
-            errorMessage = "Failed to load configuration: \(error.localizedDescription)"
-        }
-    }
-    
-    private func saveAllConfigurations() {
-        Task {
-            isLoading = true
-            defer { isLoading = false }
-            
-            do {
-                if let systemConfig = systemConfig {
-                    try await configManagerWrapper.configManager.saveSystemConfig(systemConfig)
-                }
-                if let emailConfig = emailConfig {
-                    try await configManagerWrapper.configManager.saveEmailConfig(emailConfig)
-                }
-                if let filesConfig = filesConfig {
-                    try await configManagerWrapper.configManager.saveFilesConfig(filesConfig)
-                }
-                if let icloudDriveConfig = icloudDriveConfig {
-                    try await configManagerWrapper.configManager.saveICloudDriveConfig(icloudDriveConfig)
-                }
-                if let contactsConfig = contactsConfig {
-                    try await configManagerWrapper.configManager.saveContactsConfig(contactsConfig)
-                }
-                if let imessageConfig = imessageConfig {
-                    try await configManagerWrapper.configManager.saveIMessageConfig(imessageConfig)
-                }
-                if let remindersConfig = remindersConfig {
-                    try await configManagerWrapper.configManager.saveRemindersConfig(remindersConfig)
-                }
-                if let schedulesConfig = schedulesConfig {
-                    try await configManagerWrapper.configManager.saveSchedulesConfig(schedulesConfig)
-                }
-                errorMessage = nil
-                
-                // Post notification that config was saved
-                // This triggers HostAgentController to clear its config cache
-                // and CollectorsView to refresh
-                NotificationCenter.default.post(name: .settingsConfigSaved, object: nil)
-            } catch {
-                errorMessage = "Failed to save configuration: \(error.localizedDescription)"
-            }
-        }
-    }
-}
-
-/// ObservableObject wrapper for ConfigManager actor
-final class ConfigManagerWrapper: ObservableObject {
-    nonisolated let configManager = ConfigManager()
 }
 
 #Preview {
     SettingsWindow()
 }
-

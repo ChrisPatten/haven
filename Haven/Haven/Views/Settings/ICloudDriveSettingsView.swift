@@ -10,9 +10,7 @@ import AppKit
 
 /// iCloud Drive settings view for managing iCloud Drive instances
 struct ICloudDriveSettingsView: View {
-    @Binding var config: ICloudDriveInstancesConfig?
-    var configManager: ConfigManager
-    @Binding var errorMessage: String?
+    @ObservedObject var viewModel: SettingsViewModel
     
     @State private var instances: [ICloudDriveInstance] = []
     @State private var selectedInstance: ICloudDriveInstance.ID?
@@ -106,16 +104,13 @@ struct ICloudDriveSettingsView: View {
                 )
             }
         }
-        .onAppear {
-            loadConfiguration()
-        }
-        .onChange(of: config) { newConfig in
-            loadConfiguration()
+        .task {
+            await loadConfiguration()
         }
     }
     
-    private func loadConfiguration() {
-        guard let config = config else {
+    private func loadConfiguration() async {
+        guard let config = viewModel.icloudDriveConfig else {
             instances = []
             return
         }
@@ -124,7 +119,9 @@ struct ICloudDriveSettingsView: View {
     }
     
     private func updateConfiguration() {
-        config = ICloudDriveInstancesConfig(instances: instances)
+        viewModel.updateICloudDriveConfig { config in
+            config.instances = instances
+        }
     }
     
     private func removeSelectedInstance() {

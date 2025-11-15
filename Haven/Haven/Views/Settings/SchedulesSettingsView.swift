@@ -9,9 +9,7 @@ import SwiftUI
 
 /// Schedules settings view for managing automated collector runs
 struct SchedulesSettingsView: View {
-    @Binding var config: CollectorSchedulesConfig?
-    var configManager: ConfigManager
-    @Binding var errorMessage: String?
+    @ObservedObject var viewModel: SettingsViewModel
     
     @State private var schedules: [CollectorSchedule] = []
     @State private var selectedSchedule: CollectorSchedule.ID?
@@ -114,11 +112,8 @@ struct SchedulesSettingsView: View {
                 )
             }
         }
-        .onAppear {
-            loadConfiguration()
-        }
-        .onChange(of: config) { newConfig in
-            loadConfiguration()
+        .task {
+            await loadConfiguration()
         }
         .onChange(of: selectedSchedule) { _, newValue in
             // Only auto-open edit sheet if selected from table row click, not from pencil button
@@ -126,8 +121,8 @@ struct SchedulesSettingsView: View {
         }
     }
     
-    private func loadConfiguration() {
-        guard let config = config else {
+    private func loadConfiguration() async {
+        guard let config = viewModel.schedulesConfig else {
             schedules = []
             return
         }
@@ -136,7 +131,9 @@ struct SchedulesSettingsView: View {
     }
     
     private func updateConfiguration() {
-        config = CollectorSchedulesConfig(schedules: schedules)
+        viewModel.updateSchedulesConfig { config in
+            config.schedules = schedules
+        }
     }
     
     private func removeSelectedSchedule() {

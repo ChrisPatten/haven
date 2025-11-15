@@ -117,7 +117,13 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
             "text": base.content,
             "metadata": [:]
         ]
-        let mergedDoc = EnrichmentMerger.mergeEnrichmentIntoDocument(documentDict, document, imageAttachments: nil)
+        
+        // Extract image attachments from base.images for EnrichmentMerger
+        let imageAttachments = base.images.map { image in
+            ["filename": image.filename ?? "image"] as [String: Any]
+        }
+        
+        let mergedDoc = EnrichmentMerger.mergeEnrichmentIntoDocument(documentDict, document, imageAttachments: imageAttachments.isEmpty ? nil : imageAttachments)
         let mergedContent = mergedDoc["text"] as? String ?? base.content
         let mergedMetadataDict = mergedDoc["metadata"] as? [String: Any] ?? [:]
         

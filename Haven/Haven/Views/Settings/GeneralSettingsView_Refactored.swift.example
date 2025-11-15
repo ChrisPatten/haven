@@ -1,15 +1,16 @@
 //
-//  GeneralSettingsView.swift
+//  GeneralSettingsView_Refactored.swift.example
 //  Haven
 //
-//  General/system settings view
-//  Service, gateway, and logging configuration
+//  EXAMPLE: Refactored GeneralSettingsView using SettingsViewModel
+//  This eliminates race conditions by using a single source of truth
 //
 
 import SwiftUI
 
-/// General settings view for system-level configuration
-struct GeneralSettingsView: View {
+/// Refactored GeneralSettingsView using ViewModel pattern
+/// NO race conditions - direct binding to ViewModel's @Published properties
+struct GeneralSettingsView_Refactored: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var showAuthSecret: Bool = false
     
@@ -28,7 +29,11 @@ struct GeneralSettingsView: View {
             }
             .padding()
         }
+        // NO .onAppear, NO .onChange, NO .task(id:) needed!
+        // ViewModel handles all state management
     }
+    
+    // MARK: - Gateway Configuration
     
     @ViewBuilder
     private var gatewayConfigurationSection: some View {
@@ -56,14 +61,6 @@ struct GeneralSettingsView: View {
                 }
                 
                 HStack {
-                    Text("Timeout (ms):")
-                        .frame(width: 120, alignment: .trailing)
-                    TextField("", value: gatewayTimeoutMsBinding, format: .number)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 80)
-                }
-                
-                HStack {
                     Text("Auth Header:")
                         .frame(width: 120, alignment: .trailing)
                     TextField("", text: authHeaderBinding)
@@ -88,6 +85,8 @@ struct GeneralSettingsView: View {
             .padding()
         }
     }
+    
+    // MARK: - Logging Configuration
     
     @ViewBuilder
     private var loggingConfigurationSection: some View {
@@ -135,6 +134,8 @@ struct GeneralSettingsView: View {
         }
     }
     
+    // MARK: - Self Identifier
+    
     @ViewBuilder
     private var selfIdentifierSection: some View {
         GroupBox("Self Identification") {
@@ -154,7 +155,10 @@ struct GeneralSettingsView: View {
         }
     }
     
-    // MARK: - Bindings
+    // MARK: - Bindings (Direct to ViewModel)
+    
+    // These bindings directly update the ViewModel's config
+    // No manual syncing needed - SwiftUI handles it automatically
     
     private var gatewayBaseUrlBinding: Binding<String> {
         Binding(
@@ -184,17 +188,6 @@ struct GeneralSettingsView: View {
             set: { newValue in
                 viewModel.updateSystemConfig { config in
                     config.gateway.ingestFilePath = newValue
-                }
-            }
-        )
-    }
-    
-    private var gatewayTimeoutMsBinding: Binding<Int> {
-        Binding(
-            get: { viewModel.systemConfig?.gateway.timeoutMs ?? 30000 },
-            set: { newValue in
-                viewModel.updateSystemConfig { config in
-                    config.gateway.timeoutMs = newValue
                 }
             }
         )
@@ -278,6 +271,3 @@ struct GeneralSettingsView: View {
     }
 }
 
-#Preview {
-    GeneralSettingsView(viewModel: SettingsViewModel(configManager: ConfigManager()))
-}

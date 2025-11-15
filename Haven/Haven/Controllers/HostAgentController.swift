@@ -15,6 +15,7 @@ import OCR
 import Entity
 import Face
 import Caption
+import Network
 
 /// Main orchestration controller for HostAgent
 @MainActor
@@ -23,6 +24,7 @@ public class HostAgentController: ObservableObject {
     private var statusController: StatusController?
     private var collectors: [String: any CollectorController] = [:]
     private var config: HavenConfig?
+    private var systemConfig: SystemConfig?
     private var isRunning: Bool = false
     private let logger = HavenLogger(category: "hostagent-controller")
     private let jobManager: JobManager
@@ -52,6 +54,45 @@ public class HostAgentController: ObservableObject {
         Task {
             await serviceController.clearConfigCache()
             logger.info("Configuration cache cleared after settings save")
+            
+            // Clear collectors cache so they're recreated with new settings on next use
+            // This is important for caption settings that affect enrichment orchestrators
+            collectors.removeAll()
+            logger.info("Collectors cache cleared - will be recreated with new settings on next use")
+            
+            // Reload configs if HostAgent is running so it picks up new settings
+            // This is important for settings like OpenAI API key that are used at runtime
+            if isRunning {
+                do {
+                    // Capture old config before updating
+                    let oldSystemConfig = self.systemConfig
+                    
+                    // Reload both HavenConfig and SystemConfig
+                    let newConfig = try await serviceController.loadConfig()
+                    let newSystemConfig = try await serviceController.loadSystemConfig()
+                    self.config = newConfig
+                    self.systemConfig = newSystemConfig
+                    
+                    // Log API key status for debugging
+                    let apiKeyStatus: String
+                    if let key = newSystemConfig.advanced.caption.openaiApiKey, !key.isEmpty {
+                        apiKeyStatus = "configured (length: \(key.count))"
+                    } else {
+                        apiKeyStatus = "NOT CONFIGURED"
+                    }
+                    
+                    logger.info("Configuration reloaded after settings save", metadata: [
+                        "caption_method": newSystemConfig.advanced.caption.method,
+                        "caption_enabled": String(newSystemConfig.advanced.caption.enabled),
+                        "openai_api_key": apiKeyStatus
+                    ])
+                    
+                } catch {
+                    logger.error("Failed to reload SystemConfig after settings save", metadata: [
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
         }
     }
     
@@ -72,6 +113,11 @@ public class HostAgentController: ObservableObject {
             // Load configuration
             let config = try await serviceController.loadConfig()
             self.config = config
+            
+            // Load SystemConfig for web server configuration using the same ConfigManager instance
+            // This ensures cache consistency and that we get the same config that was used for HavenConfig
+            let systemConfig = try await serviceController.loadSystemConfig()
+            self.systemConfig = systemConfig
             
             // Initialize services
             try await serviceController.initializeServices()
@@ -129,7 +175,11 @@ public class HostAgentController: ObservableObject {
     /// Ensure a specific collector is initialized (lazy initialization)
     private func ensureCollectorInitialized(id: String) async throws {
         // Always reload config to pick up any changes from settings
-            config = try await serviceController.loadConfig()
+        config = try await serviceController.loadConfig()
+        
+        // Also reload systemConfig to ensure we have the latest settings (like OpenAI API key)
+        let loadedSystemConfig = try await serviceController.loadSystemConfig()
+        systemConfig = loadedSystemConfig
         
         guard let config = config else {
             throw HostAgentError.collectorErrors(["Failed to load configuration"])
@@ -250,6 +300,10 @@ public class HostAgentController: ObservableObject {
         if config == nil {
             config = try await serviceController.loadConfig()
         }
+        
+        // Always reload systemConfig to ensure we have the latest settings (like OpenAI API key)
+        let loadedSystemConfig = try await serviceController.loadSystemConfig()
+        systemConfig = loadedSystemConfig
         
         guard let config = config else {
             throw HostAgentError.collectorErrors(["Failed to load configuration"])
@@ -453,25 +507,43 @@ public class HostAgentController: ObservableObject {
         ) : nil
         
         // Create caption service only if enabled
+        let openaiApiKey = systemConfig?.advanced.caption.openaiApiKey
+        let openaiModel = systemConfig?.advanced.caption.openaiModel
         let captionService = config.modules.caption.enabled ? CaptionService(
             method: config.modules.caption.method,
             timeoutMs: config.modules.caption.timeoutMs,
-            model: config.modules.caption.model
+            model: config.modules.caption.model,
+            openaiApiKey: openaiApiKey,
+            openaiModel: openaiModel
         ) : nil
         
         // Only log caption configuration if enabled (to avoid noise when disabled)
         if config.modules.caption.enabled {
+            let apiKeyStatus: String
+            if config.modules.caption.method == "openai" {
+                if let key = openaiApiKey, !key.isEmpty {
+                    apiKeyStatus = "configured (length: \(key.count))"
+                } else {
+                    apiKeyStatus = "NOT CONFIGURED"
+                }
+            } else {
+                apiKeyStatus = "not needed (method: \(config.modules.caption.method))"
+            }
+            
             logger.info("Caption configuration", metadata: [
                 "enabled": String(config.modules.caption.enabled),
                 "method": config.modules.caption.method,
                 "timeout_ms": String(config.modules.caption.timeoutMs),
-                "model": config.modules.caption.model ?? "nil"
+                "model": config.modules.caption.model ?? "nil",
+                "openai_api_key": apiKeyStatus,
+                "system_config_loaded": systemConfig != nil ? "yes" : "no"
             ])
             if captionService != nil {
                 logger.info("CaptionService created successfully")
             }
         }
         
+        let enrichmentConcurrency = systemConfig?.advanced.enrichmentConcurrency ?? 4
         return DocumentEnrichmentOrchestrator(
             ocrService: ocrService,
             faceService: faceService,
@@ -480,7 +552,8 @@ public class HostAgentController: ObservableObject {
             ocrConfig: config.modules.ocr,
             faceConfig: config.modules.face,
             entityConfig: config.modules.entity,
-            captionConfig: config.modules.caption
+            captionConfig: config.modules.caption,
+            concurrency: enrichmentConcurrency
         )
     }
     

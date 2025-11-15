@@ -5,6 +5,37 @@ import Entity
 import Caption
 import HavenCore
 
+// Simple semaphore implementation for concurrency control
+private actor AsyncSemaphore {
+    private let maximum: Int
+    private var current: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    
+    init(value: Int) {
+        self.maximum = max(1, value)
+        self.current = value
+    }
+    
+    func wait() async {
+        if current > 0 {
+            current -= 1
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+    
+    func signal() {
+        if !waiters.isEmpty {
+            let continuation = waiters.removeFirst()
+            continuation.resume()
+        } else {
+            current = min(current + 1, maximum)
+        }
+    }
+}
+
 /// Protocol for enrichment orchestrator
 public protocol EnrichmentOrchestrator: Sendable {
     /// Enrich a document using available services
@@ -36,6 +67,7 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
     private let faceConfig: FaceModuleConfig
     private let entityConfig: EntityModuleConfig
     private let captionConfig: CaptionModuleConfig
+    private let concurrency: Int
     private let logger = HavenLogger(category: "enrichment-orchestrator")
     
     public init(
@@ -46,7 +78,8 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
         ocrConfig: OCRModuleConfig,
         faceConfig: FaceModuleConfig,
         entityConfig: EntityModuleConfig,
-        captionConfig: CaptionModuleConfig
+        captionConfig: CaptionModuleConfig,
+        concurrency: Int = 4
     ) {
         self.ocrService = ocrService
         self.faceService = faceService
@@ -56,89 +89,58 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
         self.faceConfig = faceConfig
         self.entityConfig = entityConfig
         self.captionConfig = captionConfig
+        self.concurrency = max(1, min(concurrency, 16)) // Clamp between 1 and 16
     }
     
     public func enrich(_ document: CollectorDocument) async throws -> EnrichedDocument {
         let enrichmentStartTime = Date()
         
-        // Enrich each image attachment independently
+        // Enrich each image attachment independently with controlled concurrency
         var imageEnrichments: [ImageEnrichment] = []
-        for image in document.images {
-            // Build enrichment values incrementally
-            var ocrResult: OCRResult? = nil
-            var faceResult: FaceDetectionResult? = nil
-            var captionText: String? = nil
+        
+        // Process images with controlled concurrency using TaskGroup
+        // Extract configs and services to avoid actor isolation issues
+        let ocrSvc = ocrService
+        let faceSvc = faceService
+        let captionSvc = captionService
+        let ocrCfg = ocrConfig
+        let faceCfg = faceConfig
+        let captionCfg = captionConfig
+        
+        await withTaskGroup(of: ImageEnrichment?.self) { group in
+            // Create a semaphore to limit concurrent operations
+            let semaphore = AsyncSemaphore(value: concurrency)
             
-            // OCR for this image (using existing OCRService)
-            if ocrConfig.enabled, let ocrService = ocrService {
-                do {
-                    ocrResult = try await performOCR(image: image, ocrService: ocrService, config: ocrConfig)
-                } catch {
-                    logger.warning("OCR enrichment failed for image", metadata: [
-                        "image_hash": image.hash,
-                        "error": error.localizedDescription
-                    ])
-                }
-            }
-            
-            // Face detection for this image (using existing FaceService)
-            if faceConfig.enabled, let faceService = faceService {
-                do {
-                    faceResult = try await performFaceDetection(image: image, faceService: faceService, config: faceConfig)
-                } catch {
-                    logger.warning("Face detection enrichment failed for image", metadata: [
-                        "image_hash": image.hash,
-                        "error": error.localizedDescription
-                    ])
-                }
-            }
-            
-            // Captioning for this image (using CaptionService - not email-specific)
-            // Note: Caption data is NOT enriched further (no NER on captions)
-            // Pass OCR text if available to improve caption quality
-            // Only proceed if captioning is enabled AND service is available
-            // Skip silently if disabled (no logging per image to avoid noise)
-            if captionConfig.enabled, let captionService = captionService {
-                do {
-                    let ocrTextForCaption = ocrResult?.ocrText
-                    logger.debug("Attempting to generate caption for image", metadata: [
-                        "image_hash": image.hash,
-                        "has_ocr_text": ocrTextForCaption != nil && !ocrTextForCaption!.isEmpty
-                    ])
-                    captionText = try await performCaptioning(image: image, captionService: captionService, ocrText: ocrTextForCaption)
-                    if let caption = captionText {
-                        logger.info("Caption generated successfully", metadata: [
-                            "image_hash": image.hash,
-                            "caption_length": String(caption.count),
-                            "caption_preview": String(caption.prefix(50))
-                        ])
-                    } else {
-                        logger.warning("Caption generation returned nil", metadata: [
-                            "image_hash": image.hash
-                        ])
+            for image in document.images {
+                group.addTask {
+                    await semaphore.wait()
+                    defer { 
+                        Task { await semaphore.signal() }
                     }
-                } catch {
-                    logger.warning("Caption enrichment failed for image", metadata: [
-                        "image_hash": image.hash,
-                        "error": error.localizedDescription
-                    ])
+                    
+                    // Call non-isolated enrichment function to allow true parallelism
+                    return await Self.enrichImageNonIsolated(
+                        image: image,
+                        enrichmentStartTime: enrichmentStartTime,
+                        sourceType: document.sourceType,
+                        sourceId: document.sourceId,
+                        ocrService: ocrSvc,
+                        faceService: faceSvc,
+                        captionService: captionSvc,
+                        ocrConfig: ocrCfg,
+                        faceConfig: faceCfg,
+                        captionConfig: captionCfg,
+                        logger: logger
+                    )
                 }
-            } else if captionConfig.enabled {
-                // Config says enabled but service is nil - this shouldn't happen
-                logger.warning("Caption config enabled but CaptionService is nil", metadata: [
-                    "image_hash": image.hash
-                ])
             }
             
-            // Create ImageEnrichment with all enrichment results
-            let imageEnrichment = ImageEnrichment(
-                ocr: ocrResult,
-                faces: faceResult,
-                caption: captionText,
-                enrichmentTimestamp: enrichmentStartTime
-            )
-            
-            imageEnrichments.append(imageEnrichment)
+            // Collect results
+            for await result in group {
+                if let enrichment = result {
+                    imageEnrichments.append(enrichment)
+                }
+            }
         }
         
         // Enrich primary document text content
@@ -177,13 +179,103 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
         )
     }
     
-    private func performOCR(
+    // Non-isolated static function to allow true parallel execution
+    // This avoids actor isolation serialization issues
+    nonisolated private static func enrichImageNonIsolated(
+        image: ImageAttachment,
+        enrichmentStartTime: Date,
+        sourceType: String,
+        sourceId: String,
+        ocrService: OCRService?,
+        faceService: FaceService?,
+        captionService: CaptionService?,
+        ocrConfig: OCRModuleConfig,
+        faceConfig: FaceModuleConfig,
+        captionConfig: CaptionModuleConfig,
+        logger: HavenLogger
+    ) async -> ImageEnrichment? {
+        // Build enrichment values incrementally
+        var ocrResult: OCRResult? = nil
+        var faceResult: FaceDetectionResult? = nil
+        var captionText: String? = nil
+        
+        // OCR for this image (using existing OCRService)
+        if ocrConfig.enabled, let ocrService = ocrService {
+            do {
+                ocrResult = try await performOCRNonIsolated(image: image, ocrService: ocrService, config: ocrConfig)
+            } catch {
+                logger.warning("OCR enrichment failed for image", metadata: [
+                    "image_hash": image.hash,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
+        
+        // Face detection for this image (using existing FaceService)
+        if faceConfig.enabled, let faceService = faceService {
+            do {
+                faceResult = try await performFaceDetectionNonIsolated(image: image, faceService: faceService, config: faceConfig)
+            } catch {
+                logger.warning("Face detection enrichment failed for image", metadata: [
+                    "image_hash": image.hash,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
+        
+        // Captioning for this image (using CaptionService - not email-specific)
+        // Note: Caption data is NOT enriched further (no NER on captions)
+        // Pass OCR text if available to improve caption quality
+        // Only proceed if captioning is enabled AND service is available
+        // Skip silently if disabled (no logging per image to avoid noise)
+        if captionConfig.enabled, let captionService = captionService {
+            do {
+                let ocrTextForCaption = ocrResult?.ocrText
+                logger.debug("Attempting to generate caption for image", metadata: [
+                    "image_hash": image.hash,
+                    "has_ocr_text": ocrTextForCaption != nil && !ocrTextForCaption!.isEmpty
+                ])
+                captionText = try await performCaptioningNonIsolated(image: image, captionService: captionService, ocrText: ocrTextForCaption)
+                if let caption = captionText {
+                    logger.info("Caption generated successfully", metadata: [
+                        "image_hash": image.hash,
+                        "caption_length": String(caption.count),
+                        "caption_preview": String(caption.prefix(50))
+                    ])
+                } else {
+                    logger.warning("Caption generation returned nil", metadata: [
+                        "image_hash": image.hash
+                    ])
+                }
+            } catch {
+                logger.warning("Caption enrichment failed for image", metadata: [
+                    "image_hash": image.hash,
+                    "error": error.localizedDescription
+                ])
+            }
+        } else if captionConfig.enabled {
+            // Config says enabled but service is nil - this shouldn't happen
+            logger.warning("Caption config enabled but CaptionService is nil", metadata: [
+                "image_hash": image.hash
+            ])
+        }
+        
+        // Create ImageEnrichment with all enrichment results
+        return ImageEnrichment(
+            ocr: ocrResult,
+            faces: faceResult,
+            caption: captionText,
+            enrichmentTimestamp: enrichmentStartTime
+        )
+    }
+    
+    nonisolated private static func performOCRNonIsolated(
         image: ImageAttachment,
         ocrService: OCRService,
         config: OCRModuleConfig
     ) async throws -> OCRResult {
         // Load image data temporarily for processing (not retained after enrichment)
-        let imageData = try await loadImageDataTemporarily(image: image)
+        let imageData = try await loadImageDataTemporarilyNonIsolated(image: image)
         
         return try await ocrService.processImage(
             path: nil,
@@ -193,13 +285,13 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
         )
     }
     
-    private func performFaceDetection(
+    nonisolated private static func performFaceDetectionNonIsolated(
         image: ImageAttachment,
         faceService: FaceService,
         config: FaceModuleConfig
     ) async throws -> FaceDetectionResult {
         // Load image data temporarily for processing (not retained after enrichment)
-        let imageData = try await loadImageDataTemporarily(image: image)
+        let imageData = try await loadImageDataTemporarilyNonIsolated(image: image)
         
         return try await faceService.detectFaces(
             imageData: imageData,
@@ -207,13 +299,13 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
         )
     }
     
-    private func performCaptioning(
+    nonisolated private static func performCaptioningNonIsolated(
         image: ImageAttachment,
         captionService: CaptionService,
         ocrText: String? = nil
     ) async throws -> String? {
         // Load image data temporarily for processing (not retained after enrichment)
-        let imageData = try await loadImageDataTemporarily(image: image)
+        let imageData = try await loadImageDataTemporarilyNonIsolated(image: image)
         
         let caption = try await captionService.generateCaption(imageData: imageData, ocrText: ocrText)
         // Note: Caption is NOT enriched further (no NER on captions)
@@ -221,7 +313,7 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
     }
     
     // Helper methods to load image data temporarily (implementation depends on storage strategy)
-    private func loadImageDataTemporarily(image: ImageAttachment) async throws -> Data {
+    nonisolated private static func loadImageDataTemporarilyNonIsolated(image: ImageAttachment) async throws -> Data {
         // First try temporary data if available
         if let temporaryData = image.temporaryData {
             return temporaryData

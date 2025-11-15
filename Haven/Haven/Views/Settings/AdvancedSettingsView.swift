@@ -10,9 +10,7 @@ import SwiftUI
 
 /// Advanced settings view for module-specific settings
 struct AdvancedSettingsView: View {
-    @Binding var systemConfig: SystemConfig?
-    var configManager: ConfigManager
-    @Binding var errorMessage: String?
+    @ObservedObject var viewModel: SettingsViewModel
     
     // OCR settings
     @State private var ocrLanguages: [String] = ["en"]
@@ -34,6 +32,8 @@ struct AdvancedSettingsView: View {
     @State private var captionMethod: String = "ollama"
     @State private var captionTimeoutMs: Int = 10000
     @State private var captionModel: String = ""
+    @State private var captionOpenaiApiKey: String = ""
+    @State private var captionOpenaiModel: String = "gpt-4o"
     
     // FSWatch settings
     @State private var fswatchEventQueueSize: Int = 1024
@@ -41,6 +41,9 @@ struct AdvancedSettingsView: View {
     
     // LocalFS settings
     @State private var localfsMaxFileBytes: Int = 104857600  // 100MB
+    
+    // Enrichment settings
+    @State private var enrichmentConcurrency: Int = 4
     
     // Debug settings
     @State private var debugEnabled: Bool = false
@@ -83,7 +86,7 @@ struct AdvancedSettingsView: View {
     private var baseView: some View {
         contentView
             .onAppear(perform: loadConfiguration)
-            .onChange(of: systemConfig) { newConfig in
+            .onChange(of: viewModel.systemConfig) { newConfig in
                 loadConfiguration()
             }
     }
@@ -119,6 +122,8 @@ struct AdvancedSettingsView: View {
             .onChange(of: captionMethod) { _, _ in updateConfiguration() }
             .onChange(of: captionTimeoutMs) { _, _ in updateConfiguration() }
             .onChange(of: captionModel) { _, _ in updateConfiguration() }
+            .onChange(of: captionOpenaiApiKey) { _, _ in updateConfiguration() }
+            .onChange(of: captionOpenaiModel) { _, _ in updateConfiguration() }
     }
     
     @ViewBuilder
@@ -137,6 +142,7 @@ struct AdvancedSettingsView: View {
     @ViewBuilder
     private func applyDebugModifiers<V: View>(to view: V) -> some View {
         view
+            .onChange(of: enrichmentConcurrency) { _, _ in updateConfiguration() }
             .onChange(of: debugEnabled) { _, _ in updateConfiguration() }
             .onChange(of: debugOutputPath) { _, _ in updateConfiguration() }
     }
@@ -144,6 +150,7 @@ struct AdvancedSettingsView: View {
     private var contentView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                enrichmentSettingsView
                 ocrSettingsView
                 entitySettingsView
                 faceSettingsView
@@ -152,11 +159,36 @@ struct AdvancedSettingsView: View {
                 localfsSettingsView
                 debugSettingsView
                 
-                if let error = errorMessage {
+                if let error = viewModel.errorMessage {
                     Text(error)
                         .foregroundColor(.red)
                         .padding()
                 }
+            }
+            .padding()
+        }
+    }
+    
+    private var enrichmentSettingsView: some View {
+        GroupBox("Enrichment Pipeline Settings") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Concurrency:")
+                        .frame(width: 150, alignment: .trailing)
+                    TextField("", value: $enrichmentConcurrency, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                    Stepper("", value: $enrichmentConcurrency, in: 1...16, step: 1)
+                        .labelsHidden()
+                    Text("(1-16)")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                }
+                
+                Text("Number of images processed concurrently during enrichment. Higher values may improve throughput but increase resource usage.")
+                    .foregroundColor(.secondary)
+                    .font(.caption)
+                    .padding(.top, 4)
             }
             .padding()
         }
@@ -298,8 +330,9 @@ struct AdvancedSettingsView: View {
                                 Text("Method:")
                                     .frame(width: 150, alignment: .trailing)
                                 Picker("", selection: $captionMethod) {
+                                    Text("Apple Foundation").tag("apple")
                                     Text("Ollama").tag("ollama")
-                                    Text("Vision").tag("vision")
+                                    Text("OpenAI").tag("openai")
                                 }
                                 .frame(width: 150)
                             }
@@ -314,11 +347,37 @@ struct AdvancedSettingsView: View {
                                     .labelsHidden()
                             }
                             
-                            HStack {
-                                Text("Model (optional):")
-                                    .frame(width: 150, alignment: .trailing)
-                                TextField("e.g., llava:7b", text: $captionModel)
-                                    .textFieldStyle(.roundedBorder)
+                            // Model field only shown for Ollama (not needed for Apple Foundation)
+                            if captionMethod == "ollama" {
+                                HStack {
+                                    Text("Model (optional):")
+                                        .frame(width: 150, alignment: .trailing)
+                                    TextField("e.g., llava:7b", text: $captionModel)
+                                        .textFieldStyle(.roundedBorder)
+                                }
+                            }
+                            
+                            // OpenAI settings only shown for OpenAI
+                            if captionMethod == "openai" {
+                                HStack {
+                                    Text("API Key:")
+                                        .frame(width: 150, alignment: .trailing)
+                                    SecureField("sk-...", text: $captionOpenaiApiKey)
+                                        .textFieldStyle(.roundedBorder)
+                                }
+                                
+                                HStack {
+                                    Text("Model:")
+                                        .frame(width: 150, alignment: .trailing)
+                                    TextField("e.g., gpt-4o", text: $captionOpenaiModel)
+                                        .textFieldStyle(.roundedBorder)
+                                }
+                            }
+                            
+                            // Web server settings only shown for OpenAI
+                            if captionMethod == "openai" {
+                                Divider()
+                                    .padding(.vertical, 4)
                             }
                         }
                     }
@@ -398,10 +457,12 @@ struct AdvancedSettingsView: View {
     }
     
     private func loadConfiguration() {
-        guard let config = systemConfig else {
+        guard let config = viewModel.systemConfig else {
             // Use defaults
             return
         }
+        
+        enrichmentConcurrency = config.advanced.enrichmentConcurrency
         
         ocrLanguages = config.advanced.ocr.languages
         ocrTimeoutMs = config.advanced.ocr.timeoutMs
@@ -419,6 +480,8 @@ struct AdvancedSettingsView: View {
         captionMethod = config.advanced.caption.method
         captionTimeoutMs = config.advanced.caption.timeoutMs
         captionModel = config.advanced.caption.model ?? ""
+        captionOpenaiApiKey = config.advanced.caption.openaiApiKey ?? ""
+        captionOpenaiModel = config.advanced.caption.openaiModel ?? "gpt-4o"
         
         fswatchEventQueueSize = config.advanced.fswatch.eventQueueSize
         fswatchDebounceMs = config.advanced.fswatch.debounceMs
@@ -430,44 +493,45 @@ struct AdvancedSettingsView: View {
     }
     
     private func updateConfiguration() {
-        guard var config = systemConfig else { return }
-        
-        config.advanced = AdvancedModuleSettings(
-            ocr: OCRModuleSettings(
-                languages: ocrLanguages,
-                timeoutMs: ocrTimeoutMs,
-                recognitionLevel: ocrRecognitionLevel,
-                includeLayout: ocrIncludeLayout
-            ),
-            entity: EntityModuleSettings(
-                types: entityTypes,
-                minConfidence: entityMinConfidence
-            ),
-            face: FaceModuleSettings(
-                minFaceSize: faceMinSize,
-                minConfidence: faceMinConfidence,
-                includeLandmarks: faceIncludeLandmarks
-            ),
-            caption: CaptionModuleSettings(
-                enabled: captionEnabled,
-                method: captionMethod,
-                timeoutMs: captionTimeoutMs,
-                model: captionModel.isEmpty ? nil : captionModel
-            ),
-            fswatch: FSWatchModuleSettings(
-                eventQueueSize: fswatchEventQueueSize,
-                debounceMs: fswatchDebounceMs
-            ),
-            localfs: LocalFSModuleSettings(
-                maxFileBytes: localfsMaxFileBytes
-            ),
-            debug: DebugSettings(
-                enabled: debugEnabled,
-                outputPath: debugOutputPath
+        viewModel.updateSystemConfig { systemConfig in
+            systemConfig.advanced = AdvancedModuleSettings(
+                enrichmentConcurrency: enrichmentConcurrency,
+                ocr: OCRModuleSettings(
+                    languages: ocrLanguages,
+                    timeoutMs: ocrTimeoutMs,
+                    recognitionLevel: ocrRecognitionLevel,
+                    includeLayout: ocrIncludeLayout
+                ),
+                entity: EntityModuleSettings(
+                    types: entityTypes,
+                    minConfidence: entityMinConfidence
+                ),
+                face: FaceModuleSettings(
+                    minFaceSize: faceMinSize,
+                    minConfidence: faceMinConfidence,
+                    includeLandmarks: faceIncludeLandmarks
+                ),
+                caption: CaptionModuleSettings(
+                    enabled: captionEnabled,
+                    method: captionMethod,
+                    timeoutMs: captionTimeoutMs,
+                    model: captionModel.isEmpty ? nil : captionModel,
+                    openaiApiKey: captionOpenaiApiKey.isEmpty ? nil : captionOpenaiApiKey,
+                    openaiModel: captionOpenaiModel.isEmpty ? nil : captionOpenaiModel
+                ),
+                fswatch: FSWatchModuleSettings(
+                    eventQueueSize: fswatchEventQueueSize,
+                    debounceMs: fswatchDebounceMs
+                ),
+                localfs: LocalFSModuleSettings(
+                    maxFileBytes: localfsMaxFileBytes
+                ),
+                debug: DebugSettings(
+                    enabled: debugEnabled,
+                    outputPath: debugOutputPath
+                )
             )
-        )
-        
-        systemConfig = config
+        }
     }
 }
 

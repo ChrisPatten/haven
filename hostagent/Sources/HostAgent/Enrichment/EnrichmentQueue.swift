@@ -9,11 +9,13 @@ public actor EnrichmentQueue {
     private let logger = HavenLogger(category: "enrichment-queue")
     private var enrichmentTasks: [String: Task<EnrichedDocument?, Error>] = [:]
     private var maxConcurrentEnrichments: Int
+    private var activeEnrichmentCount: Int = 0
+    private var waitingQueue: [(documentId: String, document: CollectorDocument, onComplete: EnrichmentCompletion)] = []
     
     /// Callback type for when enrichment completes
     public typealias EnrichmentCompletion = (String, EnrichedDocument?) -> Void
     
-    public init(orchestrator: EnrichmentOrchestrator, maxConcurrentEnrichments: Int = 3) {
+    public init(orchestrator: EnrichmentOrchestrator, maxConcurrentEnrichments: Int = 1) {
         self.orchestrator = orchestrator
         self.maxConcurrentEnrichments = maxConcurrentEnrichments
     }
@@ -42,10 +44,32 @@ public actor EnrichmentQueue {
             return false
         }
         
+        // If we have capacity, process immediately; otherwise, add to waiting queue
+        if activeEnrichmentCount < maxConcurrentEnrichments {
+            return startEnrichment(document: document, documentId: documentId, onComplete: onComplete)
+        } else {
+            // Queue for later processing
+            waitingQueue.append((documentId: documentId, document: document, onComplete: onComplete))
+            logger.debug("Queued document for later enrichment (at capacity)", metadata: [
+                "document_id": documentId,
+                "image_count": String(document.images.count),
+                "active_count": String(activeEnrichmentCount),
+                "waiting_count": String(waitingQueue.count)
+            ])
+            return true
+        }
+    }
+    
+    /// Start enrichment for a document
+    private func startEnrichment(
+        document: CollectorDocument,
+        documentId: String,
+        onComplete: @escaping EnrichmentCompletion
+    ) -> Bool {
         // Create enrichment task
         let task = Task<EnrichedDocument?, Error> {
             do {
-                let enriched = try await orchestrator.enrich(document)
+                let enriched = try await self.orchestrator.enrich(document)
                 return enriched
             } catch {
                 logger.warning("Enrichment failed", metadata: [
@@ -57,29 +81,47 @@ public actor EnrichmentQueue {
         }
         
         enrichmentTasks[documentId] = task
+        activeEnrichmentCount += 1
+        
+        logger.debug("Started document enrichment", metadata: [
+            "document_id": documentId,
+            "image_count": String(document.images.count),
+            "active_count": String(activeEnrichmentCount)
+        ])
         
         // Process enrichment asynchronously
         Task {
             do {
                 let enriched = try await task.value
                 // Remove from active tasks
-                self.removeTask(documentId: documentId)
+                await self.completeEnrichment(documentId: documentId, result: enriched)
                 // Call completion callback
                 onComplete(documentId, enriched)
             } catch {
                 // Remove from active tasks
-                self.removeTask(documentId: documentId)
+                await self.completeEnrichment(documentId: documentId, result: nil)
                 // Call completion with nil to indicate failure
                 onComplete(documentId, nil)
             }
         }
         
-        logger.debug("Queued document for enrichment", metadata: [
-            "document_id": documentId,
-            "image_count": String(document.images.count)
-        ])
-        
         return true
+    }
+    
+    /// Mark enrichment as complete and process next waiting item
+    private func completeEnrichment(documentId: String, result: EnrichedDocument?) {
+        removeTask(documentId: documentId)
+        activeEnrichmentCount -= 1
+        
+        // Process next waiting item if available
+        if !waitingQueue.isEmpty {
+            let next = waitingQueue.removeFirst()
+            logger.debug("Processing next document from waiting queue", metadata: [
+                "document_id": next.documentId,
+                "remaining_in_queue": String(waitingQueue.count)
+            ])
+            _ = startEnrichment(document: next.document, documentId: next.documentId, onComplete: next.onComplete)
+        }
     }
     
     /// Wait for enrichment to complete (for testing or synchronous scenarios)

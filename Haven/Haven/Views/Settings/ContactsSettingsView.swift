@@ -11,9 +11,7 @@ import Contacts
 
 /// Contacts settings view for managing contact source instances
 struct ContactsSettingsView: View {
-    @Binding var config: ContactsInstancesConfig?
-    var configManager: ConfigManager
-    @Binding var errorMessage: String?
+    @ObservedObject var viewModel: SettingsViewModel
     
     @State private var instances: [ContactsInstance] = []
     @State private var selectedInstance: ContactsInstance.ID?
@@ -132,17 +130,17 @@ struct ContactsSettingsView: View {
                 )
             }
         }
-        .onAppear {
-            loadConfiguration()
+        .task {
+            await loadConfiguration()
             // Check permission on appear if macOS Contacts instance is enabled
             if instances.contains(where: { $0.sourceType == .macOSContacts && $0.enabled }) {
-                Task {
-                    await checkContactsPermission()
-                }
+                await checkContactsPermission()
             }
         }
-        .onChange(of: config) { newConfig in
-            loadConfiguration()
+        .onChange(of: viewModel.contactsConfig) { newConfig in
+            Task {
+                await loadConfiguration()
+            }
         }
         .onChange(of: selectedInstance) { _, newValue in
             // Only auto-open edit sheet if selected from table row click, not from pencil button
@@ -157,8 +155,8 @@ struct ContactsSettingsView: View {
         }
     }
     
-    private func loadConfiguration() {
-        if let config = config {
+    private func loadConfiguration() async {
+        if let config = viewModel.contactsConfig {
             instances = config.instances
         } else {
             instances = []
@@ -186,7 +184,9 @@ struct ContactsSettingsView: View {
     }
     
     private func updateConfiguration() {
-        config = ContactsInstancesConfig(instances: instances)
+        viewModel.updateContactsConfig { config in
+            config.instances = instances
+        }
     }
     
     private func removeSelectedInstance() {
