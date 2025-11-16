@@ -11,15 +11,16 @@ Each Haven service plays a specific role in the ingestion → enrichment → sea
 | Haven.app | n/a | Swift | macOS-native collectors, OCR, FS watch (runs collectors directly) |
 
 ## Gateway API
-- **Responsibilities**: Validate payloads (`/v1/ingest`, `/v1/ingest:batch`, `/v1/ingest/file`), compute idempotency keys, forward documents to Catalog, broker access to search, and expose `ask` summarisation.
+- **Responsibilities**: Validate v2 envelopes (`/v2/ingest/document`, `/v2/ingest/person`, optional `/v2/ingest:batch`), compute idempotency keys, normalize timestamps, forward payloads unchanged to Catalog v2, broker access to search, and expose `ask` summarisation.
 - **Authentication**: Bearer tokens via `Authorization: Bearer <token>`.
-- **Integrations**: Reads MinIO credentials for file uploads, proxies requests to Catalog and Search.
+- **Integrations**: Proxies requests to Catalog and Search. Binary file uploads are not used; images/files are represented in `metadata.attachments` and transmitted as metadata only.
 - **Observability**: `/v1/healthz`, structured logs keyed by `submission_id`, metrics covering request timings.
+- **Compatibility**: Continues to accept legacy v1 ingestion (`/v1/ingest`, `/v1/ingest:batch`) and internally adapts to v2 envelopes during migration. The legacy `/v1/ingest/file` route is deprecated.
 
 ## Catalog API
-- **Responsibilities**: Persist documents, threads, files, and chunk metadata. Track ingest submissions, state transitions, and expose document lifecycle endpoints. Normalize people records via `PeopleRepository`, resolve identifiers, and maintain `document_people` relationships.
+- **Responsibilities**: Persist documents, threads, and chunk metadata. Track ingest submissions, state transitions, and expose document lifecycle endpoints. Normalize people (`/v2/catalog/people`), resolve identifiers, and maintain relationships. Files are no longer first-class rows; attachment/file data lives in `documents.metadata.attachments`.
 - **Database**: Postgres schema defined in `schema/init.sql` with GIN indexes for intent JSONB and partial indexes for relevance.
-- **APIs**: `/v1/catalog/documents`, `/v1/catalog/embeddings`, status endpoints for ingestion, contacts import/export routes, and people resolution endpoints.
+- **APIs**: `/v2/catalog/documents`, `/v2/catalog/people`, `/v1/catalog/embeddings`, status endpoints for ingestion, and people resolution endpoints.
 - **Reliability**: Transactions wrap ingestion so documents, files, threads, and people remain consistent. Savepoints protect per-person operations in batch contact imports.
 
 ## Search Service

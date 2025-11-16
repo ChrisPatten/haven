@@ -310,7 +310,44 @@ Intent signals extracted from documents.
 
 ## API Models
 
+### Envelope v2 Models (Preferred)
+
+Standardized transport wrapper and payloads used across Haven.app → Gateway → Catalog.
+
+#### Envelope
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `schema_version` | string | YES | Semantic version of envelope + payload schema (e.g., "2.0") |
+| `kind` | string | YES | "document" or "person" |
+| `source` | object | YES | `{ source_type, source_provider, source_account_id }` |
+| `payload` | object | YES | Document or Person payload (see below) |
+
+#### Document (payload)
+
+Transport representation of a `documents` row plus structured metadata.
+
+- Top-level fields: `external_id`, `version_number`, `title`, `text`, `text_sha256`, `mime_type`, `canonical_uri`, `content_timestamp`, `content_timestamp_type`, `people[]`, `thread`, `relationships`, `facets`, `metadata`, `intent`.
+- Mappings match the Database Schema section; `metadata.attachments` is the sole owner of OCR/caption/vision/EXIF.
+
+#### Person (payload)
+
+Standardized person/contact object for people normalization.
+
+- Core fields: `external_id`, `display_name`, `given_name`, `family_name`, `organization`, `nicknames[]`, `notes`, `photo_hash`, `change_token`, `version`, `deleted`, `identifiers[]`.
+- Identifiers align with `person_identifiers` schema: `{ kind, value_raw, value_canonical, label, priority, verified }`.
+
+#### Endpoints (Gateway)
+
+- `POST /v2/ingest/document` — accepts `Envelope(kind=document)`.
+- `POST /v2/ingest/person` — accepts `Envelope(kind=person)`.
+- `POST /v2/ingest:batch` — array of envelopes.
+
+Gateway validates envelopes, normalizes timestamps, computes idempotency, and forwards payloads unchanged to Catalog v2.
+
 ### Gateway API Models
+
+> Note: This section documents legacy v1 request/response models. Prefer the v2 envelope models above for all new integrations.
 
 #### IngestRequestModel
 
