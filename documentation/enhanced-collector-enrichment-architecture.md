@@ -14,11 +14,11 @@
 
 ### Document Instance Creation (Standardized Format):
 - Each document is created as a `CollectorDocument` struct with standardized fields:
-  - `content: String` - Markdown text extracted from source (image placeholders added during enrichment pipeline)
+  - `content: String` - Markdown text extracted from source with `{IMG:<id>}` tokens inserted where images appear
   - `sourceType: String` - document origin ("imessage", "email", "localfs", etc.)
   - `externalId: String` - unique ID within source (e.g. "imessage:1234567890")
   - `metadata: DocumentMetadata` - content hash, MIME type, timestamps (created/modified), additional metadata dict
-  - `images: [ImageAttachment]` - extracted images with temporary data or path refs (files NOT retained, only metadata). If original image was embedded in the message (does not have a file on disk that can be referenced), include the base64 encoded image data here. For embedded images, collectors should create temporary placeholder text in content that will be replaced with enriched placeholders at the end of the enrichment pipeline.
+  - `images: [ImageAttachment]` - extracted images with temporary data or path refs (files NOT retained, only metadata). Collectors insert `{IMG:<id>}` tokens in content where images appear, using deterministic IDs (MD5 for embedded images, file paths for files).
   - `contentType: DocumentContentType` - enum-based type
   - `title: String?`, `canonicalUri: String?` - optional fields
 
@@ -102,12 +102,17 @@
 
 ---
 
-## 4. Message Formatting & Image Placeholder Embedding
+## 4. Token → Slug Pipeline
 
-### Image Placeholder Format:
-- `[Image: <filename> | <caption> | <ocr_text>]` - inline text representation. If the image was embedded in the message (does not have a file on disk that can be referenced), this replaces the image data.
-- Applied to document text via `EnrichmentMerger.mergeEnrichmentIntoDocument()` as the final step in the enrichment pipeline (after all enrichment steps including NER are complete).
-- For embedded images: collectors create temporary placeholder text in document content during document creation; these are replaced with enriched placeholders (containing caption and OCR text) at the end of the enrichment pipeline.
+### Image Token → Slug Strategy:
+- **Collection Phase**: Collectors insert `{IMG:<id>}` tokens in document content where images appear
+  - ID format: MD5 hash (lowercase hex) for embedded images, canonical file path for file-based images
+  - Tokens preserve positional context and ensure exactly one placeholder per image
+- **Enrichment Phase**: `EnrichmentMerger` replaces tokens with image slugs after enrichment completes
+- **Slug Format**: `[Image: <caption> | <filename or hash>]`
+  - Caption: Image caption text, or `"No caption"` if captioning failed
+  - Filename/Hash: Image filename for files, MD5 hash for embedded images
+- **Result**: Exactly one slug per image, positioned correctly in text, no duplicate placeholders
 
 ### Enrichment Metadata Structure:
 - Merged into `metadata.enrichment` JSONB field:
