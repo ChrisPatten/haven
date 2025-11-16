@@ -53,6 +53,11 @@ from haven.search.models import (
 from haven.search.sdk import SearchServiceClient
 
 from shared.db import get_conn_str, get_connection, get_active_document
+from shared.envelope_v2 import (
+    DocumentEnvelope,
+    PersonEnvelope,
+    is_v2_schema,
+)
 from shared.deps import assert_missing_dependencies
 from shared.logging import get_logger, setup_logging
 from shared.people_repository import (
@@ -569,7 +574,7 @@ def _build_contact_document_payload(source: str, record: PersonIngestRecord) -> 
         "content_sha256": text_sha,
         "content_timestamp": timestamp,
         "content_timestamp_type": "modified",
-        "content_created_at": timestamp,
+        # content_created_at removed; use metadata.timestamps.source_specific instead
         "text": text,
         "mime_type": "text/plain",
         "metadata": metadata,
@@ -786,6 +791,7 @@ class ThreadPayloadModel(BaseModel):
     external_id: str
     source_type: Optional[str] = None
     source_provider: Optional[str] = None
+    source_account_id: Optional[str] = None
     title: Optional[str] = None
     participants: List[DocumentPerson] = Field(default_factory=list)
     thread_type: Optional[str] = None
@@ -800,6 +806,7 @@ class IngestRequestModel(BaseModel):
     source_type: str
     source_id: str
     source_provider: Optional[str] = None
+    source_account_id: Optional[str] = None
     external_id: Optional[str] = None
     title: Optional[str] = None
     canonical_uri: Optional[str] = None
@@ -807,8 +814,6 @@ class IngestRequestModel(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     content_timestamp: Optional[datetime] = None
     content_timestamp_type: Optional[str] = None
-    content_created_at: Optional[datetime] = None
-    content_modified_at: Optional[datetime] = None
     people: List[DocumentPerson] = Field(default_factory=list)
     thread_id: Optional[uuid.UUID] = None
     thread: Optional[ThreadPayloadModel] = None
@@ -846,9 +851,16 @@ class IngestSubmissionResponse(BaseModel):
     version_number: int
     status: str
     thread_id: Optional[str] = None
-    file_ids: List[str] = Field(default_factory=list)
     duplicate: bool = False
     total_chunks: int = 0  # maintained for backward compatibility
+
+
+class PersonIngestResponse(BaseModel):
+    person_id: str
+    external_id: str
+    version: int
+    status: str = "upserted"
+    deleted: bool = False
 
 
 class IngestStatusResponse(BaseModel):
@@ -939,7 +951,7 @@ def _serialize_thread(thread: Optional[ThreadPayloadModel]) -> Optional[Dict[str
 
 
 def _map_catalog_ingest_response(data: Dict[str, Any]) -> IngestSubmissionResponse:
-    file_ids = [str(fid) for fid in data.get("file_ids", [])]
+    # file_ids removed; attachments stored in metadata.attachments
     return IngestSubmissionResponse(
         submission_id=str(data["submission_id"]),
         doc_id=str(data["doc_id"]),
@@ -947,7 +959,6 @@ def _map_catalog_ingest_response(data: Dict[str, Any]) -> IngestSubmissionRespon
         version_number=int(data.get("version_number", 1)),
         status=data.get("status", "submitted"),
         thread_id=str(data["thread_id"]) if data.get("thread_id") else None,
-        file_ids=file_ids,
         duplicate=bool(data.get("duplicate", False)),
         total_chunks=int(data.get("total_chunks") or 0),
     )
@@ -969,6 +980,14 @@ def _parse_iso_datetime(value: Optional[str], *, param: str) -> Optional[datetim
 def _make_correlation_id(prefix: str) -> str:
     now = datetime.now(tz=UTC).isoformat()
     return f"{prefix}_{now}_{uuid.uuid4().hex[:8]}"
+
+
+def _validate_v2_schema(schema_version: str, kind: str) -> None:
+    if not is_v2_schema(schema_version):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"{kind} schema_version must start with '2.'",
+        )
 
 
 def _error_response(
@@ -1071,8 +1090,6 @@ def _prepare_ingest_document_payload(
             details={"value": payload.content_timestamp_type},
         )
 
-    content_created_at = _ensure_utc(payload.content_created_at)
-    content_modified_at = _ensure_utc(payload.content_modified_at)
     people_payload = _serialize_people(payload.people)
     thread_payload = _serialize_thread(payload.thread)
 
@@ -1083,6 +1100,7 @@ def _prepare_ingest_document_payload(
         "idempotency_key": idempotency_key,
         "source_type": payload.source_type,
         "source_provider": payload.source_provider,
+        "source_account_id": payload.source_account_id,
         "source_id": payload.source_id,
         "content_sha256": text_hash,
         "mime_type": payload.content.mime_type,
@@ -1098,14 +1116,6 @@ def _prepare_ingest_document_payload(
     if payload.external_id:
         catalog_payload["external_id"] = payload.external_id
 
-    if payload.content_created_at or content_created_at:
-        catalog_payload["content_created_at"] = (
-            content_created_at or content_timestamp
-        ).isoformat()
-    if payload.content_modified_at or content_modified_at:
-        catalog_payload["content_modified_at"] = (
-            content_modified_at or content_timestamp
-        ).isoformat()
     if payload.thread_id:
         catalog_payload["thread_id"] = str(payload.thread_id)
     if thread_payload:
@@ -1765,6 +1775,162 @@ def _update_change_token(
 
 
 @app.post(
+    "/v2/ingest/document",
+    response_model=IngestSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ingest_document_v2(
+    envelope: DocumentEnvelope,
+    response: Response,
+    _: None = Depends(require_token),
+) -> JSONResponse:
+    _validate_v2_schema(envelope.schema_version, "document")
+    correlation_id = _make_correlation_id("gw_ingest_v2_document")
+    response.headers["X-Correlation-ID"] = correlation_id
+
+    logger.info(
+        "ingest_document_v2_forward",
+        source_type=envelope.source.source_type,
+        external_id=envelope.payload.external_id,
+    )
+    try:
+        catalog_response = await _catalog_request(
+            "POST",
+            "/v2/catalog/documents",
+            correlation_id,
+            json_payload=envelope.model_dump(mode="json"),
+        )
+    except httpx.RequestError as exc:
+        logger.error("catalog_request_failed_v2_document", error=str(exc))
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to reach Catalog service",
+        ) from exc
+
+    if catalog_response.status_code >= 400:
+        logger.warning(
+            "catalog_rejected_ingest_v2_document",
+            status_code=catalog_response.status_code,
+            body=_truncate_response(catalog_response),
+            correlation_id=correlation_id,
+        )
+        return _error_response(
+            catalog_response.status_code,
+            "INGEST.CATALOG_REJECTED",
+            "Catalog rejected ingest request",
+            correlation_id,
+            details={"status_code": catalog_response.status_code},
+        )
+
+    try:
+        payload_json = catalog_response.json()
+    except ValueError as exc:
+        logger.error(
+            "catalog_invalid_json_v2_document",
+            error=str(exc),
+            body=_truncate_response(catalog_response),
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Catalog returned invalid JSON",
+        ) from exc
+
+    submission = _map_catalog_ingest_response(payload_json)
+    return JSONResponse(
+        status_code=catalog_response.status_code,
+        content=submission.model_dump(),
+        headers={"X-Correlation-ID": correlation_id},
+    )
+
+
+@app.post(
+    "/v2/ingest/person",
+    response_model=PersonIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ingest_person_v2(
+    envelope: PersonEnvelope,
+    response: Response,
+    _: None = Depends(require_token),
+) -> JSONResponse:
+    _validate_v2_schema(envelope.schema_version, "person")
+    correlation_id = _make_correlation_id("gw_ingest_v2_person")
+    response.headers["X-Correlation-ID"] = correlation_id
+
+    logger.info(
+        "ingest_person_v2_forward",
+        source_type=envelope.source.source_type,
+        external_id=envelope.payload.external_id,
+    )
+    try:
+        catalog_response = await _catalog_request(
+            "POST",
+            "/v2/catalog/people",
+            correlation_id,
+            json_payload=envelope.model_dump(mode="json"),
+        )
+    except httpx.RequestError as exc:
+        logger.error("catalog_request_failed_v2_person", error=str(exc))
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to reach Catalog service",
+        ) from exc
+
+    if catalog_response.status_code >= 400:
+        logger.warning(
+            "catalog_rejected_ingest_v2_person",
+            status_code=catalog_response.status_code,
+            body=_truncate_response(catalog_response),
+            correlation_id=correlation_id,
+        )
+        return _error_response(
+            catalog_response.status_code,
+            "INGEST.CATALOG_REJECTED",
+            "Catalog rejected person ingest request",
+            correlation_id,
+            details={"status_code": catalog_response.status_code},
+        )
+
+    try:
+        payload_json = catalog_response.json()
+    except ValueError as exc:
+        logger.error(
+            "catalog_invalid_json_v2_person",
+            error=str(exc),
+            body=_truncate_response(catalog_response),
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Catalog returned invalid JSON",
+        ) from exc
+
+    person_id = payload_json.get("person_id")
+    if not person_id:
+        logger.error(
+            "catalog_missing_person_id_v2",
+            body=_truncate_response(catalog_response),
+            correlation_id=correlation_id,
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Catalog response missing person_id",
+        )
+
+    person_response = PersonIngestResponse(
+        person_id=str(person_id),
+        external_id=payload_json.get("external_id", envelope.payload.external_id),
+        version=int(payload_json.get("version", envelope.payload.version)),
+        status=payload_json.get("status", "upserted"),
+        deleted=bool(payload_json.get("deleted", False)),
+    )
+    return JSONResponse(
+        status_code=catalog_response.status_code,
+        content=person_response.model_dump(),
+        headers={"X-Correlation-ID": correlation_id},
+    )
+
+
+@app.post(
     "/v1/ingest:batch",
     response_model=BatchIngestResponse,
     status_code=status.HTTP_202_ACCEPTED,
@@ -2247,7 +2413,7 @@ async def ingest_file(
     )
 
     content_timestamp = _timestamp_from_epoch(meta_payload.mtime) or datetime.now(tz=UTC)
-    content_created_at = _timestamp_from_epoch(meta_payload.ctime)
+    # content_created_at removed; use metadata.timestamps.source_specific instead
 
     file_descriptor: Dict[str, Any] = {
         "content_sha256": file_sha,
@@ -2285,8 +2451,7 @@ async def ingest_file(
         "metadata": metadata,
         "content_timestamp": content_timestamp.isoformat(),
         "content_timestamp_type": "modified",
-        "content_created_at": content_created_at.isoformat() if content_created_at else None,
-        "content_modified_at": content_timestamp.isoformat(),
+        # content_created_at and content_modified_at removed; use metadata.timestamps.source_specific instead
         "people": [],
         "attachments": attachments,
         "facet_overrides": {
@@ -2294,8 +2459,7 @@ async def ingest_file(
             "attachment_count": len(attachments),
         },
     }
-    if catalog_payload.get("content_created_at") is None:
-        catalog_payload.pop("content_created_at")
+    # content_created_at and content_modified_at removed
 
     try:
         catalog_resp = await _catalog_request(

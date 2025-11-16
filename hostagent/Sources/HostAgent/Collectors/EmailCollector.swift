@@ -332,6 +332,8 @@ public struct EmailDocumentPerson: Codable, Equatable {
 public struct EmailThreadPayload: Codable, Equatable {
     public var externalId: String
     public var sourceType: String?
+    public var sourceProvider: String?
+    public var sourceAccountId: String?
     public var title: String?
     public var participants: [EmailDocumentPerson]
     public var metadata: [String: String]?
@@ -339,6 +341,8 @@ public struct EmailThreadPayload: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case externalId = "external_id"
         case sourceType = "source_type"
+        case sourceProvider = "source_provider"
+        case sourceAccountId = "source_account_id"
         case title
         case participants
         case metadata
@@ -348,6 +352,8 @@ public struct EmailThreadPayload: Codable, Equatable {
 public struct EmailDocumentPayload: Codable, Equatable {
     public var sourceType: String
     public var sourceId: String
+    public var sourceProvider: String?
+    public var sourceAccountId: String?
     public var title: String?
     public var canonicalUri: String?
     public var content: EmailDocumentContent
@@ -368,6 +374,8 @@ public struct EmailDocumentPayload: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case sourceType = "source_type"
         case sourceId = "source_id"
+        case sourceProvider = "source_provider"
+        case sourceAccountId = "source_account_id"
         case title
         case canonicalUri = "canonical_uri"
         case content
@@ -432,7 +440,6 @@ public struct GatewaySubmissionResponse: Codable, Equatable, Sendable {
     public var externalId: String
     public var status: String
     public var threadId: String?
-    public var fileIds: [String]
     public var duplicate: Bool
     public var totalChunks: Int
     
@@ -442,7 +449,6 @@ public struct GatewaySubmissionResponse: Codable, Equatable, Sendable {
         case externalId = "external_id"
         case status
         case threadId = "thread_id"
-        case fileIds = "file_ids"
         case duplicate
         case totalChunks = "total_chunks"
     }
@@ -454,7 +460,6 @@ public struct GatewayFileSubmissionResponse: Codable, Equatable, Sendable {
     public var externalId: String
     public var status: String
     public var threadId: String?
-    public var fileIds: [String]
     public var duplicate: Bool
     public var totalChunks: Int
     public var fileSha256: String
@@ -467,7 +472,6 @@ public struct GatewayFileSubmissionResponse: Codable, Equatable, Sendable {
         externalId: String,
         status: String,
         threadId: String? = nil,
-        fileIds: [String] = [],
         duplicate: Bool = false,
         totalChunks: Int = 0,
         fileSha256: String = "",
@@ -479,7 +483,6 @@ public struct GatewayFileSubmissionResponse: Codable, Equatable, Sendable {
         self.externalId = externalId
         self.status = status
         self.threadId = threadId
-        self.fileIds = fileIds
         self.duplicate = duplicate
         self.totalChunks = totalChunks
         self.fileSha256 = fileSha256
@@ -493,7 +496,6 @@ public struct GatewayFileSubmissionResponse: Codable, Equatable, Sendable {
         case externalId = "external_id"
         case status
         case threadId = "thread_id"
-        case fileIds = "file_ids"
         case duplicate
         case totalChunks = "total_chunks"
         case fileSha256 = "file_sha256"
@@ -546,7 +548,8 @@ public actor EmailCollector {
         intent: IntentClassification? = nil,
         relevance: Double? = nil,
         sourceType overrideSourceType: String? = nil,
-        sourceIdPrefix: String? = nil
+        sourceIdPrefix: String? = nil,
+        sourceAccountId: String? = nil
     ) async throws -> EmailDocumentPayload {
         let messageId = normalizeMessageId(email.messageId)
         let resolvedSourceType = overrideSourceType ?? defaultSourceType
@@ -572,6 +575,33 @@ public actor EmailCollector {
             attachments: email.attachments,
             ocrService: nil // TODO: Pass OCR service when available
         )
+        
+        // Determine content_timestamp and content_timestamp_type following email rules
+        // Prefer header Date as primary, fallback to IMAP internaldate
+        let contentTimestamp: Date
+        let contentTimestampType: String
+        let headerDateString: String?
+        
+        if let headerDate = email.headers["Date"], !headerDate.isEmpty {
+            // Try to parse header Date
+            let formatter = DateFormatter()
+            formatter.dateFormat = "EEE, d MMM yyyy HH:mm:ss Z"
+            if let parsedDate = formatter.date(from: headerDate) {
+                contentTimestamp = parsedDate
+                contentTimestampType = "sent"
+                headerDateString = headerDate
+            } else {
+                // Fallback to internaldate if header Date can't be parsed
+                contentTimestamp = email.date ?? Date()
+                contentTimestampType = "received"
+                headerDateString = headerDate
+            }
+        } else {
+            // Use IMAP internaldate
+            contentTimestamp = email.date ?? Date()
+            contentTimestampType = "received"
+            headerDateString = nil
+        }
         
         let content = EmailDocumentContent(mimeType: "text/plain", data: redacted, encoding: nil)
         let snippet = buildSnippet(from: redacted)
@@ -604,7 +634,11 @@ public actor EmailCollector {
         )
         
         let people = buildPeople(from: email)
-        let threadPayload = buildThreadPayload(email: email, people: people)
+        var threadPayload = buildThreadPayload(email: email, people: people)
+        // Add source_account_id to thread if available
+        if let accountId = sourceAccountId {
+            threadPayload?.sourceAccountId = accountId
+        }
         let threadId: UUID?
         if let externalId = threadPayload?.externalId {
             threadId = deterministicUUID(from: externalId)
@@ -615,12 +649,13 @@ public actor EmailCollector {
         return EmailDocumentPayload(
             sourceType: resolvedSourceType,
             sourceId: sourceId,
+            sourceAccountId: sourceAccountId,
             title: email.subject,
             canonicalUri: messageId.map { "message://\($0)" },
             content: content,
             metadata: metadata,
-            contentTimestamp: email.date,
-            contentTimestampType: "received",
+            contentTimestamp: contentTimestamp,
+            contentTimestampType: contentTimestampType,
             people: people,
             threadId: threadId,
             thread: threadPayload,

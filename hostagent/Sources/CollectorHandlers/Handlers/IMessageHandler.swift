@@ -2612,7 +2612,32 @@ public actor IMessageHandler {
         // Use canonical timestamp: message.date (the message's primary timestamp)
         // This is stored as content_timestamp in the document and used for all time-based operations
         let contentTimestamp = appleEpochToISO8601(message.date)
+        let contentTimestampType = message.isFromMe ? "sent" : "received"
         let ingestionTimestamp = ISO8601DateFormatter().string(from: Date())
+        
+        // Extract source_account_id from message account
+        let sourceAccountId = message.account
+        
+        // Build timestamp metadata structure
+        var sourceSpecificTimestamps: [String: Any] = [:]
+        sourceSpecificTimestamps["sent_at"] = appleEpochToISO8601(message.date)
+        if let dateRead = message.dateRead {
+            sourceSpecificTimestamps["received_at"] = appleEpochToISO8601(dateRead)
+        } else if !message.isFromMe {
+            // For received messages, use date as received_at if dateRead is not available
+            sourceSpecificTimestamps["received_at"] = contentTimestamp
+        }
+        if let dateDelivered = message.dateDelivered {
+            sourceSpecificTimestamps["delivered_at"] = appleEpochToISO8601(dateDelivered)
+        }
+        
+        let timestampsMetadata: [String: Any] = [
+            "primary": [
+                "value": contentTimestamp,
+                "type": contentTimestampType
+            ],
+            "source_specific": sourceSpecificTimestamps
+        ]
         
         // Build people array
         // When isFromMe, use the message account (your iMessage account) as the sender
@@ -2631,9 +2656,9 @@ public actor IMessageHandler {
         }
         let people = buildPeople(sender: senderIdentifier, participants: thread.participants, isFromMe: message.isFromMe)
         
-        // Build thread payload
+        // Build thread payload with source_account_id
         let threadExternalId = "imessage:\(thread.guid)"
-        let threadPayload: [String: Any] = [
+        var threadPayload: [String: Any] = [
             "external_id": threadExternalId,
             "source_type": "imessage",
             "source_provider": "apple_messages",
@@ -2653,15 +2678,68 @@ public actor IMessageHandler {
             ],
             "last_message_at": contentTimestamp
         ]
+        if let accountId = sourceAccountId {
+            threadPayload["source_account_id"] = accountId
+        }
         
-        // Build metadata
-        let metadata: [String: Any] = [
-            "source": "imessage",
-            "ingested_at": ingestionTimestamp,
-            "message_guid": message.guid,
-            "thread_guid": thread.guid,
-            "service": message.service ?? "iMessage"
+        // Restructure attachments to new schema format
+        var structuredAttachments: [[String: Any]] = []
+        for (index, attachment) in attachments.enumerated() {
+            var structuredAttachment: [String: Any] = [
+                "index": index,
+                "kind": inferAttachmentKind(mimeType: attachment["mime_type"] as? String, filename: attachment["filename"] as? String),
+                "role": "attachment",
+                "mime_type": attachment["mime_type"] as? String ?? "application/octet-stream",
+                "size_bytes": attachment["size_bytes"] as? Int64 ?? 0
+            ]
+            
+            // Build source_ref
+            var sourceRef: [String: Any] = [:]
+            if let guid = attachment["guid"] as? String {
+                sourceRef["message_attachment_id"] = guid
+            }
+            if let filename = attachment["filename"] as? String, !filename.isEmpty {
+                sourceRef["path"] = filename
+            }
+            if let rowId = attachment["row_id"] as? Int64 {
+                sourceRef["row_id"] = rowId
+            }
+            if !sourceRef.isEmpty {
+                structuredAttachment["source_ref"] = sourceRef
+            }
+            
+            structuredAttachments.append(structuredAttachment)
+        }
+        
+        // Build metadata with new structure
+        var metadata: [String: Any] = [
+            "timestamps": timestampsMetadata,
+            "source": [
+                "imessage": [
+                    "chat_guid": thread.guid,
+                    "handle_id": message.handleId,
+                    "service": message.service ?? "iMessage",
+                    "row_id": message.rowId
         ]
+            ],
+            "type": [
+                "kind": "imessage",
+                "imessage": [
+                    "direction": message.isFromMe ? "outgoing" : "incoming",
+                    "is_group": thread.isGroup
+                ]
+            ],
+            "extraction": [
+                "collector_name": "imessage",
+                "collector_version": "1.0.0",
+                "hostagent_modules": enrichmentOrchestrator != nil ? ["ocr", "entities", "faces", "caption"] : []
+            ]
+        ]
+        
+        // Add attachments to metadata if present
+        if !structuredAttachments.isEmpty {
+            metadata["attachments"] = structuredAttachments
+        }
         
         // Build document
         let documentId = "imessage:\(message.guid)"
@@ -2680,17 +2758,18 @@ public actor IMessageHandler {
             ],
             "metadata": metadata,
             "content_timestamp": contentTimestamp,
-            "content_timestamp_type": message.isFromMe ? "sent" : "received",
+            "content_timestamp_type": contentTimestampType,
             "people": people,
             "thread": threadPayload,
             "facet_overrides": [
-                "has_attachments": !attachments.isEmpty,
-                "attachment_count": attachments.count
+                "has_attachments": !structuredAttachments.isEmpty,
+                "attachment_count": structuredAttachments.count
             ]
         ]
         
-        if !attachments.isEmpty {
-            document["attachments"] = attachments
+        // Add source_account_id if available
+        if let accountId = sourceAccountId {
+            document["source_account_id"] = accountId
         }
         
         return document
@@ -2736,6 +2815,32 @@ public actor IMessageHandler {
         }
         
         return people
+    }
+    
+    private func inferAttachmentKind(mimeType: String?, filename: String?) -> String {
+        // Check mime type first
+        if let mime = mimeType {
+            if mime.hasPrefix("image/") {
+                return "image"
+            }
+            if mime == "application/pdf" {
+                return "pdf"
+            }
+        }
+        
+        // Check filename extension as fallback
+        if let filename = filename {
+            let ext = (filename as NSString).pathExtension.lowercased()
+            let imageExts = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "heic", "heif", "webp"]
+            if imageExts.contains(ext) {
+                return "image"
+            }
+            if ext == "pdf" {
+                return "pdf"
+            }
+        }
+        
+        return "file"
     }
     
     private func inferIdentifierType(_ identifier: String) -> String {

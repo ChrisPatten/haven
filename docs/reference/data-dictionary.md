@@ -40,9 +40,9 @@ Gateway API (:8085)
   ↓ IngestRequestModel
   ↓ DocumentIngestRequest
 Catalog API (:8081)
-  ↓ documents table
+  ↓ documents table (with metadata.attachments)
   ↓ chunks table
-  ↓ files table
+  ↓ chunk_documents table
 Worker Service
   ↓ EmbeddingSubmitRequest
   ↓ IntentSignalCreateRequest
@@ -64,9 +64,10 @@ Primary table for all atomic units of information (messages, files, notes, remin
 | Field | Type | Nullable | Description | Constraints |
 |-------|------|----------|-------------|-------------|
 | `doc_id` | UUID | NO | Primary key, auto-generated | PRIMARY KEY |
-| `external_id` | TEXT | NO | Source-specific identifier | UNIQUE(external_id, version_number) |
+| `external_id` | TEXT | NO | Source-specific identifier | UNIQUE(source_type, source_provider, source_account_id, external_id, version_number) |
 | `source_type` | TEXT | NO | Source system type | CHECK: imessage, sms, email, email_local, localfs, gdrive, note, reminder, macos_reminders, calendar_event, contact |
 | `source_provider` | TEXT | YES | Provider name (e.g., "apple_messages", "gmail") | |
+| `source_account_id` | TEXT | YES | Stable account identifier for multi-account sources | |
 | `version_number` | INTEGER | NO | Document version (increments on edits) | DEFAULT 1 |
 | `previous_version_id` | UUID | YES | Reference to previous version | FK → documents(doc_id) |
 | `is_active_version` | BOOLEAN | NO | True for current version | DEFAULT true |
@@ -79,8 +80,6 @@ Primary table for all atomic units of information (messages, files, notes, remin
 | `canonical_uri` | TEXT | YES | Canonical URL/path reference | |
 | `content_timestamp` | TIMESTAMPTZ | NO | Primary timestamp (sent, created, modified, due) | |
 | `content_timestamp_type` | TEXT | NO | Meaning of timestamp | CHECK: sent, received, modified, created, event_start, event_end, due, completed |
-| `content_created_at` | TIMESTAMPTZ | YES | Original creation timestamp | |
-| `content_modified_at` | TIMESTAMPTZ | YES | Last modification timestamp | |
 | `people` | JSONB | NO | Array of person identifiers | DEFAULT '[]'::jsonb |
 | `thread_id` | UUID | YES | Reference to parent thread | FK → threads(thread_id) |
 | `parent_doc_id` | UUID | YES | Reference to parent document | FK → documents(doc_id) |
@@ -111,6 +110,7 @@ Primary table for all atomic units of information (messages, files, notes, remin
 **Indexes**:
 - `idx_documents_source_type`: source_type
 - `idx_documents_external_id`: external_id
+- `idx_documents_source_account_id`: source_account_id (partial, WHERE source_account_id IS NOT NULL)
 - `idx_documents_active_version`: is_active_version (partial, WHERE is_active_version = true)
 - `idx_documents_thread`: thread_id (partial, WHERE thread_id IS NOT NULL)
 - `idx_documents_content_timestamp`: content_timestamp DESC
@@ -128,9 +128,10 @@ First-class entity for conversations, chat threads, email threads.
 | Field | Type | Nullable | Description | Constraints |
 |-------|------|----------|-------------|-------------|
 | `thread_id` | UUID | NO | Primary key | PRIMARY KEY |
-| `external_id` | TEXT | NO | Source-specific thread identifier | UNIQUE |
+| `external_id` | TEXT | NO | Source-specific thread identifier | UNIQUE(source_type, source_provider, source_account_id, external_id) |
 | `source_type` | TEXT | NO | Source system type | CHECK: imessage, sms, email, slack, whatsapp, signal |
 | `source_provider` | TEXT | YES | Provider name | |
+| `source_account_id` | TEXT | YES | Stable account identifier for multi-account sources | |
 | `title` | TEXT | YES | Thread title/name | |
 | `participants` | JSONB | NO | Array of participant identifiers | DEFAULT '[]'::jsonb |
 | `thread_type` | TEXT | YES | Thread type classification | |
@@ -147,51 +148,9 @@ First-class entity for conversations, chat threads, email threads.
 - `idx_threads_source_type`: source_type
 - `idx_threads_last_message`: last_message_at DESC
 - `idx_threads_participants`: participants (GIN)
+- `idx_threads_source_account_id`: source_account_id (partial, WHERE source_account_id IS NOT NULL)
 
-#### files
-
-Deduplicated binary file storage.
-
-| Field | Type | Nullable | Description | Constraints |
-|-------|------|----------|-------------|-------------|
-| `file_id` | UUID | NO | Primary key | PRIMARY KEY |
-| `content_sha256` | TEXT | NO | SHA256 hash of file content | UNIQUE |
-| `object_key` | TEXT | NO | Storage object key/path | |
-| `storage_backend` | TEXT | NO | Storage backend name | CHECK: minio, s3, local, gdrive, DEFAULT 'minio' |
-| `filename` | TEXT | YES | Original filename | |
-| `mime_type` | TEXT | YES | MIME type | |
-| `size_bytes` | BIGINT | YES | File size in bytes | |
-| `enrichment_status` | TEXT | NO | Enrichment processing status | CHECK: pending, processing, enriched, failed, skipped, DEFAULT 'pending' |
-| `enrichment` | JSONB | YES | Enrichment results (OCR, caption, faces) | |
-| `first_seen_at` | TIMESTAMPTZ | NO | When file was first seen | DEFAULT NOW() |
-| `last_enriched_at` | TIMESTAMPTZ | YES | Last enrichment timestamp | |
-| `created_at` | TIMESTAMPTZ | NO | Record creation timestamp | DEFAULT NOW() |
-| `updated_at` | TIMESTAMPTZ | NO | Last update timestamp | DEFAULT NOW() |
-
-**Indexes**:
-- `idx_files_content_sha256`: content_sha256
-- `idx_files_enrichment_status`: enrichment_status
-- `idx_files_mime_type`: mime_type
-- `idx_files_enrichment`: enrichment (GIN)
-
-#### document_files
-
-Junction table linking documents to files.
-
-| Field | Type | Nullable | Description | Constraints |
-|-------|------|----------|-------------|-------------|
-| `doc_id` | UUID | NO | Document reference | FK → documents(doc_id), PRIMARY KEY |
-| `file_id` | UUID | NO | File reference | FK → files(file_id), PRIMARY KEY |
-| `role` | TEXT | NO | Relationship role | CHECK: attachment, extracted_from, thumbnail, preview, related, PRIMARY KEY |
-| `attachment_index` | INTEGER | YES | Order index for attachments | |
-| `filename` | TEXT | YES | Filename for this relationship | |
-| `caption` | TEXT | YES | Caption for this file | |
-| `created_at` | TIMESTAMPTZ | NO | Record creation timestamp | DEFAULT NOW() |
-
-**Indexes**:
-- `idx_document_files_doc`: doc_id
-- `idx_document_files_file`: file_id
-- `idx_document_files_role`: role
+**Note**: Files and document_files tables have been removed. All attachment/file data is now stored in `metadata.attachments` within the documents table.
 
 #### chunks
 
@@ -202,8 +161,7 @@ Text segments for semantic search with embeddings.
 | `chunk_id` | UUID | NO | Primary key | PRIMARY KEY |
 | `text` | TEXT | NO | Chunk text content | |
 | `text_sha256` | TEXT | NO | SHA256 hash of chunk text | |
-| `ordinal` | INTEGER | NO | Order within source document | |
-| `source_ref` | JSONB | YES | Source reference metadata | |
+| `source_ref` | JSONB | YES | Source reference metadata (e.g., text span info) | |
 | `embedding_status` | TEXT | NO | Embedding processing status | CHECK: pending, processing, embedded, failed, DEFAULT 'pending' |
 | `embedding_model` | TEXT | YES | Model used for embedding | |
 | `embedding_vector` | VECTOR(1024) | YES | Embedding vector | |
@@ -369,8 +327,7 @@ Request model for document ingestion via Gateway API.
 | `metadata` | object | NO | Type-specific metadata |
 | `content_timestamp` | datetime | NO | Primary timestamp |
 | `content_timestamp_type` | string | NO | Timestamp type |
-| `content_created_at` | datetime | NO | Creation timestamp |
-| `content_modified_at` | datetime | NO | Modification timestamp |
+| `source_account_id` | string | NO | Account identifier for multi-account sources |
 | `people` | DocumentPerson[] | NO | Person identifiers |
 | `thread_id` | UUID | NO | Thread reference |
 | `thread` | ThreadPayloadModel | NO | Thread payload |
@@ -452,8 +409,7 @@ Request model for Catalog API document ingestion.
 | `metadata` | object | NO | Type-specific metadata |
 | `content_timestamp` | datetime | YES | Primary timestamp |
 | `content_timestamp_type` | string | YES | Timestamp type |
-| `content_created_at` | datetime | NO | Creation timestamp |
-| `content_modified_at` | datetime | NO | Modification timestamp |
+| `source_account_id` | string | NO | Account identifier for multi-account sources |
 | `people` | PersonPayload[] | NO | Person identifiers |
 | `thread_id` | UUID | NO | Thread reference |
 | `thread` | ThreadPayload | NO | Thread payload |
@@ -469,19 +425,22 @@ Request model for Catalog API document ingestion.
 
 #### DocumentFileLink
 
-File attachment link.
+File attachment link (stored in metadata.attachments).
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `role` | string | YES | Role (attachment, extracted_from, thumbnail, preview, related) |
-| `attachment_index` | integer | NO | Order index |
-| `filename` | string | NO | Filename |
-| `caption` | string | NO | Caption |
-| `file` | FileDescriptor | YES | File descriptor |
+| `index` | integer | YES | Attachment index |
+| `kind` | string | YES | Kind (image, pdf, file, other) |
+| `role` | string | YES | Role (attachment, inline, thumbnail, related) |
+| `mime_type` | string | YES | MIME type |
+| `size_bytes` | integer | NO | File size in bytes |
+| `source_ref` | AttachmentSourceRef | NO | Source reference (path, message_attachment_id, page) |
+| `ocr` | AttachmentOCR | NO | OCR results |
+| `caption` | AttachmentCaption | NO | Caption results |
+| `vision` | AttachmentVision | NO | Vision results (faces, objects, scene) |
+| `exif` | AttachmentEXIF | NO | EXIF metadata |
 
-#### FileDescriptor
-
-File descriptor for attachments.
+**Note**: FileDescriptor model is deprecated. Attachments are now stored directly in metadata.attachments with full enrichment data (OCR, caption, vision, exif).
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -656,8 +615,7 @@ Email intent classification payload.
 | `CollectorDocument.metadata.mimeType` | `IngestRequestModel.content.mime_type` | Direct mapping |
 | `CollectorDocument.metadata.timestamp` | `IngestRequestModel.content_timestamp` | ISO8601 format |
 | `CollectorDocument.metadata.timestampType` | `IngestRequestModel.content_timestamp_type` | Direct mapping |
-| `CollectorDocument.metadata.createdAt` | `IngestRequestModel.content_created_at` | ISO8601 format |
-| `CollectorDocument.metadata.modifiedAt` | `IngestRequestModel.content_modified_at` | ISO8601 format |
+| `CollectorDocument.metadata.timestamps.source_specific.*` | `IngestRequestModel.metadata.timestamps.source_specific.*` | Timestamps stored in metadata.timestamps.source_specific |
 | `CollectorDocument.title` | `IngestRequestModel.title` | Direct mapping |
 | `CollectorDocument.canonicalUri` | `IngestRequestModel.canonical_uri` | Direct mapping |
 | `EnrichedDocument.base.images` | Not sent | Image files NOT sent to gateway (business rule) |
@@ -693,10 +651,15 @@ Email intent classification payload.
 | `DocumentIngestRequest.people` | `documents.people` | JSONB array |
 | `DocumentIngestRequest.thread` | `threads` table | Creates thread if not exists |
 | `DocumentIngestRequest.thread.external_id` | `threads.external_id` | Direct mapping |
-| `DocumentIngestRequest.attachments[].file` | `files` table | Creates file if not exists |
-| `DocumentIngestRequest.attachments[].file.content_sha256` | `files.content_sha256` | Direct mapping |
-| `DocumentIngestRequest.attachments[].file.object_key` | `files.object_key` | Direct mapping |
-| `DocumentIngestRequest.attachments[]` | `document_files` table | Creates junction records |
+| `DocumentIngestRequest.thread.source_account_id` | `threads.source_account_id` | Direct mapping |
+| `DocumentIngestRequest.source_account_id` | `documents.source_account_id` | Direct mapping |
+| `DocumentIngestRequest.attachments[]` | `documents.metadata.attachments[]` | Stored in metadata.attachments array |
+| `DocumentIngestRequest.attachments[].index` | `metadata.attachments[].index` | Direct mapping |
+| `DocumentIngestRequest.attachments[].kind` | `metadata.attachments[].kind` | Direct mapping |
+| `DocumentIngestRequest.attachments[].ocr` | `metadata.attachments[].ocr` | Direct mapping |
+| `DocumentIngestRequest.attachments[].caption` | `metadata.attachments[].caption` | Direct mapping |
+| `DocumentIngestRequest.attachments[].vision` | `metadata.attachments[].vision` | Direct mapping |
+| `DocumentIngestRequest.attachments[].exif` | `metadata.attachments[].exif` | Direct mapping |
 
 ### Database → Search Service
 
@@ -711,7 +674,131 @@ Email intent classification payload.
 | `documents.people` | `SearchDocument.people` | Converted to SearchPerson[] |
 | `chunks.chunk_id` | `SearchChunk.chunk_id` | Direct mapping |
 | `chunks.text` | `SearchChunk.text` | Direct mapping |
-| `chunks.ordinal` | `SearchChunk.ordinal` | Direct mapping |
+| `chunk_documents.ordinal` | Order within document | Ordinal stored in chunk_documents, not chunks |
+
+---
+
+## Metadata Structure
+
+The `documents.metadata` JSONB field has a fixed set of top-level keys to ensure consistent structure across all document types.
+
+### Top-Level Metadata Keys
+
+```json
+{
+  "ingested_at": "<ISO-8601 UTC timestamp>",
+  "timestamps": { ... },
+  "attachments": [ ... ],
+  "source": { ... },
+  "type": { ... },
+  "enrichment": { ... },
+  "extraction": { ... }
+}
+```
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `ingested_at` | string | ISO-8601 UTC timestamp when Catalog stored this document |
+| `timestamps` | object | Timestamp structure (see Timestamps section) |
+| `attachments` | array | Full description of attached images/files (see Attachments section) |
+| `source` | object | Raw source-system oriented details |
+| `type` | object | Normalized, type-specific semantics |
+| `enrichment` | object | ML-derived enrichment over document text |
+| `extraction` | object | Ingestion and parsing diagnostics |
+
+### metadata.timestamps
+
+The timestamps structure mirrors the document-level `content_timestamp` and `content_timestamp_type` fields.
+
+```json
+{
+  "timestamps": {
+    "primary": {
+      "value": "<ISO-8601 UTC timestamp>",
+      "type": "<enum string matching content_timestamp_type>"
+    },
+    "source_specific": {
+      "<source_field_name>": "<ISO-8601 or raw string>",
+      "...": "..."
+    }
+  }
+}
+```
+
+**Rules**:
+- `primary.value` must equal `content_timestamp`
+- `primary.type` must equal `content_timestamp_type`
+- `source_specific` keys are source-defined (e.g., `sent_at`, `received_at`, `internaldate`, `header_date`, `fs_created`, `fs_modified`, `exif_taken_at`)
+
+### metadata.attachments
+
+Attachments represent any file/image that is part of the document. All OCR, caption, face detection, and EXIF information is stored here.
+
+See the [Attachments section](#documentfilelink) for the full schema.
+
+**Note**: There is no separate `files` table; all file-level enrichment is embedded in `metadata.attachments`.
+
+### metadata.source
+
+Contains raw source-system details for debugging or advanced features.
+
+**Examples**:
+- **iMessage**: `{ "imessage": { "chat_guid": "...", "handle_id": 42, "service": "iMessage", "row_id": 123456 } }`
+- **Email**: `{ "email": { "folder": "INBOX", "uid": 12345, "raw_flags": [...], "header_map": {...} } }`
+
+### metadata.type
+
+Exposes normalized semantics by document kind.
+
+**Base structure**:
+```json
+{
+  "type": {
+    "kind": "email"  // or imessage | sms | note | reminder | calendar_event | file | ...
+  }
+}
+```
+
+**Type-specific examples**:
+- **Email**: `{ "kind": "email", "email": { "subject": "...", "is_outbound": true, "in_reply_to_message_id": "..." } }`
+- **iMessage**: `{ "kind": "imessage", "imessage": { "direction": "outgoing", "is_group": true } }`
+- **Reminder**: `{ "kind": "reminder", "reminder": { "status": "open", "priority": 1, "due_date": "..." } }`
+
+### metadata.enrichment
+
+ML-derived document-level signals over text.
+
+```json
+{
+  "enrichment": {
+    "entities": [
+      { "text": "Acme HVAC", "type": "organization", "offset": 10, "length": 9 }
+    ],
+    "classification": {
+      "categories": [
+        { "label": "home_maintenance", "confidence": 0.92 }
+      ]
+    }
+  }
+}
+```
+
+### metadata.extraction
+
+Tracks how the document was ingested and processed (diagnostic information).
+
+```json
+{
+  "extraction": {
+    "collector_name": "imessage",
+    "collector_version": "1.3.0",
+    "hostagent_modules": ["ocr", "entities", "faces"],
+    "warnings": [
+      { "code": "ATTACHMENT_OCR_FAILED", "attachment_index": 2 }
+    ]
+  }
+}
+```
 
 ---
 
@@ -780,7 +867,7 @@ Stored in `documents.metadata.enrichment` JSONB field.
 
 ### File Enrichment
 
-Stored in `files.enrichment` JSONB field.
+Stored in `documents.metadata.attachments[].ocr`, `metadata.attachments[].caption`, `metadata.attachments[].vision`, `metadata.attachments[].exif` JSONB fields.
 
 ```json
 {

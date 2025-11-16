@@ -362,21 +362,84 @@ public actor RemindersHandler {
             startDate = nil
         }
         
-        // Use lastModifiedDate or creationDate for content timestamp
-        let contentTimestamp = reminder.lastModifiedDate ?? reminder.creationDate ?? Date()
+        // Determine content_timestamp and content_timestamp_type following reminder rules
+        // If due date exists, use it as primary; else use created/modified
+        let contentTimestamp: Date
+        let contentTimestampType: String
         
-        // Build metadata
-        var metadata: [String: Any] = [:]
-        metadata["reminder.calendar"] = reminder.calendar?.title ?? "Unknown"
-        metadata["reminder.priority"] = reminder.priority
-        if let alarms = reminder.alarms {
-            metadata["reminder.has_alarms"] = !alarms.isEmpty
+        if let due = dueDate {
+            contentTimestamp = due
+            contentTimestampType = "due"
+        } else if let modified = reminder.lastModifiedDate {
+            contentTimestamp = modified
+            contentTimestampType = "modified"
+        } else if let created = reminder.creationDate {
+            contentTimestamp = created
+            contentTimestampType = "created"
         } else {
-            metadata["reminder.has_alarms"] = false
+            contentTimestamp = Date()
+            contentTimestampType = "modified"
         }
         
+        // Build timestamp metadata structure
+        var sourceSpecificTimestamps: [String: Any] = [:]
+        if let created = reminder.creationDate {
+            sourceSpecificTimestamps["created_at"] = ISO8601DateFormatter().string(from: created)
+        }
+        if let modified = reminder.lastModifiedDate {
+            sourceSpecificTimestamps["modified_at"] = ISO8601DateFormatter().string(from: modified)
+        }
+        if let due = dueDate {
+            sourceSpecificTimestamps["due_at"] = ISO8601DateFormatter().string(from: due)
+        }
+        if let completed = reminder.completionDate {
+            sourceSpecificTimestamps["completed_at"] = ISO8601DateFormatter().string(from: completed)
+        }
+        if let start = startDate {
+            sourceSpecificTimestamps["start_at"] = ISO8601DateFormatter().string(from: start)
+        }
+        
+        let timestampsMetadata: [String: Any] = [
+            "primary": [
+                "value": ISO8601DateFormatter().string(from: contentTimestamp),
+                "type": contentTimestampType
+            ],
+            "source_specific": sourceSpecificTimestamps
+        ]
+        
+        // Build metadata with new structure
+        var metadata: [String: Any] = [
+            "timestamps": timestampsMetadata,
+            "source": [
+                "reminder": [
+                    "calendar_item_identifier": identifier,
+                    "calendar": reminder.calendar?.title ?? "Unknown",
+                    "calendar_id": reminder.calendar?.calendarIdentifier ?? ""
+                ]
+            ],
+            "type": [
+                "kind": "reminder",
+                "reminder": [
+                    "status": reminder.isCompleted ? "completed" : "open",
+                    "priority": reminder.priority,
+                    "due_date": dueDate.map { ISO8601DateFormatter().string(from: $0) }
+                ]
+            ],
+            "extraction": [
+                "collector_name": "reminders",
+                "collector_version": "1.0.0",
+                "hostagent_modules": []
+            ]
+        ]
+        
+        // Add reminder-specific details to source
         if let location = reminder.location {
-            metadata["reminder.location"] = location
+            if var reminderSource = metadata["source"] as? [String: Any],
+               var reminderDict = reminderSource["reminder"] as? [String: Any] {
+                reminderDict["location"] = location
+                reminderSource["reminder"] = reminderDict
+                metadata["source"] = reminderSource
+            }
         }
         
         // Extract alarm information
@@ -403,7 +466,12 @@ public actor RemindersHandler {
                 }
                 alarmInfo.append(alarmDict)
             }
-            metadata["reminder.alarms"] = alarmInfo
+            if var reminderSource = metadata["source"] as? [String: Any],
+               var reminderDict = reminderSource["reminder"] as? [String: Any] {
+                reminderDict["alarms"] = alarmInfo
+                reminderSource["reminder"] = reminderDict
+                metadata["source"] = reminderSource
+            }
         }
         
         return ReminderDocumentPayload(
@@ -415,9 +483,7 @@ public actor RemindersHandler {
             text: textContent,
             contentSha256: contentHash,
             contentTimestamp: contentTimestamp,
-            contentTimestampType: "modified",
-            contentCreatedAt: reminder.creationDate,
-            contentModifiedAt: reminder.lastModifiedDate,
+            contentTimestampType: contentTimestampType,
             hasDueDate: dueDate != nil,
             dueDate: dueDate,
             isCompleted: reminder.isCompleted,
@@ -545,8 +611,8 @@ public actor RemindersHandler {
             mimeType: "text/plain",
             timestamp: reminder.contentTimestamp,
             timestampType: reminder.contentTimestampType,
-            createdAt: reminder.contentCreatedAt,
-            modifiedAt: reminder.contentModifiedAt,
+            createdAt: nil,
+            modifiedAt: nil,
             additionalMetadata: additionalMetadata
         )
         
@@ -595,8 +661,6 @@ public actor RemindersHandler {
                 contentSha256: contentHash,
                 contentTimestamp: Date(),
                 contentTimestampType: "modified",
-                contentCreatedAt: Date(),
-                contentModifiedAt: Date(),
                 hasDueDate: false,
                 dueDate: nil,
                 isCompleted: false,
@@ -660,8 +724,6 @@ struct ReminderDocumentPayload {
     let contentSha256: String
     let contentTimestamp: Date
     let contentTimestampType: String
-    let contentCreatedAt: Date?
-    let contentModifiedAt: Date?
     let hasDueDate: Bool
     let dueDate: Date?
     let isCompleted: Bool?

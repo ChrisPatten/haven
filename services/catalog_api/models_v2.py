@@ -18,6 +18,7 @@ class ThreadPayload(BaseModel):
     external_id: str
     source_type: Optional[str] = None
     source_provider: Optional[str] = None
+    source_account_id: Optional[str] = None
     title: Optional[str] = None
     participants: List[PersonPayload] = Field(default_factory=list)
     thread_type: Optional[str] = None
@@ -39,18 +40,58 @@ class FileDescriptor(BaseModel):
     enrichment: Optional[Dict[str, Any]] = None
 
 
+class AttachmentSourceRef(BaseModel):
+    path: Optional[str] = None
+    message_attachment_id: Optional[int] = None
+    page: Optional[int] = None
+
+
+class AttachmentOCR(BaseModel):
+    text: str
+    confidence: Optional[float] = None
+    language: Optional[str] = None
+    regions: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+
+
+class AttachmentCaption(BaseModel):
+    text: str
+    model: Optional[str] = None
+    confidence: Optional[float] = None
+    generated_at: Optional[datetime] = None
+
+
+class AttachmentVision(BaseModel):
+    faces: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    objects: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    scene: Optional[str] = None
+
+
+class AttachmentEXIF(BaseModel):
+    camera: Optional[str] = None
+    taken_at: Optional[datetime] = None
+    location: Optional[Dict[str, float]] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+
 class DocumentFileLink(BaseModel):
-    role: Literal["attachment", "extracted_from", "thumbnail", "preview", "related"] = "attachment"
-    attachment_index: Optional[int] = None
-    filename: Optional[str] = None
-    caption: Optional[str] = None
-    file: FileDescriptor
+    index: int
+    kind: str  # e.g. "image" | "pdf" | "file" | "other"
+    role: Literal["attachment", "inline", "thumbnail", "related"] = "attachment"
+    mime_type: str
+    size_bytes: Optional[int] = None
+    source_ref: Optional[AttachmentSourceRef] = None
+    ocr: Optional[AttachmentOCR] = None
+    caption: Optional[AttachmentCaption] = None
+    vision: Optional[AttachmentVision] = None
+    exif: Optional[AttachmentEXIF] = None
 
 
 class DocumentIngestRequest(BaseModel):
     idempotency_key: str
     source_type: str
     source_provider: Optional[str] = None
+    source_account_id: Optional[str] = None
     source_id: str
     content_sha256: str
     external_id: Optional[str] = None
@@ -61,8 +102,6 @@ class DocumentIngestRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     content_timestamp: datetime
     content_timestamp_type: str
-    content_created_at: Optional[datetime] = None
-    content_modified_at: Optional[datetime] = None
     people: List[PersonPayload] = Field(default_factory=list)
     thread_id: Optional[UUID] = None
     thread: Optional[ThreadPayload] = None
@@ -76,6 +115,7 @@ class DocumentIngestRequest(BaseModel):
     completed_at: Optional[datetime] = None
     attachments: List[DocumentFileLink] = Field(default_factory=list)
     facet_overrides: Dict[str, Any] = Field(default_factory=dict)
+    intent: Optional[Dict[str, Any]] = None
 
     @validator("content_timestamp_type")
     def normalize_timestamp_type(cls, value: str) -> str:
@@ -88,7 +128,6 @@ class DocumentIngestResponse(BaseModel):
     external_id: str
     version_number: int
     thread_id: Optional[UUID] = None
-    file_ids: List[UUID] = Field(default_factory=list)
     status: str
     duplicate: bool = False
 
@@ -126,13 +165,20 @@ class DocumentBatchIngestResponse(BaseModel):
     results: List[DocumentBatchIngestItem] = Field(default_factory=list)
 
 
+class PersonIngestResponse(BaseModel):
+    person_id: UUID
+    external_id: str
+    version: int
+    status: str = "upserted"
+    deleted: bool = False
+
+
 class DocumentVersionRequest(BaseModel):
     text: Optional[str] = None
     title: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     content_timestamp: Optional[datetime] = None
     content_timestamp_type: Optional[str] = None
-    content_modified_at: Optional[datetime] = None
     people: Optional[List[PersonPayload]] = None
     thread_id: Optional[UUID] = None
     has_location: Optional[bool] = None
@@ -154,7 +200,6 @@ class DocumentVersionResponse(BaseModel):
     external_id: str
     version_number: int
     thread_id: Optional[UUID] = None
-    file_ids: List[UUID] = Field(default_factory=list)
     status: str
 
 

@@ -21,8 +21,20 @@ from shared.db import (
     create_document_version as create_document_version_record,
     get_connection,
 )
+from shared.envelope_v2 import (
+    DocumentEnvelope,
+    PersonEnvelope,
+    PersonReference,
+    is_v2_schema,
+)
 from shared.logging import get_logger, setup_logging
-from shared.people_repository import PeopleResolver, get_self_person_id_from_settings
+from shared.people_repository import (
+    ContactValue,
+    PeopleRepository,
+    PersonIngestRecord,
+    PeopleResolver,
+    get_self_person_id_from_settings,
+)
 from shared.people_normalization import IdentifierKind
 from shared.context import fetch_context_overview
 from services.catalog_api.models_v2 import (
@@ -44,7 +56,9 @@ from services.catalog_api.models_v2 import (
     IntentSignalFeedbackRequest,
     IntentSignalResponse,
     IntentStatusResponse,
-    PersonPayload,
+    ThreadPayload,
+    PersonPayload as DocumentPersonPayload,
+    PersonIngestResponse,
     SubmissionStatusResponse,
 )
 
@@ -64,6 +78,9 @@ class CatalogSettings(BaseModel):
     search_token: Optional[str] = Field(default_factory=lambda: os.getenv("SEARCH_TOKEN"))
     forward_to_search: bool = Field(
         default_factory=lambda: os.getenv("CATALOG_FORWARD_TO_SEARCH", "true").lower() == "true"
+    )
+    contacts_default_region: Optional[str] = Field(
+        default_factory=lambda: os.getenv("CONTACTS_DEFAULT_REGION", "US")
     )
 
 
@@ -93,6 +110,253 @@ def get_search_client():
             )
             logger.info("search_client_initialized", search_url=settings.search_url)
     return _search_client if _search_client is not False else None
+
+
+def _ensure_utc(ts: Optional[datetime]) -> Optional[datetime]:
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC)
+
+
+def _maybe_uuid(value: Optional[str]) -> Optional[uuid.UUID]:
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
+def _uuid_list_from_strings(values: Sequence[str]) -> List[uuid.UUID]:
+    result: List[uuid.UUID] = []
+    for value in values:
+        parsed = _maybe_uuid(value)
+        if parsed:
+            result.append(parsed)
+    return result
+
+
+def _document_people_from_refs(
+    entries: Iterable[PersonReference],
+) -> List[DocumentPersonPayload]:
+    return [
+        DocumentPersonPayload(
+            identifier=item.identifier,
+            identifier_type=item.identifier_type,
+            role=item.role,
+            display_name=item.display_name,
+            metadata=item.metadata or {},
+        )
+        for item in entries
+    ]
+
+
+def _thread_from_envelope(envelope: DocumentEnvelope) -> Optional[ThreadPayload]:
+    if not envelope.payload.thread:
+        return None
+    hint = envelope.payload.thread
+    external_id = (
+        hint.external_id
+        or envelope.payload.relationships.thread_id
+        or envelope.payload.external_id
+    )
+    if not external_id:
+        return None
+    return ThreadPayload(
+        external_id=external_id,
+        source_type=envelope.source.source_type,
+        source_provider=envelope.source.source_provider,
+        source_account_id=envelope.source.source_account_id,
+        title=hint.title,
+        participants=_document_people_from_refs(hint.participants),
+        thread_type=hint.thread_type,
+        is_group=hint.is_group,
+        metadata=hint.metadata or {},
+    )
+
+
+def _build_facet_overrides(envelope: DocumentEnvelope) -> Dict[str, Any]:
+    facets = envelope.payload.facets
+    overrides: Dict[str, Any] = {}
+    if facets.has_attachments is not None:
+        overrides["has_attachments"] = facets.has_attachments
+    if facets.attachment_count is not None:
+        overrides["attachment_count"] = facets.attachment_count
+    if facets.has_location is not None:
+        overrides["has_location"] = facets.has_location
+    if facets.has_due_date is not None:
+        overrides["has_due_date"] = facets.has_due_date
+    if facets.is_completed is not None:
+        overrides["is_completed"] = facets.is_completed
+    return overrides
+
+
+def _compute_document_idempotency(source_type: str, source_id: str, text_hash: str) -> str:
+    seed = f"{source_type}:{source_id}:{text_hash}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _document_envelope_to_ingest_request(
+    envelope: DocumentEnvelope,
+) -> DocumentIngestRequest:
+    payload = envelope.payload
+    source_id = payload.external_id
+    if not source_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="Document external_id is required",
+        )
+    text_hash = payload.text_sha256
+    if not text_hash:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="Document text_sha256 missing after validation",
+        )
+    metadata = dict(payload.metadata or {})
+    metadata.setdefault("ingested_at", datetime.now(tz=UTC).isoformat())
+    timestamps = metadata.setdefault("timestamps", {})
+    primary = timestamps.setdefault("primary", {})
+    primary.setdefault("value", _ensure_utc(payload.content_timestamp).isoformat())
+    primary.setdefault("type", payload.content_timestamp_type)
+    source_specific = timestamps.setdefault("source_specific", {})
+    if payload.content_created_at:
+        source_specific.setdefault(
+            "created_at", _ensure_utc(payload.content_created_at).isoformat()
+        )
+    if payload.content_modified_at:
+        source_specific.setdefault(
+            "modified_at", _ensure_utc(payload.content_modified_at).isoformat()
+        )
+
+    thread_payload = _thread_from_envelope(envelope)
+    relationships = payload.relationships
+    thread_id = _maybe_uuid(relationships.thread_id)
+    parent_doc_id = _maybe_uuid(relationships.parent_doc_id)
+    source_doc_ids = _uuid_list_from_strings(relationships.source_doc_ids)
+    related_doc_ids = _uuid_list_from_strings(relationships.related_doc_ids)
+
+    facet_overrides = _build_facet_overrides(envelope)
+    due_date = _ensure_utc(payload.facets.due_date)
+    completed_at = _ensure_utc(payload.facets.completed_at)
+
+    return DocumentIngestRequest(
+        idempotency_key=_compute_document_idempotency(
+            envelope.source.source_type,
+            source_id,
+            text_hash,
+        ),
+        source_type=envelope.source.source_type,
+        source_provider=envelope.source.source_provider,
+        source_account_id=envelope.source.source_account_id,
+        source_id=source_id,
+        content_sha256=text_hash,
+        external_id=payload.external_id,
+        title=payload.title,
+        text=payload.text,
+        mime_type=payload.mime_type,
+        canonical_uri=payload.canonical_uri,
+        metadata=metadata,
+        content_timestamp=_ensure_utc(payload.content_timestamp),
+        content_timestamp_type=payload.content_timestamp_type,
+        people=_document_people_from_refs(payload.people),
+        thread_id=thread_id,
+        thread=thread_payload,
+        parent_doc_id=parent_doc_id,
+        source_doc_ids=source_doc_ids,
+        related_doc_ids=related_doc_ids,
+        has_location=payload.facets.has_location,
+        has_due_date=payload.facets.has_due_date,
+        due_date=due_date,
+        is_completed=payload.facets.is_completed,
+        completed_at=completed_at,
+        attachments=[],
+        facet_overrides=facet_overrides,
+        intent=payload.intent,
+    )
+
+
+def _person_source_name(envelope: PersonEnvelope) -> str:
+    provider = envelope.source.source_provider or "default"
+    account = envelope.source.source_account_id or "default"
+    return f"{envelope.source.source_type}:{provider}:{account}"
+
+
+def _person_envelope_to_record(envelope: PersonEnvelope) -> PersonIngestRecord:
+    payload = envelope.payload
+    emails: List[ContactValue] = []
+    phones: List[ContactValue] = []
+    other_identifiers: List[str] = []
+    for identifier in payload.identifiers:
+        canonical = identifier.value_canonical or identifier.value_raw
+        raw_value = identifier.value_raw or identifier.value_canonical
+        if not canonical:
+            continue
+        contact_value = ContactValue(
+            value=canonical,
+            value_raw=raw_value,
+            label=identifier.label,
+            priority=identifier.priority or 100,
+            verified=True if identifier.verified is None else identifier.verified,
+        )
+        kind = (identifier.kind or "").lower()
+        if kind in {"phone", "imessage"}:
+            phones.append(contact_value)
+        elif kind == "email":
+            emails.append(contact_value)
+        else:
+            if raw_value:
+                other_identifiers.append(f"{kind}:{raw_value}")
+
+    notes = payload.notes or None
+    if other_identifiers:
+        extras = "; ".join(other_identifiers)
+        notes = f"{notes}\n{extras}" if notes else extras
+
+    return PersonIngestRecord(
+        external_id=payload.external_id,
+        display_name=payload.display_name,
+        given_name=payload.given_name,
+        family_name=payload.family_name,
+        organization=payload.organization,
+        nicknames=tuple(payload.nicknames),
+        notes=notes,
+        photo_hash=payload.photo_hash,
+        emails=tuple(emails),
+        phones=tuple(phones),
+        change_token=payload.change_token,
+        version=payload.version,
+        deleted=payload.deleted,
+    )
+
+
+def _lookup_person_id(conn, source: str, external_id: str) -> uuid.UUID:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT person_id
+            FROM people_source_map
+            WHERE source = %s AND external_id = %s
+            """,
+            (source, external_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to resolve person_id for ingested person",
+        )
+    person_id = row[0] if isinstance(row, tuple) else row["person_id"]
+    return person_id if isinstance(person_id, uuid.UUID) else uuid.UUID(str(person_id))
+
+
+def _require_v2_schema(envelope_version: str, kind: str) -> None:
+    if not is_v2_schema(envelope_version):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"{kind} schema_version must start with '2.'",
+        )
 
 
 @app.on_event("startup")
@@ -241,11 +505,11 @@ def _chunk_text(text: str, *, max_chars: int = 1200, overlap: int = 200) -> List
     return chunks
 
 
-def _person_dicts(people: Iterable[PersonPayload]) -> List[Dict[str, Any]]:
+def _person_dicts(people: Iterable[DocumentPersonPayload]) -> List[Dict[str, Any]]:
     return [person.dict(exclude_none=True) for person in people]
 
 
-def _thread_participants(participants: Iterable[PersonPayload]) -> List[Dict[str, Any]]:
+def _thread_participants(participants: Iterable[DocumentPersonPayload]) -> List[Dict[str, Any]]:
     return [participant.dict(exclude_none=True) for participant in participants]
 
 
@@ -257,83 +521,76 @@ def _coerce_json(value: Any) -> Any:
     return value
 
 
-def _upsert_file(cur, file_: FileDescriptor) -> uuid.UUID:
-    storage_backend = file_.storage_backend or "minio"
-    enrichment_status = file_.enrichment_status or "pending"
-    cur.execute(
-        """
-        INSERT INTO files (
-            content_sha256,
-            object_key,
-            storage_backend,
-            filename,
-            mime_type,
-            size_bytes,
-            enrichment_status,
-            enrichment
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (content_sha256) DO UPDATE
-        SET object_key = COALESCE(EXCLUDED.object_key, files.object_key),
-            storage_backend = COALESCE(EXCLUDED.storage_backend, files.storage_backend),
-            filename = COALESCE(EXCLUDED.filename, files.filename),
-            mime_type = COALESCE(EXCLUDED.mime_type, files.mime_type),
-            size_bytes = COALESCE(EXCLUDED.size_bytes, files.size_bytes),
-            enrichment_status = CASE
-                WHEN EXCLUDED.enrichment_status IS NOT NULL THEN EXCLUDED.enrichment_status
-                ELSE files.enrichment_status
-            END,
-            enrichment = COALESCE(EXCLUDED.enrichment, files.enrichment),
-            updated_at = NOW()
-        RETURNING file_id
-        """,
-        (
-            file_.content_sha256,
-            file_.object_key,
-            storage_backend,
-            file_.filename,
-            file_.mime_type,
-            file_.size_bytes,
-            enrichment_status,
-            Json(file_.enrichment) if file_.enrichment is not None else None,
-        ),
-    )
-    row = cur.fetchone()
-    if not row:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to upsert file")
-    return row["file_id"]
-
-
-def _link_document_file(cur, doc_id: uuid.UUID, file_id: uuid.UUID, link: DocumentFileLink) -> None:
-    cur.execute(
-        """
-        INSERT INTO document_files (doc_id, file_id, role, attachment_index, filename, caption)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (doc_id, file_id, role) DO UPDATE
-        SET attachment_index = COALESCE(EXCLUDED.attachment_index, document_files.attachment_index),
-            filename = COALESCE(EXCLUDED.filename, document_files.filename),
-            caption = COALESCE(EXCLUDED.caption, document_files.caption)
-        """,
-        (doc_id, file_id, link.role, link.attachment_index, link.filename, link.caption),
-    )
+def _prepare_attachments_metadata(attachments: List[DocumentFileLink]) -> List[Dict[str, Any]]:
+    """Convert DocumentFileLink list to metadata.attachments format"""
+    result = []
+    for att in attachments:
+        att_dict = {
+            "index": att.index,
+            "kind": att.kind,
+            "role": att.role,
+            "mime_type": att.mime_type,
+        }
+        if att.size_bytes is not None:
+            att_dict["size_bytes"] = att.size_bytes
+        if att.source_ref:
+            att_dict["source_ref"] = {
+                "path": att.source_ref.path,
+                "message_attachment_id": att.source_ref.message_attachment_id,
+                "page": att.source_ref.page,
+            }
+        if att.ocr:
+            att_dict["ocr"] = {
+                "text": att.ocr.text,
+                "confidence": att.ocr.confidence,
+                "language": att.ocr.language,
+                "regions": att.ocr.regions,
+            }
+        if att.caption:
+            att_dict["caption"] = {
+                "text": att.caption.text,
+                "model": att.caption.model,
+                "confidence": att.caption.confidence,
+                "generated_at": att.caption.generated_at.isoformat() if att.caption.generated_at else None,
+            }
+        if att.vision:
+            att_dict["vision"] = {
+                "faces": att.vision.faces,
+                "objects": att.vision.objects,
+                "scene": att.vision.scene,
+            }
+        if att.exif:
+            att_dict["exif"] = {
+                "camera": att.exif.camera,
+                "taken_at": att.exif.taken_at.isoformat() if att.exif.taken_at else None,
+                "location": att.exif.location,
+                "width": att.exif.width,
+                "height": att.exif.height,
+            }
+        result.append(att_dict)
+    return result
 
 
 def _create_chunks(cur, doc_id: uuid.UUID, chunk_candidates: List[ChunkCandidate]) -> None:
     doc_uuid = uuid.UUID(str(doc_id))
-    for candidate in chunk_candidates:
-        chunk_uuid = uuid.uuid5(doc_uuid, f"chunk:{candidate.ordinal}")
+    for idx, candidate in enumerate(chunk_candidates):
+        chunk_uuid = uuid.uuid5(doc_uuid, f"chunk:{idx}")
         cur.execute(
             """
-            INSERT INTO chunks (chunk_id, text, text_sha256, ordinal, embedding_status)
-            VALUES (%s, %s, %s, %s, 'pending')
+            INSERT INTO chunks (chunk_id, text, text_sha256, embedding_status, source_ref)
+            VALUES (%s, %s, %s, 'pending', %s)
             ON CONFLICT (chunk_id) DO UPDATE
             SET text = EXCLUDED.text,
                 text_sha256 = EXCLUDED.text_sha256,
-                ordinal = EXCLUDED.ordinal,
                 embedding_status = 'pending',
                 updated_at = NOW()
             """,
-            (chunk_uuid, candidate.text, candidate.text_sha256, candidate.ordinal),
+            (
+                chunk_uuid,
+                candidate.text,
+                candidate.text_sha256,
+                Json({"type": "text_span", "start_char": 0, "end_char": len(candidate.text)}),
+            ),
         )
         cur.execute(
             """
@@ -343,61 +600,14 @@ def _create_chunks(cur, doc_id: uuid.UUID, chunk_candidates: List[ChunkCandidate
             SET ordinal = EXCLUDED.ordinal,
                 weight = EXCLUDED.weight
             """,
-            (chunk_uuid, doc_id, 0, Decimal("1.0")),
+            (chunk_uuid, doc_id, idx, Decimal("1.0")),
         )
 
 
-def _apply_document_files(
-    cur,
-    doc_id: uuid.UUID,
-    attachments: List[DocumentFileLink],
-) -> Tuple[List[uuid.UUID], bool, int]:
-    file_ids: List[uuid.UUID] = []
-    attachment_count = 0
-    for link in attachments:
-        file_id = _upsert_file(cur, link.file)
-        _link_document_file(cur, doc_id, file_id, link)
-        file_ids.append(file_id)
-        if link.role == "attachment":
-            attachment_count += 1
-    return file_ids, attachment_count > 0, attachment_count
-
-
-def _copy_document_files(
-    cur,
-    source_doc_id: uuid.UUID,
-    target_doc_id: uuid.UUID,
-) -> Tuple[List[uuid.UUID], bool, int]:
-    file_ids: List[uuid.UUID] = []
-    attachment_count = 0
-    cur.execute(
-        """
-        SELECT file_id, role, attachment_index, filename, caption
-        FROM document_files
-        WHERE doc_id = %s
-        """,
-        (source_doc_id,),
-    )
-    for row in cur.fetchall():
-        cur.execute(
-            """
-            INSERT INTO document_files (doc_id, file_id, role, attachment_index, filename, caption)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (doc_id, file_id, role) DO NOTHING
-            """,
-            (
-                target_doc_id,
-                row["file_id"],
-                row["role"],
-                row["attachment_index"],
-                row["filename"],
-                row["caption"],
-            ),
-        )
-        file_ids.append(row["file_id"])
-        if row["role"] == "attachment":
-            attachment_count += 1
-    return file_ids, attachment_count > 0, attachment_count
+def _count_attachments(attachments: List[DocumentFileLink]) -> Tuple[bool, int]:
+    """Count attachments and determine has_attachments flag"""
+    attachment_count = sum(1 for att in attachments if att.role == "attachment")
+    return attachment_count > 0, attachment_count
 
 
 def _chunk_stats(cur, doc_id: uuid.UUID) -> Tuple[int, int, int]:
@@ -479,18 +689,12 @@ def _fetch_document_response(
     doc_row = cur.fetchone()
     if not doc_row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found")
-    cur.execute(
-        "SELECT file_id FROM document_files WHERE doc_id = %s",
-        (doc_id,),
-    )
-    file_ids = [row["file_id"] for row in cur.fetchall()]
     return DocumentIngestResponse(
         submission_id=submission_id,
         doc_id=doc_row["doc_id"],
         external_id=doc_row["external_id"],
         version_number=doc_row["version_number"],
         thread_id=doc_row["thread_id"],
-        file_ids=file_ids,
         status=doc_row["status"],
         duplicate=duplicate,
     )
@@ -514,6 +718,7 @@ def _upsert_thread(cur, payload: DocumentIngestRequest) -> Optional[uuid.UUID]:
                     external_id,
                     source_type,
                     source_provider,
+                    source_account_id,
                     title,
                     participants,
                     thread_type,
@@ -523,8 +728,8 @@ def _upsert_thread(cur, payload: DocumentIngestRequest) -> Optional[uuid.UUID]:
                     first_message_at,
                     last_message_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (external_id) DO UPDATE
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (source_type, source_provider, source_account_id, external_id) DO UPDATE
                 SET title = COALESCE(EXCLUDED.title, threads.title),
                     participants = CASE
                         WHEN jsonb_array_length(EXCLUDED.participants) > 0 THEN EXCLUDED.participants
@@ -550,6 +755,7 @@ def _upsert_thread(cur, payload: DocumentIngestRequest) -> Optional[uuid.UUID]:
                     thread_payload.external_id,
                     thread_payload.source_type or payload.source_type,
                     thread_payload.source_provider or payload.source_provider,
+                    thread_payload.source_account_id or payload.source_account_id,
                     thread_payload.title,
                     Json(participants if participants else []),
                     thread_payload.thread_type,
@@ -594,6 +800,7 @@ def _upsert_thread(cur, payload: DocumentIngestRequest) -> Optional[uuid.UUID]:
             external_id,
             source_type,
             source_provider,
+            source_account_id,
             title,
             participants,
             thread_type,
@@ -603,8 +810,8 @@ def _upsert_thread(cur, payload: DocumentIngestRequest) -> Optional[uuid.UUID]:
             first_message_at,
             last_message_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (external_id) DO UPDATE
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (source_type, source_provider, source_account_id, external_id) DO UPDATE
         SET title = COALESCE(EXCLUDED.title, threads.title),
             participants = CASE
                 WHEN jsonb_array_length(EXCLUDED.participants) > 0 THEN EXCLUDED.participants
@@ -629,6 +836,7 @@ def _upsert_thread(cur, payload: DocumentIngestRequest) -> Optional[uuid.UUID]:
             thread_payload.external_id,
             thread_payload.source_type or payload.source_type,
             thread_payload.source_provider or payload.source_provider,
+            thread_payload.source_account_id or payload.source_account_id,
             thread_payload.title,
             Json(participants if participants else []),
             thread_payload.thread_type,
@@ -841,7 +1049,6 @@ def _ingest_document(
 
     log = logger.bind(external_id=external_id, source_type=payload.source_type)
     submission_id: Optional[uuid.UUID] = None
-    file_ids: List[uuid.UUID] = []
     doc_record: Optional[Dict[str, Any]] = None
 
     try:
@@ -889,9 +1096,13 @@ def _ingest_document(
                         """
                         SELECT doc_id, version_number
                         FROM documents
-                        WHERE external_id = %s AND is_active_version = true
+                        WHERE source_type = %s 
+                          AND source_provider IS NOT DISTINCT FROM %s
+                          AND source_account_id IS NOT DISTINCT FROM %s
+                          AND external_id = %s 
+                          AND is_active_version = true
                         """,
-                        (external_id,),
+                        (payload.source_type, payload.source_provider, payload.source_account_id, external_id),
                     )
                     existing_doc = cur.fetchone()
                     if existing_doc:
@@ -946,12 +1157,43 @@ def _ingest_document(
                 has_attachments_override = facet_overrides.get("has_attachments")
                 attachment_count_override = facet_overrides.get("attachment_count")
 
+                # Prepare metadata with ingested_at, timestamps, and attachments
+                metadata = payload.metadata.copy() if payload.metadata else {}
+                metadata["ingested_at"] = datetime.now(timezone.utc).isoformat()
+                
+                # Ensure timestamps structure
+                if "timestamps" not in metadata:
+                    metadata["timestamps"] = {}
+                if "primary" not in metadata["timestamps"]:
+                    metadata["timestamps"]["primary"] = {
+                        "value": payload.content_timestamp.isoformat(),
+                        "type": payload.content_timestamp_type,
+                    }
+                if "source_specific" not in metadata["timestamps"]:
+                    metadata["timestamps"]["source_specific"] = {}
+                
+                # Store attachments in metadata.attachments
+                if payload.attachments:
+                    metadata["attachments"] = _prepare_attachments_metadata(payload.attachments)
+                    computed_has_attachments, computed_attachment_count = _count_attachments(payload.attachments)
+                else:
+                    computed_has_attachments = bool(has_attachments_override)
+                    computed_attachment_count = attachment_count_override or 0
+                
+                has_attachments = (
+                    has_attachments_override if has_attachments_override is not None else computed_has_attachments
+                )
+                attachment_count = (
+                    attachment_count_override if attachment_count_override is not None else computed_attachment_count
+                )
+
                 cur.execute(
                     """
                     INSERT INTO documents (
                         external_id,
                         source_type,
                         source_provider,
+                        source_account_id,
                         title,
                         text,
                         text_sha256,
@@ -959,8 +1201,6 @@ def _ingest_document(
                         canonical_uri,
                         content_timestamp,
                         content_timestamp_type,
-                        content_created_at,
-                        content_modified_at,
                         people,
                         thread_id,
                         parent_doc_id,
@@ -974,6 +1214,7 @@ def _ingest_document(
                         is_completed,
                         completed_at,
                         metadata,
+                        intent,
                         status,
                         intent_status
                     )
@@ -989,6 +1230,7 @@ def _ingest_document(
                         external_id,
                         payload.source_type,
                         payload.source_provider,
+                        payload.source_account_id,
                         payload.title,
                         normalized_text,
                         text_sha,
@@ -996,21 +1238,20 @@ def _ingest_document(
                         payload.canonical_uri,
                         payload.content_timestamp,
                         payload.content_timestamp_type,
-                        payload.content_created_at,
-                        payload.content_modified_at,
                         Json(people_json),
                         thread_id,
                         payload.parent_doc_id,
                         source_doc_ids if source_doc_ids else [],
                         related_doc_ids if related_doc_ids else [],
-                        has_attachments_override if has_attachments_override is not None else False,
-                        attachment_count_override if attachment_count_override is not None else 0,
+                        has_attachments,
+                        attachment_count,
                         has_location,
                         has_due_date,
                         payload.due_date,
                         is_completed,
                         payload.completed_at,
-                        Json(payload.metadata or {}),
+                        Json(metadata),
+                        Json(payload.intent) if payload.intent is not None else None,
                         "submitted",
                         "pending",  # intent_status defaults to 'pending' for automatic queueing
                     ),
@@ -1046,21 +1287,6 @@ def _ingest_document(
                     WHERE doc_id = %s
                     """,
                     (doc_id,),
-                )
-
-                if payload.attachments:
-                    file_ids, computed_has_attachments, computed_attachment_count = _apply_document_files(
-                        cur, doc_id, payload.attachments
-                    )
-                else:
-                    computed_has_attachments = bool(has_attachments_override)
-                    computed_attachment_count = attachment_count_override or 0
-
-                has_attachments = (
-                    has_attachments_override if has_attachments_override is not None else computed_has_attachments
-                )
-                attachment_count = (
-                    attachment_count_override if attachment_count_override is not None else computed_attachment_count
                 )
 
                 _create_chunks(cur, doc_id, chunk_candidates)
@@ -1109,6 +1335,7 @@ def _ingest_document(
                 "is_completed": is_completed,
                 "people": people_json,
                 "metadata": payload.metadata or {},
+                "intent": payload.intent,
                 "status": "extracted",
             }
         )
@@ -1120,7 +1347,6 @@ def _ingest_document(
                 external_id=doc_record["external_id"],
                 version_number=doc_record["version_number"],
                 thread_id=doc_record["thread_id"],
-                file_ids=file_ids,
                 status=doc_record["status"],
                 duplicate=False,
             ),
@@ -1140,6 +1366,52 @@ def _ingest_document(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to ingest document",
         ) from exc
+
+
+@app.post(
+    "/v2/catalog/documents",
+    response_model=DocumentIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def register_document_v2(
+    envelope: DocumentEnvelope,
+    response: Response,
+    _token: None = Depends(verify_token),
+) -> DocumentIngestResponse:
+    _require_v2_schema(envelope.schema_version, "document")
+    payload = _document_envelope_to_ingest_request(envelope)
+    result = _ingest_document(payload)
+    if result.doc_record:
+        _schedule_forward_to_search([result.doc_record])
+    response.status_code = result.status_code
+    return result.response
+
+
+@app.post(
+    "/v2/catalog/people",
+    response_model=PersonIngestResponse,
+)
+def register_person_v2(
+    envelope: PersonEnvelope,
+    _token: None = Depends(verify_token),
+) -> PersonIngestResponse:
+    _require_v2_schema(envelope.schema_version, "person")
+    source = _person_source_name(envelope)
+    record = _person_envelope_to_record(envelope)
+    with get_connection(autocommit=False) as conn:
+        repo = PeopleRepository(conn, default_region=settings.contacts_default_region)
+        repo.upsert_batch(source, [record])
+        person_id = _lookup_person_id(conn, source, record.external_id)
+        conn.commit()
+    status_label = "deleted" if record.deleted else "upserted"
+    return PersonIngestResponse(
+        person_id=person_id,
+        external_id=record.external_id,
+        version=record.version,
+        status=status_label,
+        deleted=record.deleted,
+    )
+
 
 @app.post(
     "/v1/catalog/documents",
@@ -1304,8 +1576,6 @@ def create_document_version_endpoint(
         changes["content_timestamp"] = payload.content_timestamp
     if payload.content_timestamp_type is not None:
         changes["content_timestamp_type"] = payload.content_timestamp_type
-    if payload.content_modified_at is not None:
-        changes["content_modified_at"] = payload.content_modified_at
     if payload.people is not None:
         changes["people"] = _person_dicts(payload.people)
     if payload.thread_id is not None:
@@ -1337,37 +1607,47 @@ def create_document_version_endpoint(
             detail="Document produced no valid chunks",
         )
 
-    file_ids: List[uuid.UUID] = []
-    has_attachments = False
-    attachment_count = 0
+    # Update metadata with attachments if provided
+    if payload.attachments is not None:
+        with get_connection(autocommit=False) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT metadata FROM documents WHERE doc_id = %s", (new_doc.doc_id,))
+                doc_row = cur.fetchone()
+                if doc_row:
+                    metadata = _coerce_json(doc_row.get("metadata") or {}) or {}
+                    if not isinstance(metadata, dict):
+                        metadata = dict(metadata)
+                    metadata["attachments"] = _prepare_attachments_metadata(payload.attachments)
+                    has_attachments, attachment_count = _count_attachments(payload.attachments)
+
+                    cur.execute(
+                        """
+                        UPDATE documents
+                        SET metadata = %s,
+                            has_attachments = %s,
+                            attachment_count = %s,
+                            updated_at = NOW()
+                        WHERE doc_id = %s
+                        """,
+                        (Json(metadata), has_attachments, attachment_count, new_doc.doc_id),
+                    )
+            conn.commit()
 
     with get_connection(autocommit=False) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("DELETE FROM document_files WHERE doc_id = %s", (new_doc.doc_id,))
-            if payload.attachments is not None:
-                file_ids, has_attachments, attachment_count = _apply_document_files(
-                    cur, new_doc.doc_id, payload.attachments
-                )
-            else:
-                file_ids, has_attachments, attachment_count = _copy_document_files(
-                    cur, doc_uuid, new_doc.doc_id
-                )
-
             cur.execute("DELETE FROM chunk_documents WHERE doc_id = %s", (new_doc.doc_id,))
             _create_chunks(cur, new_doc.doc_id, chunk_candidates)
 
             cur.execute(
                 """
                 UPDATE documents
-                SET has_attachments = %s,
-                    attachment_count = %s,
-                    status = 'extracted',
+                SET status = 'extracted',
                     extraction_failed = false,
                     enrichment_failed = false,
                     updated_at = NOW()
                 WHERE doc_id = %s
                 """,
-                (has_attachments, attachment_count, new_doc.doc_id),
+                (new_doc.doc_id,),
             )
 
         conn.commit()
@@ -1386,7 +1666,6 @@ def create_document_version_endpoint(
         external_id=new_doc.external_id,
         version_number=new_doc.version_number,
         thread_id=new_doc.thread_id,
-        file_ids=file_ids,
         status=doc_record["status"] if doc_record else "extracted",
     )
 
@@ -1574,10 +1853,7 @@ def delete_document(
                 conn.rollback()
                 raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-            cur.execute(
-                "DELETE FROM document_files WHERE doc_id = %s",
-                (doc_uuid,),
-            )
+            # Files table removed; attachments stored in metadata.attachments
             cur.execute(
                 "DELETE FROM chunk_documents WHERE doc_id = %s RETURNING chunk_id",
                 (doc_uuid,),

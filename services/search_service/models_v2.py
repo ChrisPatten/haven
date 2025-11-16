@@ -65,7 +65,6 @@ class SearchDocument(BaseModel):
 class SearchChunk(BaseModel):
     chunk_id: UUID
     text: str
-    ordinal: Optional[int] = None
 
 
 __all__ = ["SearchDocument", "SearchPerson", "SearchChunk"]

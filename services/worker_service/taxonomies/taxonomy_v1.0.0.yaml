@@ -2,6 +2,30 @@ version: "1.0.0"
 created_at: "2025-11-09T00:00:00Z"
 description: "Initial MVP taxonomy for Haven intents worker."
 intents:
+  commitment.create:
+    description: "Capture a commitment or promise that the user offered or agreed to."
+    slots:
+      what:
+        type: string
+        required: true
+        description: "The commitment or promise to be captured. Extract the complete verb phrase describing what needs to be done (e.g., 'pick up eggs', 'call the dentist', 'review the proposal'). Include the full action, not just the object."
+      due_date:
+        type: datetime
+        required: false
+        constraints:
+          min: "now"
+        description: "Due date or deadline for the commitment."
+      for_whom:
+        type: person
+        required: false
+        description: "Person or entity the commitment is for."
+      source_ref:
+        type: string
+        required: true
+        description: "Reference to the source artifact that triggered the commitment."
+    channel_priors:
+      note: 1.15
+      email: 0.9
   task.create:
     description: "Create a new task or to-do item that the user wants to track."
     slots:

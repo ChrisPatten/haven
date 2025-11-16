@@ -623,7 +623,8 @@ public actor EmailImapHandler {
                                         intent: nil,
                                         relevance: nil,
                                         sourceType: "email",
-                                        sourceIdPrefix: sourcePrefix
+                                        sourceIdPrefix: sourcePrefix,
+                                        sourceAccountId: account.responseIdentifier
                                     )
                                     
                                     if dryRun {

@@ -38,8 +38,6 @@ DROP TYPE IF EXISTS identifier_kind;
 -- Drop unified tables so they can be recreated cleanly
 DROP TABLE IF EXISTS chunk_documents CASCADE;
 DROP TABLE IF EXISTS chunks CASCADE;
-DROP TABLE IF EXISTS document_files CASCADE;
-DROP TABLE IF EXISTS files CASCADE;
 DROP TABLE IF EXISTS documents CASCADE;
 DROP TABLE IF EXISTS threads CASCADE;
 DROP TABLE IF EXISTS ingest_submissions CASCADE;
@@ -51,9 +49,10 @@ DROP TABLE IF EXISTS ingest_submissions CASCADE;
 -- Threads
 CREATE TABLE threads (
     thread_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    external_id TEXT UNIQUE NOT NULL,
+    external_id TEXT NOT NULL,
     source_type TEXT NOT NULL,
     source_provider TEXT,
+    source_account_id TEXT,
     title TEXT,
     participants JSONB NOT NULL DEFAULT '[]'::jsonb,
     thread_type TEXT,
@@ -66,7 +65,8 @@ CREATE TABLE threads (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT threads_valid_source_type CHECK (
         source_type IN ('imessage', 'sms', 'email', 'slack', 'whatsapp', 'signal')
-    )
+    ),
+    CONSTRAINT threads_external_id_unique UNIQUE (source_type, source_provider, source_account_id, external_id)
 );
 
 -- Documents
@@ -75,6 +75,7 @@ CREATE TABLE documents (
     external_id TEXT NOT NULL,
     source_type TEXT NOT NULL,
     source_provider TEXT,
+    source_account_id TEXT,
     version_number INTEGER NOT NULL DEFAULT 1,
     previous_version_id UUID REFERENCES documents(doc_id),
     is_active_version BOOLEAN NOT NULL DEFAULT true,
@@ -87,8 +88,6 @@ CREATE TABLE documents (
     canonical_uri TEXT,
     content_timestamp TIMESTAMPTZ NOT NULL,
     content_timestamp_type TEXT NOT NULL,
-    content_created_at TIMESTAMPTZ,
-    content_modified_at TIMESTAMPTZ,
     people JSONB NOT NULL DEFAULT '[]'::jsonb,
     thread_id UUID REFERENCES threads(thread_id),
     parent_doc_id UUID REFERENCES documents(doc_id),
@@ -109,7 +108,7 @@ CREATE TABLE documents (
     ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT documents_external_id_version_key UNIQUE (external_id, version_number),
+    CONSTRAINT documents_external_id_version_key UNIQUE (source_type, source_provider, source_account_id, external_id, version_number),
     CONSTRAINT documents_valid_timestamp_type CHECK (
         content_timestamp_type IN ('sent', 'received', 'modified', 'created', 'event_start', 'event_end', 'due', 'completed')
     ),
@@ -138,50 +137,11 @@ COMMENT ON COLUMN documents.intent_processing_started_at IS 'Timestamp when inte
 COMMENT ON COLUMN documents.intent_processing_completed_at IS 'Timestamp when intent processing completed';
 COMMENT ON COLUMN documents.intent_processing_error IS 'Error message if intent processing failed';
 
--- Files
-CREATE TABLE files (
-    file_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    content_sha256 TEXT UNIQUE NOT NULL,
-    object_key TEXT NOT NULL,
-    storage_backend TEXT NOT NULL DEFAULT 'minio',
-    filename TEXT,
-    mime_type TEXT,
-    size_bytes BIGINT,
-    enrichment_status TEXT NOT NULL DEFAULT 'pending',
-    enrichment JSONB,
-    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_enriched_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT files_valid_enrichment_status CHECK (
-        enrichment_status IN ('pending', 'processing', 'enriched', 'failed', 'skipped')
-    ),
-    CONSTRAINT files_valid_storage_backend CHECK (
-        storage_backend IN ('minio', 's3', 'local', 'gdrive')
-    )
-);
-
--- Document ↔ File junction
-CREATE TABLE document_files (
-    doc_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
-    file_id UUID NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    attachment_index INTEGER,
-    filename TEXT,
-    caption TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (doc_id, file_id, role),
-    CONSTRAINT document_files_valid_role CHECK (
-        role IN ('attachment', 'extracted_from', 'thumbnail', 'preview', 'related')
-    )
-);
-
 -- Chunks
 CREATE TABLE chunks (
     chunk_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     text TEXT NOT NULL,
     text_sha256 TEXT NOT NULL,
-    ordinal INTEGER NOT NULL,
     source_ref JSONB,
     embedding_status TEXT NOT NULL DEFAULT 'pending',
     embedding_model TEXT,
@@ -527,6 +487,7 @@ COMMENT ON COLUMN intent_deduplication.window_end_at IS 'Timestamp when deduplic
 -- Documents
 CREATE INDEX IF NOT EXISTS idx_documents_source_type ON documents(source_type);
 CREATE INDEX IF NOT EXISTS idx_documents_external_id ON documents(external_id);
+CREATE INDEX IF NOT EXISTS idx_documents_source_account_id ON documents(source_account_id) WHERE source_account_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_documents_active_version ON documents(is_active_version) WHERE is_active_version = true;
 CREATE INDEX IF NOT EXISTS idx_documents_thread ON documents(thread_id) WHERE thread_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_documents_content_timestamp ON documents(content_timestamp DESC);
@@ -563,19 +524,9 @@ CREATE INDEX IF NOT EXISTS idx_ingest_submissions_batch_status ON ingest_submiss
 -- Threads
 CREATE INDEX IF NOT EXISTS idx_threads_external_id ON threads(external_id);
 CREATE INDEX IF NOT EXISTS idx_threads_source_type ON threads(source_type);
+CREATE INDEX IF NOT EXISTS idx_threads_source_account_id ON threads(source_account_id) WHERE source_account_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_threads_last_message ON threads(last_message_at DESC);
 CREATE INDEX IF NOT EXISTS idx_threads_participants ON threads USING GIN(participants);
-
--- Files
-CREATE INDEX IF NOT EXISTS idx_files_content_sha256 ON files(content_sha256);
-CREATE INDEX IF NOT EXISTS idx_files_enrichment_status ON files(enrichment_status);
-CREATE INDEX IF NOT EXISTS idx_files_mime_type ON files(mime_type);
-CREATE INDEX IF NOT EXISTS idx_files_enrichment ON files USING GIN(enrichment);
-
--- Document ↔ File
-CREATE INDEX IF NOT EXISTS idx_document_files_doc ON document_files(doc_id);
-CREATE INDEX IF NOT EXISTS idx_document_files_file ON document_files(file_id);
-CREATE INDEX IF NOT EXISTS idx_document_files_role ON document_files(role);
 
 -- Chunks
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status);
@@ -699,12 +650,6 @@ CREATE TRIGGER trg_threads_set_updated
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_files_set_updated ON files;
-CREATE TRIGGER trg_files_set_updated
-    BEFORE UPDATE ON files
-    FOR EACH ROW
-    EXECUTE FUNCTION set_updated_at();
-
 DROP TRIGGER IF EXISTS trg_chunks_set_updated ON chunks;
 CREATE TRIGGER trg_chunks_set_updated
     BEFORE UPDATE ON chunks
@@ -792,22 +737,6 @@ CREATE OR REPLACE VIEW active_documents AS
 SELECT *
 FROM documents
 WHERE is_active_version = true;
-
-CREATE OR REPLACE VIEW documents_with_files AS
-SELECT
-    d.*,
-    df.role AS file_role,
-    df.attachment_index,
-    f.file_id,
-    f.filename AS file_filename,
-    f.mime_type AS file_mime_type,
-    f.size_bytes AS file_size,
-    f.enrichment_status AS file_enrichment_status,
-    f.enrichment AS file_enrichment
-FROM documents d
-JOIN document_files df ON d.doc_id = df.doc_id
-JOIN files f ON df.file_id = f.file_id
-WHERE d.is_active_version = true;
 
 CREATE OR REPLACE VIEW thread_summary AS
 SELECT
