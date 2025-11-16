@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Union, Literal
+from uuid import UUID
 
 import httpx
 from fastapi import (
@@ -52,6 +53,11 @@ from haven.search.models import (
 from haven.search.sdk import SearchServiceClient
 
 from shared.db import get_conn_str, get_connection, get_active_document
+from shared.envelope_v2 import (
+    DocumentEnvelope,
+    PersonEnvelope,
+    is_v2_schema,
+)
 from shared.deps import assert_missing_dependencies
 from shared.logging import get_logger, setup_logging
 from shared.people_repository import (
@@ -304,6 +310,7 @@ class ContactIngestRequest(BaseModel):
     since_token: Optional[str] = None
     batch_id: str
     people: List[PersonPayloadModel] = Field(default_factory=list)
+    self_identifier: Optional[str] = None  # Phone or email to match against contacts for self_person_id
 
     model_config = ConfigDict(extra="ignore")
 
@@ -315,6 +322,123 @@ class ContactIngestResponse(BaseModel):
     conflicts: int
     skipped: int
     since_token_next: Optional[str] = None
+
+
+def _check_and_set_self_person_id(
+    conn: Connection,
+    self_identifier: str,
+    records: List[PersonIngestRecord],
+    source: str,
+) -> None:
+    """Check if self_identifier matches any contact and set self_person_id if found.
+    
+    Args:
+        conn: Database connection
+        self_identifier: Phone number or email address to match
+        records: List of contact records being ingested
+        source: Source of the contacts
+    """
+    from shared.people_normalization import IdentifierKind, normalize_identifier
+    from shared.people_repository import PeopleResolver
+    
+    if not self_identifier or not self_identifier.strip():
+        return
+    
+    identifier = self_identifier.strip()
+    
+    # Try to normalize as email first
+    try:
+        normalized_email = normalize_identifier(IdentifierKind.EMAIL, identifier)
+        email_canonical = normalized_email.value_canonical
+    except Exception:
+        email_canonical = None
+    
+    # Try to normalize as phone
+    try:
+        normalized_phone = normalize_identifier(IdentifierKind.PHONE, identifier, default_region=settings.contacts_default_region)
+        phone_canonical = normalized_phone.value_canonical
+    except Exception:
+        phone_canonical = None
+    
+    if not email_canonical and not phone_canonical:
+        logger.warning(
+            "self_identifier_invalid",
+            identifier=identifier,
+            source=source,
+        )
+        return
+    
+    # Check if any contact in this batch matches
+    matching_person_id = None
+    for record in records:
+        if record.deleted:
+            continue
+        
+        # Check emails
+        if email_canonical:
+            for email in record.emails:
+                try:
+                    normalized = normalize_identifier(IdentifierKind.EMAIL, email.value)
+                    if normalized.value_canonical == email_canonical:
+                        # Found match, resolve person_id
+                        resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
+                        result = resolver.resolve(IdentifierKind.EMAIL, email.value)
+                        if result:
+                            matching_person_id = UUID(result["person_id"])
+                            break
+                except Exception:
+                    continue
+        
+        # Check phones
+        if phone_canonical and not matching_person_id:
+            for phone in record.phones:
+                try:
+                    normalized = normalize_identifier(IdentifierKind.PHONE, phone.value, default_region=settings.contacts_default_region)
+                    if normalized.value_canonical == phone_canonical:
+                        # Found match, resolve person_id
+                        resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
+                        result = resolver.resolve(IdentifierKind.PHONE, phone.value)
+                        if result:
+                            matching_person_id = UUID(result["person_id"])
+                            break
+                except Exception:
+                    continue
+        
+        if matching_person_id:
+            break
+    
+    # If no match in this batch, try to resolve from existing person_identifiers
+    if not matching_person_id:
+        resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
+        if email_canonical:
+            result = resolver.resolve(IdentifierKind.EMAIL, identifier)
+            if result:
+                matching_person_id = UUID(result["person_id"])
+        if not matching_person_id and phone_canonical:
+            result = resolver.resolve(IdentifierKind.PHONE, identifier)
+            if result:
+                matching_person_id = UUID(result["person_id"])
+    
+    if matching_person_id:
+        stored = store_self_person_id_if_needed(
+            conn,
+            matching_person_id,
+            source=source,
+            detected_at=datetime.now(tz=UTC).isoformat(),
+        )
+        if stored:
+            logger.info(
+                "self_person_id_set_from_contacts",
+                person_id=str(matching_person_id),
+                identifier=identifier,
+                source=source,
+            )
+    else:
+        logger.info(
+            "self_identifier_no_match",
+            identifier=identifier,
+            source=source,
+        )
 
 
 def _contact_external_id(source: str, record: PersonIngestRecord) -> str:
@@ -450,7 +574,7 @@ def _build_contact_document_payload(source: str, record: PersonIngestRecord) -> 
         "content_sha256": text_sha,
         "content_timestamp": timestamp,
         "content_timestamp_type": "modified",
-        "content_created_at": timestamp,
+        # content_created_at removed; use metadata.timestamps.source_specific instead
         "text": text,
         "mime_type": "text/plain",
         "metadata": metadata,
@@ -667,6 +791,7 @@ class ThreadPayloadModel(BaseModel):
     external_id: str
     source_type: Optional[str] = None
     source_provider: Optional[str] = None
+    source_account_id: Optional[str] = None
     title: Optional[str] = None
     participants: List[DocumentPerson] = Field(default_factory=list)
     thread_type: Optional[str] = None
@@ -681,6 +806,7 @@ class IngestRequestModel(BaseModel):
     source_type: str
     source_id: str
     source_provider: Optional[str] = None
+    source_account_id: Optional[str] = None
     external_id: Optional[str] = None
     title: Optional[str] = None
     canonical_uri: Optional[str] = None
@@ -688,11 +814,13 @@ class IngestRequestModel(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     content_timestamp: Optional[datetime] = None
     content_timestamp_type: Optional[str] = None
-    content_created_at: Optional[datetime] = None
-    content_modified_at: Optional[datetime] = None
     people: List[DocumentPerson] = Field(default_factory=list)
     thread_id: Optional[uuid.UUID] = None
     thread: Optional[ThreadPayloadModel] = None
+    has_due_date: Optional[bool] = None
+    due_date: Optional[datetime] = None
+    is_completed: Optional[bool] = None
+    completed_at: Optional[datetime] = None
 
 
 class BatchIngestRequest(BaseModel):
@@ -723,9 +851,16 @@ class IngestSubmissionResponse(BaseModel):
     version_number: int
     status: str
     thread_id: Optional[str] = None
-    file_ids: List[str] = Field(default_factory=list)
     duplicate: bool = False
     total_chunks: int = 0  # maintained for backward compatibility
+
+
+class PersonIngestResponse(BaseModel):
+    person_id: str
+    external_id: str
+    version: int
+    status: str = "upserted"
+    deleted: bool = False
 
 
 class IngestStatusResponse(BaseModel):
@@ -816,7 +951,7 @@ def _serialize_thread(thread: Optional[ThreadPayloadModel]) -> Optional[Dict[str
 
 
 def _map_catalog_ingest_response(data: Dict[str, Any]) -> IngestSubmissionResponse:
-    file_ids = [str(fid) for fid in data.get("file_ids", [])]
+    # file_ids removed; attachments stored in metadata.attachments
     return IngestSubmissionResponse(
         submission_id=str(data["submission_id"]),
         doc_id=str(data["doc_id"]),
@@ -824,7 +959,6 @@ def _map_catalog_ingest_response(data: Dict[str, Any]) -> IngestSubmissionRespon
         version_number=int(data.get("version_number", 1)),
         status=data.get("status", "submitted"),
         thread_id=str(data["thread_id"]) if data.get("thread_id") else None,
-        file_ids=file_ids,
         duplicate=bool(data.get("duplicate", False)),
         total_chunks=int(data.get("total_chunks") or 0),
     )
@@ -846,6 +980,14 @@ def _parse_iso_datetime(value: Optional[str], *, param: str) -> Optional[datetim
 def _make_correlation_id(prefix: str) -> str:
     now = datetime.now(tz=UTC).isoformat()
     return f"{prefix}_{now}_{uuid.uuid4().hex[:8]}"
+
+
+def _validate_v2_schema(schema_version: str, kind: str) -> None:
+    if not is_v2_schema(schema_version):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"{kind} schema_version must start with '2.'",
+        )
 
 
 def _error_response(
@@ -948,22 +1090,24 @@ def _prepare_ingest_document_payload(
             details={"value": payload.content_timestamp_type},
         )
 
-    content_created_at = _ensure_utc(payload.content_created_at)
-    content_modified_at = _ensure_utc(payload.content_modified_at)
     people_payload = _serialize_people(payload.people)
     thread_payload = _serialize_thread(payload.thread)
+
+    # Metadata is already fully formed from Haven.app, including enrichment_entities if present
+    metadata = dict(payload.metadata)  # Copy to avoid mutating original
 
     catalog_payload: Dict[str, Any] = {
         "idempotency_key": idempotency_key,
         "source_type": payload.source_type,
         "source_provider": payload.source_provider,
+        "source_account_id": payload.source_account_id,
         "source_id": payload.source_id,
         "content_sha256": text_hash,
         "mime_type": payload.content.mime_type,
         "text": text_normalized,
         "title": payload.title,
         "canonical_uri": payload.canonical_uri,
-        "metadata": payload.metadata,
+        "metadata": metadata,
         "content_timestamp": content_timestamp.isoformat(),
         "content_timestamp_type": content_timestamp_type,
         "people": people_payload,
@@ -972,18 +1116,20 @@ def _prepare_ingest_document_payload(
     if payload.external_id:
         catalog_payload["external_id"] = payload.external_id
 
-    if payload.content_created_at or content_created_at:
-        catalog_payload["content_created_at"] = (
-            content_created_at or content_timestamp
-        ).isoformat()
-    if payload.content_modified_at or content_modified_at:
-        catalog_payload["content_modified_at"] = (
-            content_modified_at or content_timestamp
-        ).isoformat()
     if payload.thread_id:
         catalog_payload["thread_id"] = str(payload.thread_id)
     if thread_payload:
         catalog_payload["thread"] = thread_payload
+    
+    # Reminder-specific fields
+    if payload.has_due_date is not None:
+        catalog_payload["has_due_date"] = payload.has_due_date
+    if payload.due_date:
+        catalog_payload["due_date"] = payload.due_date.isoformat()
+    if payload.is_completed is not None:
+        catalog_payload["is_completed"] = payload.is_completed
+    if payload.completed_at:
+        catalog_payload["completed_at"] = payload.completed_at.isoformat()
 
     return PreparedIngestDocument(payload=catalog_payload, content_sha256=text_hash)
 
@@ -1503,6 +1649,11 @@ def ingest_contacts(
         with get_connection(autocommit=False) as conn:
             repo = PeopleRepository(conn)
             people_stats = repo.upsert_batch(source, records)
+            
+            # Check for self_identifier and set self_person_id if matching contact found
+            if payload.self_identifier:
+                _check_and_set_self_person_id(conn, payload.self_identifier, records, source)
+            
             conn.commit()
             # Log stats; response fields remain focused on document-level ingestion
             logger.info(
@@ -1621,6 +1772,162 @@ def _update_change_token(
             """,
             (source, device_id, token),
         )
+
+
+@app.post(
+    "/v2/ingest/document",
+    response_model=IngestSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ingest_document_v2(
+    envelope: DocumentEnvelope,
+    response: Response,
+    _: None = Depends(require_token),
+) -> JSONResponse:
+    _validate_v2_schema(envelope.schema_version, "document")
+    correlation_id = _make_correlation_id("gw_ingest_v2_document")
+    response.headers["X-Correlation-ID"] = correlation_id
+
+    logger.info(
+        "ingest_document_v2_forward",
+        source_type=envelope.source.source_type,
+        external_id=envelope.payload.external_id,
+    )
+    try:
+        catalog_response = await _catalog_request(
+            "POST",
+            "/v2/catalog/documents",
+            correlation_id,
+            json_payload=envelope.model_dump(mode="json"),
+        )
+    except httpx.RequestError as exc:
+        logger.error("catalog_request_failed_v2_document", error=str(exc))
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to reach Catalog service",
+        ) from exc
+
+    if catalog_response.status_code >= 400:
+        logger.warning(
+            "catalog_rejected_ingest_v2_document",
+            status_code=catalog_response.status_code,
+            body=_truncate_response(catalog_response),
+            correlation_id=correlation_id,
+        )
+        return _error_response(
+            catalog_response.status_code,
+            "INGEST.CATALOG_REJECTED",
+            "Catalog rejected ingest request",
+            correlation_id,
+            details={"status_code": catalog_response.status_code},
+        )
+
+    try:
+        payload_json = catalog_response.json()
+    except ValueError as exc:
+        logger.error(
+            "catalog_invalid_json_v2_document",
+            error=str(exc),
+            body=_truncate_response(catalog_response),
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Catalog returned invalid JSON",
+        ) from exc
+
+    submission = _map_catalog_ingest_response(payload_json)
+    return JSONResponse(
+        status_code=catalog_response.status_code,
+        content=submission.model_dump(),
+        headers={"X-Correlation-ID": correlation_id},
+    )
+
+
+@app.post(
+    "/v2/ingest/person",
+    response_model=PersonIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ingest_person_v2(
+    envelope: PersonEnvelope,
+    response: Response,
+    _: None = Depends(require_token),
+) -> JSONResponse:
+    _validate_v2_schema(envelope.schema_version, "person")
+    correlation_id = _make_correlation_id("gw_ingest_v2_person")
+    response.headers["X-Correlation-ID"] = correlation_id
+
+    logger.info(
+        "ingest_person_v2_forward",
+        source_type=envelope.source.source_type,
+        external_id=envelope.payload.external_id,
+    )
+    try:
+        catalog_response = await _catalog_request(
+            "POST",
+            "/v2/catalog/people",
+            correlation_id,
+            json_payload=envelope.model_dump(mode="json"),
+        )
+    except httpx.RequestError as exc:
+        logger.error("catalog_request_failed_v2_person", error=str(exc))
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to reach Catalog service",
+        ) from exc
+
+    if catalog_response.status_code >= 400:
+        logger.warning(
+            "catalog_rejected_ingest_v2_person",
+            status_code=catalog_response.status_code,
+            body=_truncate_response(catalog_response),
+            correlation_id=correlation_id,
+        )
+        return _error_response(
+            catalog_response.status_code,
+            "INGEST.CATALOG_REJECTED",
+            "Catalog rejected person ingest request",
+            correlation_id,
+            details={"status_code": catalog_response.status_code},
+        )
+
+    try:
+        payload_json = catalog_response.json()
+    except ValueError as exc:
+        logger.error(
+            "catalog_invalid_json_v2_person",
+            error=str(exc),
+            body=_truncate_response(catalog_response),
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Catalog returned invalid JSON",
+        ) from exc
+
+    person_id = payload_json.get("person_id")
+    if not person_id:
+        logger.error(
+            "catalog_missing_person_id_v2",
+            body=_truncate_response(catalog_response),
+            correlation_id=correlation_id,
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="Catalog response missing person_id",
+        )
+
+    person_response = PersonIngestResponse(
+        person_id=str(person_id),
+        external_id=payload_json.get("external_id", envelope.payload.external_id),
+        version=int(payload_json.get("version", envelope.payload.version)),
+        status=payload_json.get("status", "upserted"),
+        deleted=bool(payload_json.get("deleted", False)),
+    )
+    return JSONResponse(
+        status_code=catalog_response.status_code,
+        content=person_response.model_dump(),
+        headers={"X-Correlation-ID": correlation_id},
+    )
 
 
 @app.post(
@@ -1944,6 +2251,7 @@ async def ingest_document(
     response.status_code = catalog_resp.status_code
     response.headers["X-Content-SHA256"] = text_hash
     submission = _map_catalog_ingest_response(payload_json)
+    
     logger.info(
         "ingest_submitted",
         submission_id=submission.submission_id,
@@ -2105,7 +2413,7 @@ async def ingest_file(
     )
 
     content_timestamp = _timestamp_from_epoch(meta_payload.mtime) or datetime.now(tz=UTC)
-    content_created_at = _timestamp_from_epoch(meta_payload.ctime)
+    # content_created_at removed; use metadata.timestamps.source_specific instead
 
     file_descriptor: Dict[str, Any] = {
         "content_sha256": file_sha,
@@ -2143,8 +2451,7 @@ async def ingest_file(
         "metadata": metadata,
         "content_timestamp": content_timestamp.isoformat(),
         "content_timestamp_type": "modified",
-        "content_created_at": content_created_at.isoformat() if content_created_at else None,
-        "content_modified_at": content_timestamp.isoformat(),
+        # content_created_at and content_modified_at removed; use metadata.timestamps.source_specific instead
         "people": [],
         "attachments": attachments,
         "facet_overrides": {
@@ -2152,8 +2459,7 @@ async def ingest_file(
             "attachment_count": len(attachments),
         },
     }
-    if catalog_payload.get("content_created_at") is None:
-        catalog_payload.pop("content_created_at")
+    # content_created_at and content_modified_at removed
 
     try:
         catalog_resp = await _catalog_request(
@@ -3210,105 +3516,6 @@ def set_self_person_id(
             success=False,
             error=f"Internal error: {str(e)}",
         )
-
-
-@app.post("/v1/admin/self-person-id/identify")
-def identify_self_person_from_account(
-    request: Dict[str, Any],
-    _: None = Depends(require_token),
-) -> Dict[str, Any]:
-    """
-    Identify and set self_person_id from an account identifier (e.g., email, phone).
-    
-    Used by HostAgent to submit a detected iMessage account and have it resolved to a person_id.
-    
-    Request:
-    - account: Normalized account identifier (email or phone)
-    - source: Optional source label (e.g., "imessage", "contacts")
-    
-    Returns:
-    - success: Whether resolution succeeded
-    - person_id: The resolved person_id (if successful)
-    - display_name: The resolved person's display name (if successful)
-    - error: Error message if failed
-    """
-    correlation_id = _make_correlation_id("identify_self")
-    account = request.get("account")
-    source = request.get("source", "imessage")
-    
-    if not account:
-        return {
-            "success": False,
-            "error": "account parameter required",
-            "correlation_id": correlation_id,
-        }
-    
-    try:
-        from shared.people_normalization import IdentifierKind
-        from shared.people_repository import PeopleResolver
-        
-        with get_connection() as conn:
-            resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
-            
-            # Try to resolve as email first
-            email_result = resolver.resolve(IdentifierKind.EMAIL, account)
-            if email_result:
-                person_id = UUID(email_result["person_id"])
-                store_self_person_id_if_needed(
-                    conn,
-                    person_id,
-                    source=source,
-                    detected_at=datetime.now(tz=UTC).isoformat(),
-                )
-                return {
-                    "success": True,
-                    "person_id": email_result["person_id"],
-                    "display_name": email_result["display_name"],
-                    "source": source,
-                    "correlation_id": correlation_id,
-                }
-            
-            # Try to resolve as phone
-            phone_result = resolver.resolve(IdentifierKind.PHONE, account)
-            if phone_result:
-                person_id = UUID(phone_result["person_id"])
-                store_self_person_id_if_needed(
-                    conn,
-                    person_id,
-                    source=source,
-                    detected_at=datetime.now(tz=UTC).isoformat(),
-                )
-                return {
-                    "success": True,
-                    "person_id": phone_result["person_id"],
-                    "display_name": phone_result["display_name"],
-                    "source": source,
-                    "correlation_id": correlation_id,
-                }
-        
-        logger.info(
-            "self_person_identification_no_match",
-            account=account,
-            source=source,
-            correlation_id=correlation_id,
-        )
-        return {
-            "success": False,
-            "error": f"No person found with identifier: {account}",
-            "correlation_id": correlation_id,
-        }
-    
-    except Exception as e:
-        logger.error(
-            "self_person_identification_failed",
-            error=str(e),
-            correlation_id=correlation_id,
-        )
-        return {
-            "success": False,
-            "error": f"Identification failed: {str(e)}",
-            "correlation_id": correlation_id,
-        }
 
 
 @app.get("/v1/healthz")

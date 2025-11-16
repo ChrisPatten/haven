@@ -7,7 +7,7 @@
 - **search** – builds with `SERVICE=search`; command `search-service --host 0.0.0.0 --port 8080`; depends on `postgres`, `qdrant`.
 - **gateway** – builds with `SERVICE=gateway`; command `uvicorn services.gateway_api.app:app --host 0.0.0.0 --port 8080`; publishes `127.0.0.1:8085`.
 - **catalog** – builds with `SERVICE=catalog`; command `uvicorn services.catalog_api.app:app --host 0.0.0.0 --port 8081`.
-- **embedding_service** – runs `python services/embedding_service/worker.py`; polls `chunks` table for `embedding_status='pending'` and posts results to catalog.
+- **worker_service** – runs `python services/worker_service/main.py`; supports multiple worker types (embedding, intents) via `WORKER_TYPE` env var. Embedding worker polls `chunks` table for `embedding_status='pending'` and posts results to catalog. Intents worker polls `documents` table for `intent_status='pending'` and processes intent signals.
 - **collector** – optional profile `collector`; runs `python scripts/collectors/collector_imessage.py` posting to the gateway ingest endpoint.
 
 ## Python Packages per Service
@@ -15,7 +15,7 @@
 - **search** (`src/haven/search`) – FastAPI app with Typer CLI, ingestion pipelines, hybrid ranking over Postgres + Qdrant with unified schema support.
 - **catalog** (`services/catalog_api`) – FastAPI app persisting unified documents, threads, files, chunks with versioning and idempotency tracking.
 - **collector** (`scripts/collectors`) – CLIs for iMessage (chat.db), localfs, and contacts; normalization, optional image enrichment, HTTP ingestion.
-- **embedding_service** (`services/embedding_service`) – Worker polling chunks table, encoding via configured model (Ollama), posting to catalog `/v1/catalog/embeddings`.
+- **worker_service** (`services/worker_service`) – Generic worker service supporting multiple worker types. Embedding worker polls chunks table, encoding via configured model (Ollama), posting to catalog `/v1/catalog/embeddings`. Intents worker processes document intent classification (Phase 2.1).
 - **shared** (`shared/`) – Logging, dependency guards, Postgres helpers, unified schema models (`models_v2.py`), context queries, image enrichment.
 
 ## Cross-Service Calls & Data Flows
@@ -27,8 +27,9 @@
 - `catalog` → no queue – chunks created with `embedding_status='pending'` directly in `chunks` table (no separate `embed_jobs`).
 - `search` ↔ Postgres – async queries on `documents`, `chunks`, `chunk_documents` with full-text and timeline filters.
 - `search` ↔ Qdrant – vector similarity search on embedded chunks.
-- `embedding_service` ↔ Postgres – polls `chunks` where `embedding_status='pending'`, posts results to catalog `/v1/catalog/embeddings`.
-- `embedding_service` → Ollama (or embedding provider) – generates vector embeddings for chunk text.
+- `worker_service` (embedding) ↔ Postgres – polls `chunks` where `embedding_status='pending'`, posts results to catalog `/v1/catalog/embeddings`.
+- `worker_service` (embedding) → Ollama (or embedding provider) – generates vector embeddings for chunk text.
+- `worker_service` (intents) ↔ Postgres – polls `documents` where `intent_status='pending'`, processes intent signals, posts to catalog `/v1/catalog/intent-signals`.
 - Contacts collector → gateway/catalog – posts contact documents as unified records; gateway transforms to `contact` source type with structured metadata.
 
 ## Data & Integration Assets
@@ -50,5 +51,5 @@ services/gateway_api/app.py
 services/catalog_api/app.py
 src/haven/search/main.py
 scripts/collectors/collector_imessage.py
-services/embedding_service/worker.py
+services/worker_service/main.py
 ```

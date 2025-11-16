@@ -25,6 +25,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+build-bundle/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -219,3 +220,4 @@ tests/fixtures/images/*
 tests/fixtures/email/*
 
 .tmp/
+documentation/postgres_batch_results.md

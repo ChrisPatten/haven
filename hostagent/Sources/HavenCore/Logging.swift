@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import Darwin
 
 /// Structured JSON logger for Haven Host Agent
 public struct HavenLogger {
@@ -11,12 +12,49 @@ public struct HavenLogger {
     private static var minimumLevelPriority: Int = HavenLogger.priority(for: "info")
     // Logging output format: "json", "text", or "logfmt"
     private static var outputFormat: String = "json"
+    // Direct file logging for LaunchAgent (bypasses stdout buffering)
+    private static var directFileLoggingEnabled = false
+    private static var logFileHandle: FileHandle?
     // Shared ISO8601 formatter with fractional seconds for stable timestamps
     private static let iso8601Formatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
+
+    /// Enable direct file logging for LaunchAgent environments
+    /// This bypasses stdout/stderr buffering issues by using unbuffered file descriptors
+    public static func enableDirectFileLogging() {
+        directFileLoggingEnabled = true
+
+        // Use HavenFilePaths for logs directory
+        let logsDir = HavenFilePaths.logsDirectory
+
+        // Create logs directory if it doesn't exist
+        try? FileManager.default.createDirectory(
+            at: logsDir,
+            withIntermediateDirectories: true
+        )
+
+        let logPath = HavenFilePaths.logFile("hostagent.log")
+
+        // Open file handle for direct writing with unbuffered I/O
+        do {
+            if !FileManager.default.fileExists(atPath: logPath.path) {
+                FileManager.default.createFile(atPath: logPath.path, contents: nil)
+            }
+            logFileHandle = try FileHandle(forWritingTo: logPath)
+            logFileHandle?.seekToEndOfFile()
+        } catch {
+            print("Failed to enable direct file logging: \(error)")
+        }
+    }
+    
+    /// Ensure direct file logging is enabled (called automatically on first log)
+    private static func ensureDirectFileLogging() {
+        guard !directFileLoggingEnabled else { return }
+        enableDirectFileLogging()
+    }
     
     public init(category: String) {
         self.category = category
@@ -45,6 +83,9 @@ public struct HavenLogger {
     }
     
     private func log(level: String, message: String, metadata: [String: Any], osLogType: OSLogType) {
+        // Auto-enable direct file logging on first use
+        HavenLogger.ensureDirectFileLogging()
+        
         // Respect global minimum level
         let msgPriority = HavenLogger.priority(for: level)
         if msgPriority < HavenLogger.minimumLevelPriority {
@@ -66,6 +107,8 @@ public struct HavenLogger {
         }
 
         let fmt = HavenLogger.outputFormat.lowercased()
+        var logOutput: String
+
         switch fmt {
         case "text":
             // Human readable text: [lvl] category: message key=val ...
@@ -74,9 +117,8 @@ public struct HavenLogger {
                 let meta = Self.formatMetadataSpaced(metadata)
                 parts.append(meta)
             }
-            let out = parts.joined(separator: " ")
-            os_log("%{public}@", log: osLog, type: osLogType, out)
-            print(out)
+            logOutput = parts.joined(separator: " ")
+            os_log("%{public}@", log: osLog, type: osLogType, logOutput)
 
         case "logfmt":
             // key=value format for log collectors
@@ -89,27 +131,73 @@ public struct HavenLogger {
             for (k, v) in metadata.sorted(by: { $0.key < $1.key }) {
                 pairs.append("\(k)=\"\(v)\"")
             }
-            let out = pairs.joined(separator: " ")
-            os_log("%{public}@", log: osLog, type: osLogType, out)
-            print(out)
+            logOutput = pairs.joined(separator: " ")
+            os_log("%{public}@", log: osLog, type: osLogType, logOutput)
 
         default:
             // Default: JSON structured output
             if let jsonData = try? JSONSerialization.data(withJSONObject: logData, options: [.sortedKeys]),
                let jsonString = String(data: jsonData, encoding: .utf8) {
+                logOutput = jsonString
                 os_log("%{public}@", log: osLog, type: osLogType, jsonString)
-                print(jsonString)
             } else {
                 // Fallback to text (include timestamp)
+                logOutput = "\(ts) [\(level)] \(category): \(message)"
                 os_log("%{public}@ [%{public}@] %{public}@: %{public}@", log: osLog, type: osLogType, ts, level, category, message)
-                print("\(ts) [\(level)] \(category): \(message)")
             }
+        }
+
+        // Write to files directly if enabled (bypasses stdout buffering)
+        if HavenLogger.directFileLoggingEnabled {
+            let outputWithNewline = logOutput + "\n"
+            if let data = outputWithNewline.data(using: .utf8) {
+                // Write all logs to a single file handle
+                if let fileHandle = HavenLogger.logFileHandle {
+                    // Write using low-level file descriptor for immediate disk flush
+                    data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+                        if let baseAddress = ptr.baseAddress {
+                            Darwin.write(fileHandle.fileDescriptor, baseAddress, data.count)
+                            // Force immediate flush to disk
+                            fsync(fileHandle.fileDescriptor)
+                        }
+                    }
+                } else {
+                    // Fallback to stdout if file handle is not available
+                    print(logOutput)
+                }
+            } else {
+                // Fallback to stdout if data conversion fails
+                print(logOutput)
+            }
+        } else {
+            // Traditional stdout/stderr output (may be buffered)
+            print(logOutput)
         }
     }
 
     /// Set the global minimum level by name (e.g. "info", "warning").
     public static func setMinimumLevel(_ level: String) {
-        HavenLogger.minimumLevelPriority = HavenLogger.priority(for: level)
+        let priority = HavenLogger.priority(for: level)
+        HavenLogger.minimumLevelPriority = priority
+        // Diagnostic: Always log level changes (bypass level check)
+        let diagnosticLogger = HavenLogger(category: "logging-config")
+        let ts = iso8601Formatter.string(from: Date())
+        let diagnosticMsg = "Log level set to '\(level)' (priority: \(priority))"
+        let diagnosticOutput = "{\"ts\":\"\(ts)\",\"lvl\":\"info\",\"mod\":\"logging-config\",\"msg\":\"\(diagnosticMsg)\"}"
+        // Use os_log directly to bypass level check
+        let osLog = OSLog(subsystem: "com.haven.hostagent", category: "logging-config")
+        os_log("%{public}@", log: osLog, type: .info, diagnosticOutput)
+        // Also write to file if enabled
+        if directFileLoggingEnabled, let data = (diagnosticOutput + "\n").data(using: .utf8) {
+            if let fileHandle = logFileHandle {
+                data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+                    if let baseAddress = ptr.baseAddress {
+                        Darwin.write(fileHandle.fileDescriptor, baseAddress, data.count)
+                        fsync(fileHandle.fileDescriptor)
+                    }
+                }
+            }
+        }
     }
 
     /// Set the global output format (json, text, logfmt)
@@ -192,28 +280,6 @@ public struct HavenLogger {
 
         // Last resort: fallback to String description
         return String(describing: value)
-    }
-}
-
-// MARK: - Request Context
-
-public struct RequestContext {
-    public let requestId: String
-    public let startTime: Date
-    public var metadata: [String: Any]
-    
-    public init(requestId: String? = nil) {
-        self.requestId = requestId ?? UUID().uuidString
-        self.startTime = Date()
-        self.metadata = [:]
-    }
-    
-    public func elapsed() -> TimeInterval {
-        return Date().timeIntervalSince(startTime)
-    }
-    
-    public func elapsedMs() -> Int {
-        return Int(elapsed() * 1000)
     }
 }
 

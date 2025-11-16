@@ -3,6 +3,9 @@ import CryptoKit
 import HavenCore
 import Email
 import OCR
+import Entity
+import Face
+import Caption
 
 public protocol EmailCollecting: Sendable {
     func buildDocumentPayload(
@@ -187,6 +190,7 @@ public struct EmailDocumentMetadata: Codable, Equatable {
     public var relevanceScore: Double?
     public var imageCaptions: [String]?
     public var bodyProcessed: Bool?
+    public var enrichmentEntities: [String: Any]?
     
     enum CodingKeys: String, CodingKey {
         case messageId = "message_id"
@@ -203,6 +207,109 @@ public struct EmailDocumentMetadata: Codable, Equatable {
         case relevanceScore = "relevance_score"
         case imageCaptions = "image_captions"
         case bodyProcessed = "body_processed"
+        case enrichmentEntities = "enrichment_entities"
+    }
+    
+    public init(
+        messageId: String? = nil,
+        subject: String? = nil,
+        snippet: String? = nil,
+        listUnsubscribe: String? = nil,
+        headers: [String: String],
+        hasAttachments: Bool,
+        attachmentCount: Int,
+        contentHash: String,
+        references: [String],
+        inReplyTo: String? = nil,
+        intent: EmailIntentPayload? = nil,
+        relevanceScore: Double? = nil,
+        imageCaptions: [String]? = nil,
+        bodyProcessed: Bool? = nil,
+        enrichmentEntities: [String: Any]? = nil
+    ) {
+        self.messageId = messageId
+        self.subject = subject
+        self.snippet = snippet
+        self.listUnsubscribe = listUnsubscribe
+        self.headers = headers
+        self.hasAttachments = hasAttachments
+        self.attachmentCount = attachmentCount
+        self.contentHash = contentHash
+        self.references = references
+        self.inReplyTo = inReplyTo
+        self.intent = intent
+        self.relevanceScore = relevanceScore
+        self.imageCaptions = imageCaptions
+        self.bodyProcessed = bodyProcessed
+        self.enrichmentEntities = enrichmentEntities
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        messageId = try container.decodeIfPresent(String.self, forKey: .messageId)
+        subject = try container.decodeIfPresent(String.self, forKey: .subject)
+        snippet = try container.decodeIfPresent(String.self, forKey: .snippet)
+        listUnsubscribe = try container.decodeIfPresent(String.self, forKey: .listUnsubscribe)
+        headers = try container.decode([String: String].self, forKey: .headers)
+        hasAttachments = try container.decode(Bool.self, forKey: .hasAttachments)
+        attachmentCount = try container.decode(Int.self, forKey: .attachmentCount)
+        contentHash = try container.decode(String.self, forKey: .contentHash)
+        references = try container.decode([String].self, forKey: .references)
+        inReplyTo = try container.decodeIfPresent(String.self, forKey: .inReplyTo)
+        intent = try container.decodeIfPresent(EmailIntentPayload.self, forKey: .intent)
+        relevanceScore = try container.decodeIfPresent(Double.self, forKey: .relevanceScore)
+        imageCaptions = try container.decodeIfPresent([String].self, forKey: .imageCaptions)
+        bodyProcessed = try container.decodeIfPresent(Bool.self, forKey: .bodyProcessed)
+        
+        // Decode enrichmentEntities using AnyCodable wrapper
+        if let codableDict = try? container.decodeIfPresent([String: HavenCore.AnyCodable].self, forKey: .enrichmentEntities) {
+            enrichmentEntities = codableDict.mapValues { $0.value }
+        } else {
+            enrichmentEntities = nil
+        }
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(messageId, forKey: .messageId)
+        try container.encodeIfPresent(subject, forKey: .subject)
+        try container.encodeIfPresent(snippet, forKey: .snippet)
+        try container.encodeIfPresent(listUnsubscribe, forKey: .listUnsubscribe)
+        try container.encode(headers, forKey: .headers)
+        try container.encode(hasAttachments, forKey: .hasAttachments)
+        try container.encode(attachmentCount, forKey: .attachmentCount)
+        try container.encode(contentHash, forKey: .contentHash)
+        try container.encode(references, forKey: .references)
+        try container.encodeIfPresent(inReplyTo, forKey: .inReplyTo)
+        try container.encodeIfPresent(intent, forKey: .intent)
+        try container.encodeIfPresent(relevanceScore, forKey: .relevanceScore)
+        try container.encodeIfPresent(imageCaptions, forKey: .imageCaptions)
+        try container.encodeIfPresent(bodyProcessed, forKey: .bodyProcessed)
+        
+        // Encode enrichmentEntities using AnyCodable wrapper
+        if let entities = enrichmentEntities {
+            let codableDict = entities.mapValues { HavenCore.AnyCodable($0) }
+            try container.encodeIfPresent(codableDict, forKey: .enrichmentEntities)
+        }
+    }
+    
+    public static func == (lhs: EmailDocumentMetadata, rhs: EmailDocumentMetadata) -> Bool {
+        // Compare all fields except enrichmentEntities (which is [String: Any] and can't be compared directly)
+        return lhs.messageId == rhs.messageId &&
+               lhs.subject == rhs.subject &&
+               lhs.snippet == rhs.snippet &&
+               lhs.listUnsubscribe == rhs.listUnsubscribe &&
+               lhs.headers == rhs.headers &&
+               lhs.hasAttachments == rhs.hasAttachments &&
+               lhs.attachmentCount == rhs.attachmentCount &&
+               lhs.contentHash == rhs.contentHash &&
+               lhs.references == rhs.references &&
+               lhs.inReplyTo == rhs.inReplyTo &&
+               lhs.intent == rhs.intent &&
+               lhs.relevanceScore == rhs.relevanceScore &&
+               lhs.imageCaptions == rhs.imageCaptions &&
+               lhs.bodyProcessed == rhs.bodyProcessed
+        // enrichmentEntities comparison skipped - would need custom comparison
     }
 }
 
@@ -225,6 +332,8 @@ public struct EmailDocumentPerson: Codable, Equatable {
 public struct EmailThreadPayload: Codable, Equatable {
     public var externalId: String
     public var sourceType: String?
+    public var sourceProvider: String?
+    public var sourceAccountId: String?
     public var title: String?
     public var participants: [EmailDocumentPerson]
     public var metadata: [String: String]?
@@ -232,6 +341,8 @@ public struct EmailThreadPayload: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case externalId = "external_id"
         case sourceType = "source_type"
+        case sourceProvider = "source_provider"
+        case sourceAccountId = "source_account_id"
         case title
         case participants
         case metadata
@@ -241,6 +352,8 @@ public struct EmailThreadPayload: Codable, Equatable {
 public struct EmailDocumentPayload: Codable, Equatable {
     public var sourceType: String
     public var sourceId: String
+    public var sourceProvider: String?
+    public var sourceAccountId: String?
     public var title: String?
     public var canonicalUri: String?
     public var content: EmailDocumentContent
@@ -252,10 +365,17 @@ public struct EmailDocumentPayload: Codable, Equatable {
     public var thread: EmailThreadPayload?
     public var intent: EmailIntentPayload?
     public var relevanceScore: Double?
+    // Reminder-specific fields
+    public var hasDueDate: Bool?
+    public var dueDate: Date?
+    public var isCompleted: Bool?
+    public var completedAt: Date?
     
     enum CodingKeys: String, CodingKey {
         case sourceType = "source_type"
         case sourceId = "source_id"
+        case sourceProvider = "source_provider"
+        case sourceAccountId = "source_account_id"
         case title
         case canonicalUri = "canonical_uri"
         case content
@@ -267,6 +387,10 @@ public struct EmailDocumentPayload: Codable, Equatable {
         case thread
         case intent
         case relevanceScore = "relevance_score"
+        case hasDueDate = "has_due_date"
+        case dueDate = "due_date"
+        case isCompleted = "is_completed"
+        case completedAt = "completed_at"
     }
 }
 
@@ -316,7 +440,6 @@ public struct GatewaySubmissionResponse: Codable, Equatable, Sendable {
     public var externalId: String
     public var status: String
     public var threadId: String?
-    public var fileIds: [String]
     public var duplicate: Bool
     public var totalChunks: Int
     
@@ -326,7 +449,6 @@ public struct GatewaySubmissionResponse: Codable, Equatable, Sendable {
         case externalId = "external_id"
         case status
         case threadId = "thread_id"
-        case fileIds = "file_ids"
         case duplicate
         case totalChunks = "total_chunks"
     }
@@ -338,12 +460,35 @@ public struct GatewayFileSubmissionResponse: Codable, Equatable, Sendable {
     public var externalId: String
     public var status: String
     public var threadId: String?
-    public var fileIds: [String]
     public var duplicate: Bool
     public var totalChunks: Int
     public var fileSha256: String
     public var objectKey: String
     public var extractionStatus: String
+    
+    public init(
+        submissionId: String,
+        docId: String,
+        externalId: String,
+        status: String,
+        threadId: String? = nil,
+        duplicate: Bool = false,
+        totalChunks: Int = 0,
+        fileSha256: String = "",
+        objectKey: String = "",
+        extractionStatus: String = "completed"
+    ) {
+        self.submissionId = submissionId
+        self.docId = docId
+        self.externalId = externalId
+        self.status = status
+        self.threadId = threadId
+        self.duplicate = duplicate
+        self.totalChunks = totalChunks
+        self.fileSha256 = fileSha256
+        self.objectKey = objectKey
+        self.extractionStatus = extractionStatus
+    }
     
     enum CodingKeys: String, CodingKey {
         case submissionId = "submission_id"
@@ -351,7 +496,6 @@ public struct GatewayFileSubmissionResponse: Codable, Equatable, Sendable {
         case externalId = "external_id"
         case status
         case threadId = "thread_id"
-        case fileIds = "file_ids"
         case duplicate
         case totalChunks = "total_chunks"
         case fileSha256 = "file_sha256"
@@ -404,7 +548,8 @@ public actor EmailCollector {
         intent: IntentClassification? = nil,
         relevance: Double? = nil,
         sourceType overrideSourceType: String? = nil,
-        sourceIdPrefix: String? = nil
+        sourceIdPrefix: String? = nil,
+        sourceAccountId: String? = nil
     ) async throws -> EmailDocumentPayload {
         let messageId = normalizeMessageId(email.messageId)
         let resolvedSourceType = overrideSourceType ?? defaultSourceType
@@ -430,6 +575,33 @@ public actor EmailCollector {
             attachments: email.attachments,
             ocrService: nil // TODO: Pass OCR service when available
         )
+        
+        // Determine content_timestamp and content_timestamp_type following email rules
+        // Prefer header Date as primary, fallback to IMAP internaldate
+        let contentTimestamp: Date
+        let contentTimestampType: String
+        let headerDateString: String?
+        
+        if let headerDate = email.headers["Date"], !headerDate.isEmpty {
+            // Try to parse header Date
+            let formatter = DateFormatter()
+            formatter.dateFormat = "EEE, d MMM yyyy HH:mm:ss Z"
+            if let parsedDate = formatter.date(from: headerDate) {
+                contentTimestamp = parsedDate
+                contentTimestampType = "sent"
+                headerDateString = headerDate
+            } else {
+                // Fallback to internaldate if header Date can't be parsed
+                contentTimestamp = email.date ?? Date()
+                contentTimestampType = "received"
+                headerDateString = headerDate
+            }
+        } else {
+            // Use IMAP internaldate
+            contentTimestamp = email.date ?? Date()
+            contentTimestampType = "received"
+            headerDateString = nil
+        }
         
         let content = EmailDocumentContent(mimeType: "text/plain", data: redacted, encoding: nil)
         let snippet = buildSnippet(from: redacted)
@@ -462,7 +634,11 @@ public actor EmailCollector {
         )
         
         let people = buildPeople(from: email)
-        let threadPayload = buildThreadPayload(email: email, people: people)
+        var threadPayload = buildThreadPayload(email: email, people: people)
+        // Add source_account_id to thread if available
+        if let accountId = sourceAccountId {
+            threadPayload?.sourceAccountId = accountId
+        }
         let threadId: UUID?
         if let externalId = threadPayload?.externalId {
             threadId = deterministicUUID(from: externalId)
@@ -473,12 +649,13 @@ public actor EmailCollector {
         return EmailDocumentPayload(
             sourceType: resolvedSourceType,
             sourceId: sourceId,
+            sourceAccountId: sourceAccountId,
             title: email.subject,
             canonicalUri: messageId.map { "message://\($0)" },
             content: content,
             metadata: metadata,
-            contentTimestamp: email.date,
-            contentTimestampType: "received",
+            contentTimestamp: contentTimestamp,
+            contentTimestampType: contentTimestampType,
             people: people,
             threadId: threadId,
             thread: threadPayload,
@@ -812,5 +989,398 @@ public actor EmailCollector {
             return UUID(uuid: tuple)
         }
         return uuid
+    }
+    
+    // MARK: - New Architecture Methods
+    
+    /// Collect and submit email using the new architecture (TextExtractor, ImageExtractor, EnrichmentOrchestrator, DocumentSubmitter)
+    /// This is a new method that demonstrates the refactored architecture
+    /// - Parameters:
+    ///   - email: The email message to process
+    ///   - enrichmentOrchestrator: Optional enrichment orchestrator (if nil and skipEnrichment is false, will be created)
+    ///   - submitter: Optional document submitter (if nil, will be created)
+    ///   - skipEnrichment: Whether to skip enrichment (defaults to false)
+    ///   - config: HavenConfig for initializing enrichment services if needed
+    ///   - intent: Optional intent classification
+    ///   - relevance: Optional relevance score
+    /// - Returns: Submission result
+    public func collectAndSubmit(
+        email: EmailMessage,
+        enrichmentOrchestrator: EnrichmentOrchestrator? = nil,
+        enrichmentQueue: EnrichmentQueue? = nil,
+        submitter: DocumentSubmitter? = nil,
+        skipEnrichment: Bool = false,
+        config: HavenConfig? = nil,
+        intent: IntentClassification? = nil,
+        relevance: Double? = nil
+    ) async throws -> SubmissionResult {
+        // 1. Extract text using shared TextExtractor
+        let textExtractor = TextExtractor()
+        let rawBody = selectBestBody(from: email)
+        let markdownContent = await textExtractor.extractText(from: rawBody, mimeType: email.bodyHTML != nil ? "text/html" : "text/plain")
+        let normalizedBody = normalizeIngestText(markdownContent)
+        guard !normalizedBody.isEmpty else {
+            throw EmailCollectorError.emptyContent
+        }
+        
+        // 2. Redact PII
+        let redactionOpts = resolveRedactionOptions()
+        let redacted = await emailService.redactPII(in: normalizedBody, options: redactionOpts)
+        
+        // 3. Extract images using shared ImageExtractor
+        // Filter images > 1000 square pixels
+        let imageExtractor = ImageExtractor()
+        var extractedImages: [ImageAttachment] = []
+        
+        // Extract images from HTML content (embedded images)
+        if let htmlContent = email.bodyHTML {
+            let htmlImages = await imageExtractor.extractImages(from: htmlContent, minSquarePixels: 1000)
+            extractedImages.append(contentsOf: htmlImages)
+        }
+        
+        // Extract images from email attachments
+        // Note: This requires access to attachment file data, which may not be available
+        // in all contexts. For IMAP emails, attachments are fetched separately.
+        // For now, we'll extract from attachments that are embedded in the MIME message.
+        let attachmentImages = await extractImagesFromAttachments(email: email, imageExtractor: imageExtractor)
+        extractedImages.append(contentsOf: attachmentImages)
+        
+        // 4. Build CollectorDocument
+        let messageId = normalizeMessageId(email.messageId)
+        let resolvedSourceType = defaultSourceType
+        let sourceId = buildSourceId(messageId: messageId, email: email, prefix: defaultSourceIdPrefix)
+        let textHash = sha256Hex(of: normalizedBody)
+        
+        let document = CollectorDocument(
+            content: redacted,
+            sourceType: resolvedSourceType,
+            externalId: sourceId,
+            metadata: DocumentMetadata(
+                contentHash: textHash,
+                mimeType: "text/plain",
+                timestamp: email.date,
+                timestampType: "received",
+                createdAt: email.date,
+                modifiedAt: email.date
+            ),
+            images: extractedImages,
+            contentType: .email,
+            title: email.subject,
+            canonicalUri: messageId.map { "message://\($0)" }
+        )
+        
+        // 5. Enrich (if not skipped)
+        func performDirectEnrichment() async throws -> EnrichedDocument {
+            if let provided = enrichmentOrchestrator {
+                return try await provided.enrich(document)
+            } else if let config = config {
+                let ocrService = config.modules.ocr.enabled ? OCRService(
+                    timeoutMs: config.modules.ocr.timeoutMs,
+                    languages: config.modules.ocr.languages,
+                    recognitionLevel: config.modules.ocr.recognitionLevel,
+                    includeLayout: config.modules.ocr.includeLayout
+                ) : nil
+
+                let faceService = config.modules.face.enabled ? FaceService(
+                    minFaceSize: config.modules.face.minFaceSize,
+                    minConfidence: config.modules.face.minConfidence,
+                    includeLandmarks: config.modules.face.includeLandmarks
+                ) : nil
+
+                let entityService = config.modules.entity.enabled ? EntityService(
+                    enabledTypes: config.modules.entity.types.compactMap { EntityType(rawValue: $0) },
+                    minConfidence: config.modules.entity.minConfidence
+                ) : nil
+
+                let captionService = config.modules.caption.enabled ? CaptionService(
+                    method: config.modules.caption.method,
+                    timeoutMs: config.modules.caption.timeoutMs,
+                    model: config.modules.caption.model
+                ) : nil
+
+                let orchestrator = DocumentEnrichmentOrchestrator(
+                    ocrService: ocrService,
+                    faceService: faceService,
+                    entityService: entityService,
+                    captionService: captionService,
+                    ocrConfig: config.modules.ocr,
+                    faceConfig: config.modules.face,
+                    entityConfig: config.modules.entity,
+                    captionConfig: config.modules.caption
+                )
+                return try await orchestrator.enrich(document)
+            } else {
+                return EnrichedDocument(base: document)
+            }
+        }
+
+        let enriched: EnrichedDocument
+        if !skipEnrichment {
+            if let queue = enrichmentQueue {
+                if let queuedResult = await queue.enqueueAndWait(document: document, documentId: document.externalId) {
+                    enriched = queuedResult
+                } else {
+                    enriched = try await performDirectEnrichment()
+                }
+            } else {
+                enriched = try await performDirectEnrichment()
+            }
+        } else {
+            enriched = EnrichedDocument(base: document)
+        }
+        
+        // 6. Submit
+        let docSubmitter = submitter ?? BatchDocumentSubmitter(gatewayClient: gatewayClient)
+        return try await docSubmitter.submit(enriched)
+    }
+    
+    /// Select the best available body content from the email (helper for new architecture)
+    private func selectBestBody(from email: EmailMessage) -> String {
+        // Prefer plain text if available and not empty
+        if let plainText = email.bodyPlainText, !plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return plainText
+        }
+        
+        // Fall back to HTML if available
+        if let html = email.bodyHTML, !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return html
+        }
+        
+        // Last resort: raw content
+        return email.rawContent ?? ""
+    }
+    
+    /// Extract images from email attachments
+    /// - Parameters:
+    ///   - email: The email message
+    ///   - imageExtractor: The image extractor to use
+    /// - Returns: Array of ImageAttachment objects for images > 1000 square pixels
+    private func extractImagesFromAttachments(email: EmailMessage, imageExtractor: ImageExtractor) async -> [ImageAttachment] {
+        var images: [ImageAttachment] = []
+        
+        // Parse raw MIME message to extract image attachment data
+        // We need to parse the raw content directly to get binary data before it's decoded as text
+        guard let rawContent = email.rawContent else {
+            return images
+        }
+        
+        // Parse MIME message structure to find image parts
+        let mimeMessage = MIMEParser.parseMIMEMessage(rawContent)
+        
+        // Process each MIME part to find image attachments
+        for (index, part) in mimeMessage.parts.enumerated() {
+            // Check if this part is an image attachment
+            let contentType = part.contentType.lowercased()
+            guard contentType.hasPrefix("image/") else { continue }
+            
+            // Find corresponding attachment metadata
+            guard let attachment = email.attachments.first(where: { $0.partIndex == index }) else { continue }
+            
+            // Extract raw base64 content from the original MIME message
+            // The MIMEParser has already decoded it as a string, but for images we need the raw bytes
+            // We'll try to extract the base64 data directly from the raw content
+            if let imageData = extractImageDataFromMIMEPart(
+                rawContent: rawContent,
+                partIndex: index,
+                contentType: contentType,
+                encoding: part.headers["content-transfer-encoding"]
+            ) {
+                // Extract images with size filtering
+                let partImages = await imageExtractor.extractImages(
+                    from: imageData,
+                    mimeType: contentType,
+                    filePath: attachment.filename,
+                    minSquarePixels: 1000
+                )
+                images.append(contentsOf: partImages)
+            }
+        }
+        
+        return images
+    }
+    
+    /// Extract binary image data from a MIME part in the raw email content
+    /// - Parameters:
+    ///   - rawContent: The raw email content
+    ///   - partIndex: The index of the MIME part
+    ///   - contentType: The content type of the part
+    ///   - encoding: The content-transfer-encoding header value
+    /// - Returns: Decoded image data if successful, nil otherwise
+    private func extractImageDataFromMIMEPart(rawContent: String, partIndex: Int, contentType: String, encoding: String?) -> Data? {
+        // Parse the raw MIME message to find the specific part
+        let lines = rawContent.components(separatedBy: .newlines)
+        
+        // Find headers end
+        var headerEndIndex = 0
+        for (index, line) in lines.enumerated() {
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                headerEndIndex = index
+                break
+            }
+        }
+        
+        // Check if multipart
+        let headerLines = headerEndIndex > 0 ? Array(lines[0..<headerEndIndex]) : []
+        let headers = parseMIMEHeaders(headerLines)
+        guard let contentTypeHeader = headers["content-type"], contentTypeHeader.lowercased().contains("multipart") else {
+            // Single part message - decode directly
+            let bodyContent = headerEndIndex < lines.count ? Array(lines[headerEndIndex..<lines.count]).joined(separator: "\n") : ""
+            return decodeMIMEContent(bodyContent, encoding: encoding)
+        }
+        
+        // Extract boundary
+        guard let boundary = extractMIMEBoundary(from: contentTypeHeader) else {
+            return nil
+        }
+        
+        let boundaryMarker = "--\(boundary)"
+        let bodyContent = headerEndIndex < lines.count ? Array(lines[headerEndIndex..<lines.count]).joined(separator: "\n") : ""
+        let parts = bodyContent.components(separatedBy: boundaryMarker)
+        
+        // Find the part at the specified index (skip preamble and closing marker)
+        var partCount = 0
+        for part in parts {
+            let trimmed = part.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed == "--" || trimmed.hasSuffix("--") {
+                continue
+            }
+            
+            // Skip preamble
+            if partCount == 0 && !trimmed.contains("Content-Type:") && !trimmed.contains("content-type:") {
+                continue
+            }
+            
+            if partCount == partIndex {
+                // Found the part - extract content
+                let partLines = trimmed.components(separatedBy: "\n")
+                var partHeaderEndIndex = 0
+                for (lineIndex, line) in partLines.enumerated() {
+                    if line.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
+                        partHeaderEndIndex = lineIndex
+                        break
+                    }
+                }
+                
+                let partContent = partHeaderEndIndex < partLines.count ? Array(partLines[partHeaderEndIndex..<partLines.count]).joined(separator: "\n") : ""
+                let partHeaders = partHeaderEndIndex > 0 ? parseMIMEHeaders(Array(partLines[0..<partHeaderEndIndex])) : [:]
+                let partEncoding = partHeaders["content-transfer-encoding"] ?? encoding
+                
+                return decodeMIMEContent(partContent, encoding: partEncoding)
+            }
+            
+            partCount += 1
+        }
+        
+        return nil
+    }
+    
+    /// Parse MIME headers from header lines
+    private func parseMIMEHeaders(_ lines: [String]) -> [String: String] {
+        var headers: [String: String] = [:]
+        var currentHeader: String?
+        var currentValue = ""
+        
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                continue
+            }
+            
+            if line.first?.isWhitespace == true {
+                if currentHeader != nil {
+                    currentValue += " " + trimmed
+                }
+            } else if line.contains(":") {
+                if let header = currentHeader {
+                    headers[header.lowercased()] = currentValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                
+                let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                if parts.count == 2 {
+                    currentHeader = String(parts[0]).trimmingCharacters(in: .whitespaces)
+                    currentValue = String(parts[1]).trimmingCharacters(in: .whitespaces)
+                }
+            }
+        }
+        
+        if let header = currentHeader {
+            headers[header.lowercased()] = currentValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        return headers
+    }
+    
+    /// Extract boundary from Content-Type header
+    private func extractMIMEBoundary(from contentType: String) -> String? {
+        let pattern = #"boundary\s*=\s*"([^"]+)"|boundary\s*=\s*([^;]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return nil
+        }
+        
+        let nsString = contentType as NSString
+        let matches = regex.matches(in: contentType, range: NSRange(location: 0, length: nsString.length))
+        
+        if let match = matches.first {
+            for i in 1...2 {
+                if match.numberOfRanges > i {
+                    let range = match.range(at: i)
+                    if range.location != NSNotFound {
+                        let boundary = nsString.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !boundary.isEmpty {
+                            return boundary
+                        }
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    /// Decode MIME content based on transfer encoding
+    private func decodeMIMEContent(_ content: String, encoding: String?) -> Data? {
+        guard let encoding = encoding?.lowercased() else {
+            // Try base64 by default
+            let cleaned = content.replacingOccurrences(of: "\\s", with: "", options: .regularExpression)
+            return Data(base64Encoded: cleaned)
+        }
+        
+        switch encoding {
+        case "base64":
+            let cleaned = content.replacingOccurrences(of: "\\s", with: "", options: .regularExpression)
+            return Data(base64Encoded: cleaned)
+        case "quoted-printable":
+            // Decode quoted-printable to bytes
+            let decoded = content
+                .replacingOccurrences(of: "=\r\n", with: "")
+                .replacingOccurrences(of: "=\n", with: "")
+            var result = Data()
+            var i = decoded.startIndex
+            while i < decoded.endIndex {
+                if decoded[i] == "=" && decoded.index(i, offsetBy: 2) < decoded.endIndex {
+                    let hexStart = decoded.index(i, offsetBy: 1)
+                    let hexEnd = decoded.index(hexStart, offsetBy: 2)
+                    if let byte = UInt8(decoded[hexStart..<hexEnd], radix: 16) {
+                        result.append(byte)
+                        i = hexEnd
+                    } else {
+                        if let ascii = decoded[i].asciiValue {
+                            result.append(ascii)
+                        }
+                        i = decoded.index(after: i)
+                    }
+                } else {
+                    if let ascii = decoded[i].asciiValue {
+                        result.append(ascii)
+                    }
+                    i = decoded.index(after: i)
+                }
+            }
+            return result
+        case "7bit", "8bit", "binary":
+            return content.data(using: .utf8)
+        default:
+            return content.data(using: .utf8)
+        }
     }
 }

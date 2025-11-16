@@ -41,6 +41,7 @@ Active-document views (`active_documents`, `documents_with_files`, `thread_summa
    * iMessage collector normalises chat.db rows, enriches attachments, builds people/thread metadata, deduplicates via SHA256, and tracks per-message versions to avoid duplicates.
    * Localfs collector uploads binaries to MinIO, extracts text, attaches image enrichment, and forwards v2 document payloads.
    * Contacts collector (Swift HostAgent) imports from macOS Contacts or VCF files, normalizes identifiers, creates/updates `people` records via `PeopleRepository`, and populates `document_people` junction table.
+   * Reminders collector (Swift HostAgent) imports from macOS Reminders.app via EventKit, extracts reminder content and metadata (due dates, completion status, priorities), tracks changes for incremental sync, and supports selective list collection.
 2. **Gateway** validates/normalises payloads (`/v1/ingest`, `/v1/ingest/file`), computes idempotency keys, adds timestamps and facet overrides, then forwards them to catalog.
 3. **Catalog** inserts into `ingest_submissions`, `documents`, `document_files`, `chunks`, `chunk_documents`, updates thread metadata, resolves people via `PeopleResolver`, links via `document_people`, and returns `DocumentIngestResponse` with submission & version info.
 4. **Embedding worker** polls `chunks` with `embedding_status='pending'`, marks them `processing`, generates vectors, posts to `/v1/catalog/embeddings`, which sets `embedding_status='embedded'` and updates document workflow status.

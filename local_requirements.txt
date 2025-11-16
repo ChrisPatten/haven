@@ -33,6 +33,11 @@ biplist  # Apple plist parsing (collectors may read plists)
 # === Testing / development ===
 pytest
 
+# === Notebook / interactive development ===
+# Required for notebooks/postgres_query_playground.ipynb
+pandas>=2.0
+ipython>=8.0
+
 # Notes:
 # - The file intentionally includes some optional tooling (Tika, pytesseract)
 #   because local image/document enrichment and backfill scripts may use them.

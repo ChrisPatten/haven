@@ -74,11 +74,11 @@ docker compose down -v  # Remove volumes
 rm -rf ~/.haven/*       # Clear state files
 
 # Option B: Partial purge - just reset collectors
-rm ~/.haven/imessage_collector_state.json
-rm ~/.haven/imessage_versions.json
-rm ~/.haven/imessage_image_cache.json
-rm ~/.haven/localfs_collector_state.json
-rm ~/.haven/contacts_collector_state.json
+rm ~/Library/Application\ Support/Haven/State/imessage_state.json
+rm ~/Library/Application\ Support/Haven/State/imessage_versions.json
+rm ~/Library/Application\ Support/Haven/State/localfs_collector_state.json
+rm ~/Library/Application\ Support/Haven/State/contacts_collector_state.json
+rm ~/Library/Application\ Support/Haven/State/reminders_sync_state.json
 
 # Start services fresh
 docker compose up --build
@@ -110,13 +110,15 @@ docker compose exec postgres psql -U postgres -d haven -c "SELECT COUNT(*) FROM 
 - `minio_data.tar.gz` - File attachments (images, documents)
 
 ### State Files (`~/.haven-backups/<name>/state/dot-haven/`)
-- `imessage_collector_state.json` - iMessage collection progress
-- `imessage_versions.json` - Message version tracking
-- `imessage_image_cache.json` - Image enrichment cache
+- `imessage_state.json` - iMessage collection progress
+- `imessage_versions.json` - Message version tracking (legacy)
 - `localfs_collector_state.json` - Filesystem watch progress
 - `contacts_collector_state.json` - Contacts sync state
+- `reminders_sync_state.json` - Reminders sync state
 - `chat_backup/` - Chat database snapshots
 - `hostagent.yaml` - Host agent configuration
+
+**Note:** State files are now stored in `~/Library/Application Support/Haven/State/` following macOS conventions. Backups preserve this structure.
 
 ### Configuration (`~/.haven-backups/<name>/config/`)
 - `hostagent.yaml` - Host agent settings

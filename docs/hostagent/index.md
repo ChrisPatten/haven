@@ -1,44 +1,74 @@
-# HostAgent Overview
+# Collector Implementation
 
-HostAgent is the native macOS companion to Haven. It unlocks capabilities that containers cannot access: iMessage collection, Vision-based OCR, filesystem monitoring, and link resolution. This page summarises the key workflows and links to deeper references.
+Haven.app uses Swift collector modules to access macOS system resources. These collectors are integrated directly into Haven.app and run via Swift APIs (no HTTP server required).
 
-## Why HostAgent Exists
-- Provides read-only access to privileged macOS resources (Messages, Contacts, Filesystem).
-- Wraps Vision APIs for OCR and entity detection with consistent JSON responses.
-- Supplies a modular collector runtime that mirrors the Python CLI behaviours while remaining always-on via launchd.
-- Keeps all traffic on-device; Gateway communicates with HostAgent over `host.docker.internal`.
+## Overview
 
-## Core Endpoints
-- `GET /v1/health` — verifies the agent is running and lists enabled modules.
-- `GET /v1/capabilities` — advertises active collectors, OCR support, and configuration.
-- `POST /v1/collectors/imessage:run` — runs the iMessage collector (supports `simulate`, `limit`, and lookback parameters).
-- `POST /v1/collectors/email_local:run` — runs the Mail.app `.emlx` collector in simulate or real mode, returning run statistics.
-- `GET /v1/collectors/email_local/state` — returns collector state (last status, timestamps, counters, and last error).
-- `POST /v1/collectors/email_imap:run` — fetches messages from a remote IMAP account and submits them to Gateway via the email pipeline.
-- `POST /v1/ocr` — uploads an image or presigned URL for Vision OCR + entity extraction.
-- `POST /v1/fswatch` (family of routes) — manages filesystem watch registrations and event queues.
+The collector modules provide native macOS capabilities that containers cannot access:
 
-Refer to [HostAgent README](hostagent-readme.md) for exhaustive endpoint descriptions, curl examples, and configuration keys.
+- **Messages Database**: Read-only access to iMessage history
+- **Vision APIs**: Native macOS Vision framework for OCR and entity detection
+- **Filesystem Monitoring**: FSEvents-based file watching
+- **Contacts**: Access to macOS Contacts database
+- **Email**: IMAP and local Mail.app email collection
 
-## Install and Run
-```bash
-make -C hostagent install
-make -C hostagent launchd
+## Architecture
+
+Haven.app integrates collectors directly:
+
 ```
-- Grants: Full Disk Access (Messages) and Contacts permission.
-- Config: `~/.haven/hostagent.yaml` controls module enables, auth secret, and polling intervals.
-- Logs: `~/Library/Logs/Haven/hostagent.log`
-- Development mode: copy `~/Library/Messages/chat.db` to `~/.haven/chat.db` and set `HAVEN_IMESSAGE_CHAT_DB_PATH`.
+Haven.app (SwiftUI) → Direct Swift APIs → Collector Modules → Gateway API
+```
 
-## Operational Tips
-- Use `make health` in `hostagent/` to exercise the health endpoint after upgrades.
-- Monitor LaunchAgent state with `launchctl list | grep haven`.
-- To rotate the auth secret, update `hostagent.yaml` and restart the LaunchAgent.
-- For OCR throughput issues, ensure the Vision framework has hardware acceleration (macOS 13+ recommended).
+**Benefits:**
+- No HTTP overhead
+- Simpler deployment (single app)
+- Better error handling and state management
+- Integrated UI and runtime
+
+## Core Capabilities
+
+The collector modules provide:
+
+- **iMessage Collection**: Safe, read-only access to Messages.app database with smart snapshots
+- **Email Collection**: IMAP and local Mail.app `.emlx` collection
+- **File System Monitoring**: FSEvents-based file watching with presigned URL uploads
+- **Contacts Collection**: macOS Contacts.app integration
+- **OCR Service**: Vision framework OCR + entity extraction
+
+## Configuration
+
+Configuration is managed through:
+
+1. **Settings UI**: Built-in settings window in Haven.app (`⌘,`)
+2. **Config File**: `~/.haven/hostagent.yaml` (YAML format)
+
+The unified app provides a comprehensive settings interface for all collector configuration, or you can edit the YAML file directly.
+
+## Usage
+
+See the [Haven.app Guide](../guides/havenui.md) for installation and usage instructions.
+
+## Collector Documentation
+
+- [iMessage Collector](../guides/collectors/imessage.md) - iMessage collection
+- [Local Files Collector](../guides/collectors/localfs.md) - Filesystem watching
+- [Contacts Collector](../guides/collectors/contacts.md) - Contacts sync
+- [Email Collectors](../guides/collectors/email.md) - IMAP and Mail.app
+
+## Implementation Details
+
+The collector modules are implemented as Swift packages within Haven.app:
+
+- **HavenCore**: Core collector infrastructure
+- **Collectors**: Individual collector implementations
+- **Utilities**: OCR, file watching, link resolution
+
+For implementation details, see the source code in `hostagent/Sources/` and `Haven/Haven/`.
 
 ## Related Documentation
-- [Agents Overview](../guides/AGENTS.md) for network topology and orchestration rules.
-- [Local Development](../operations/local-dev.md) for instructions on running HostAgent alongside Docker services.
-- [Functional Guide](../reference/functional_guide.md) for how collectors feed downstream workflows.
 
-_Adapted from `hostagent/README.md`, `AGENTS.md`, and prior HostAgent development notes._
+- [Haven.app Guide](../guides/havenui.md) - App usage and configuration
+- [Architecture Overview](../architecture/overview.md) - System architecture
+- [Local Development](../operations/local-dev.md) - Development setup
+- [Functional Guide](../reference/functional_guide.md) - Ingestion workflows

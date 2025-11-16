@@ -17,7 +17,7 @@ RUN pip install --upgrade pip && \
       search)   pip wheel --no-cache-dir .[search,common] -w /wheels/$SERVICE ;; \
       gateway)  pip wheel --no-cache-dir .[gateway,common] -w /wheels/$SERVICE ;; \
       catalog)  pip wheel --no-cache-dir .[catalog,common] -w /wheels/$SERVICE ;; \
-      embedding_service)pip wheel --no-cache-dir .[common] -w /wheels/$SERVICE ;; \
+      worker_service) pip wheel --no-cache-dir .[common] -w /wheels/$SERVICE ;; \
       *)        pip wheel --no-cache-dir . -w /wheels/$SERVICE ;; \
     esac && \
     rm -rf /wheels/current || true && \
@@ -33,4 +33,4 @@ COPY services ./services
 COPY shared ./shared
 COPY schema ./schema
 ENV SERVICE=${SERVICE}
-ENTRYPOINT ["bash","-lc","case \"$SERVICE\" in search) exec search-service --host 0.0.0.0 --port 8080 ;; gateway) exec uvicorn services.gateway_api.app:app --host 0.0.0.0 --port 8080 ;; catalog) exec uvicorn services.catalog_api.app:app --host 0.0.0.0 --port 8081 ;; embedding_service) exec python services/embedding_service/worker.py ;; *) exec search-service --host 0.0.0.0 --port 8080 ;; esac"]
+ENTRYPOINT ["bash","-lc","case \"$SERVICE\" in search) exec search-service --host 0.0.0.0 --port 8080 ;; gateway) exec uvicorn services.gateway_api.app:app --host 0.0.0.0 --port 8080 ;; catalog) exec uvicorn services.catalog_api.app:app --host 0.0.0.0 --port 8081 ;; worker_service) exec python services/worker_service/main.py ;; *) exec search-service --host 0.0.0.0 --port 8080 ;; esac"]

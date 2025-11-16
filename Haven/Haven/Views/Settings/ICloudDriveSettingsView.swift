@@ -1,0 +1,298 @@
+//
+//  ICloudDriveSettingsView.swift
+//  Haven
+//
+//  iCloud Drive collector instances management view
+//
+
+import SwiftUI
+import AppKit
+
+/// iCloud Drive settings view for managing iCloud Drive instances
+struct ICloudDriveSettingsView: View {
+    @ObservedObject var viewModel: SettingsViewModel
+    
+    @State private var instances: [ICloudDriveInstance] = []
+    @State private var selectedInstance: ICloudDriveInstance.ID?
+    @State private var showingAddSheet = false
+    @State private var showingEditSheet = false
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Toolbar
+            HStack {
+                Button("Add Instance") {
+                    showingAddSheet = true
+                }
+                .buttonStyle(.borderedProminent)
+                
+                Button("Remove") {
+                    removeSelectedInstance()
+                }
+                .disabled(selectedInstance == nil)
+                
+                Spacer()
+            }
+            .padding()
+            
+            Divider()
+            
+            // Table view
+            if instances.isEmpty {
+                VStack {
+                    Text("No iCloud Drive collector instances configured")
+                        .foregroundColor(.secondary)
+                    Text("Click 'Add Instance' to configure an iCloud Drive collector")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Table(instances, selection: $selectedInstance) {
+                    TableColumn("Name") { instance in
+                        Text(instance.name.isEmpty ? instance.id : instance.name)
+                    }
+                    TableColumn("Path") { instance in
+                        Text(instance.path ?? "Default (iCloud Drive root)")
+                            .lineLimit(1)
+                    }
+                    TableColumn("Enabled") { instance in
+                        Toggle("", isOn: Binding(
+                            get: { instance.enabled },
+                            set: { newValue in
+                                if let index = instances.firstIndex(where: { $0.id == instance.id }) {
+                                    instances[index].enabled = newValue
+                                    updateConfiguration()
+                                }
+                            }
+                        ))
+                    }
+                    TableColumn("") { instance in
+                        Button(action: {
+                            selectedInstance = instance.id
+                            showingEditSheet = true
+                        }) {
+                            Image(systemName: "pencil")
+                                .foregroundColor(.blue)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .width(30)
+                }
+            }
+        }
+        .sheet(isPresented: $showingAddSheet) {
+            ICloudDriveInstanceEditSheet(
+                instance: nil,
+                onSave: { instance in
+                    instances.append(instance)
+                    updateConfiguration()
+                }
+            )
+        }
+        .sheet(isPresented: $showingEditSheet) {
+            if let selectedId = selectedInstance,
+               let instance = instances.first(where: { $0.id == selectedId }) {
+                ICloudDriveInstanceEditSheet(
+                    instance: instance,
+                    onSave: { updatedInstance in
+                        if let index = instances.firstIndex(where: { $0.id == updatedInstance.id }) {
+                            instances[index] = updatedInstance
+                            updateConfiguration()
+                        }
+                    }
+                )
+            }
+        }
+        .task {
+            await loadConfiguration()
+        }
+    }
+    
+    private func loadConfiguration() async {
+        guard let config = viewModel.icloudDriveConfig else {
+            instances = []
+            return
+        }
+        
+        instances = config.instances
+    }
+    
+    private func updateConfiguration() {
+        viewModel.updateICloudDriveConfig { config in
+            config.instances = instances
+        }
+    }
+    
+    private func removeSelectedInstance() {
+        guard let selectedId = selectedInstance else { return }
+        instances.removeAll { $0.id == selectedId }
+        selectedInstance = nil
+        updateConfiguration()
+    }
+}
+
+/// Sheet for editing an iCloud Drive instance
+struct ICloudDriveInstanceEditSheet: View {
+    let instance: ICloudDriveInstance?
+    let onSave: (ICloudDriveInstance) -> Void
+    
+    @Environment(\.dismiss) private var dismiss
+    
+    @State private var id: String = ""
+    @State private var name: String = ""
+    @State private var enabled: Bool = true
+    @State private var path: String = ""
+    @State private var includeGlobs: [String] = ["*.txt", "*.md", "*.pdf", "*.jpg", "*.jpeg", "*.png", "*.gif", "*.heic", "*.heif"]
+    @State private var excludeGlobs: [String] = []
+    @State private var tags: [String] = []
+    
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Display Name", text: $name, prompt: Text("e.g., My iCloud Drive"))
+                        .help("A friendly name for this iCloud Drive collector")
+                    
+                    Toggle("Enabled", isOn: $enabled)
+                }
+                
+                Section {
+                    TextField("Path (Optional)", text: $path, prompt: Text("Leave empty for default iCloud Drive root"))
+                        .help("Optional: Specify a subfolder path within iCloud Drive. Leave empty to use the default iCloud Drive Documents folder.")
+                } header: {
+                    Text("iCloud Drive Path")
+                } footer: {
+                    Text("Leave empty to use the default iCloud Drive Documents folder, or specify a subfolder path (e.g., 'Documents/Work')")
+                }
+                
+                Section {
+                    if !includeGlobs.isEmpty {
+                        ForEach(Array(includeGlobs.indices), id: \.self) { index in
+                            HStack {
+                                TextField(
+                                    "Pattern",
+                                    text: bindingForIncludeGlob(index: index),
+                                    prompt: Text("*.txt, *.pdf, etc.")
+                                )
+                                Button(action: {
+                                    includeGlobs.remove(at: index)
+                                }) {
+                                    Image(systemName: "minus.circle.fill")
+                                        .foregroundColor(.red)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    
+                    Button(action: {
+                        includeGlobs.append("")
+                    }) {
+                        Label("Add Pattern", systemImage: "plus.circle")
+                    }
+                } header: {
+                    Text("Include Patterns")
+                } footer: {
+                    Text("Glob patterns for files to include (e.g., *.txt, *.pdf)")
+                }
+                
+                Section {
+                    if !excludeGlobs.isEmpty {
+                        ForEach(Array(excludeGlobs.indices), id: \.self) { index in
+                            HStack {
+                                TextField(
+                                    "Pattern",
+                                    text: bindingForExcludeGlob(index: index),
+                                    prompt: Text("*.tmp, .DS_Store, etc.")
+                                )
+                                Button(action: {
+                                    excludeGlobs.remove(at: index)
+                                }) {
+                                    Image(systemName: "minus.circle.fill")
+                                        .foregroundColor(.red)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    
+                    Button(action: {
+                        excludeGlobs.append("")
+                    }) {
+                        Label("Add Pattern", systemImage: "plus.circle")
+                    }
+                } header: {
+                    Text("Exclude Patterns")
+                } footer: {
+                    Text("Glob patterns for files to exclude from processing")
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle(instance == nil ? "Add iCloud Drive Instance" : "Edit iCloud Drive Instance")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let instance = ICloudDriveInstance(
+                            id: instance?.id ?? UUID().uuidString,
+                            name: name,
+                            enabled: enabled,
+                            path: path.isEmpty ? nil : path,
+                            includeGlobs: includeGlobs.filter { !$0.isEmpty },
+                            excludeGlobs: excludeGlobs.filter { !$0.isEmpty },
+                            tags: tags.filter { !$0.isEmpty }
+                        )
+                        onSave(instance)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .frame(width: 600, height: 600)
+        .onAppear {
+            if let instance = instance {
+                id = instance.id
+                name = instance.name
+                enabled = instance.enabled
+                path = instance.path ?? ""
+                includeGlobs = instance.includeGlobs
+                excludeGlobs = instance.excludeGlobs
+                tags = instance.tags
+            } else {
+                id = UUID().uuidString
+            }
+        }
+    }
+
+    private func bindingForIncludeGlob(index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                guard includeGlobs.indices.contains(index) else { return "" }
+                return includeGlobs[index]
+            },
+            set: { newValue in
+                guard includeGlobs.indices.contains(index) else { return }
+                includeGlobs[index] = newValue
+            }
+        )
+    }
+
+    private func bindingForExcludeGlob(index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                guard excludeGlobs.indices.contains(index) else { return "" }
+                return excludeGlobs[index]
+            },
+            set: { newValue in
+                guard excludeGlobs.indices.contains(index) else { return }
+                excludeGlobs[index] = newValue
+            }
+        )
+    }
+}
+

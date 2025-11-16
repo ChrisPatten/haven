@@ -8,8 +8,8 @@ Follow these steps to bring up Haven locally, preview the documentation site, an
 - Access to `~/Library/Messages/chat.db` if you plan to run the iMessage collector
 - A bearer token exported as `AUTH_TOKEN` for Gateway authentication (development default is `changeme`)
 
-Optional:
-- Swift toolchain (for HostAgent builds)
+Optional but recommended:
+- Xcode 15.0+ or Swift 5.9+ toolchain (for building the unified Haven macOS app)
 - Ollama with a vision-capable model if you want local captioning
 
 ## Clone and Install Tooling
@@ -38,9 +38,43 @@ docker compose exec -T postgres psql -U postgres -d haven -f - < schema/init.sql
 psql postgresql://postgres:postgres@localhost:5432/haven -f schema/init.sql
 ```
 
+## Build and Run Haven.app (Recommended)
+
+Haven.app provides a native macOS interface for running collectors:
+
+```bash
+cd Haven
+open Haven.xcodeproj
+# Build and run from Xcode (⌘R)
+```
+
+Or build from command line:
+
+```bash
+cd Haven
+xcodebuild -scheme Haven -configuration Release
+open build/Release/Haven.app
+```
+
+On first launch:
+1. Grant Full Disk Access permission (System Settings → Privacy & Security → Full Disk Access)
+2. Grant Contacts permission if you plan to collect contacts
+3. Configure Gateway URL in Settings (`⌘,`) or edit `~/.haven/hostagent.yaml`
+
+See the [Haven.app Guide](guides/havenui.md) for detailed usage instructions.
+
 ## Ingest Sample Data
 
-### iMessage Collector
+### Using Haven.app (Recommended)
+
+1. Launch Haven.app
+2. Open Collectors window (`⌘2`)
+3. Select a collector and click "Run"
+4. View results in the Dashboard (`⌘1`)
+
+### Using CLI Collectors (Alternative)
+
+**iMessage Collector:**
 ```bash
 python scripts/collectors/collector_imessage.py --simulate "Hello from Haven!"
 ```
@@ -48,7 +82,7 @@ python scripts/collectors/collector_imessage.py --simulate "Hello from Haven!"
 - `--once` processes the current backlog and exits
 - State files live under `~/.haven/`
 
-### Local Files Collector
+**Local Files Collector:**
 ```bash
 python scripts/collectors/collector_localfs.py \
   --watch ~/HavenInbox \
@@ -62,7 +96,7 @@ python scripts/collectors/collector_localfs.py \
 curl -H "Authorization: Bearer $AUTH_TOKEN" \
   "http://localhost:8085/v1/search?q=Haven"
 ```
-You should see documents returned from your simulated collector runs.
+You should see documents returned from your collector runs.
 
 ## Preview the Documentation Site
 ```bash

@@ -85,14 +85,14 @@ This guide describes the day-to-day workflows exposed by the Haven platform afte
 3. Metadata contains mtime/ctime, tags, enrichment output; attachments stored in MinIO with SHA keys.
 
 ### 3.3 Contacts Collector
-1. The macOS Contacts collector has been ported to Swift and runs as part of HostAgent.
-2. **HostAgent Method**: POST to `http://localhost:7090/v1/collectors/contacts:run` with `{"mode": "real"}`.
-3. **VCF Import**: Include `collector_options: {"vcf_directory": "/path/to/vcf"}` to import from VCF files instead of macOS Contacts.
+1. The macOS Contacts collector runs as part of Haven.app.
+2. **Haven.app Method (Recommended)**: Use the Collectors window (`⌘2`) in Haven.app, select Contacts collector, and click "Run".
+3. **VCF Import**: Configure VCF import directory in Settings (`⌘,`) under Contacts settings.
 4. Contacts are transformed into unified person records in the `people` table with normalized identifiers.
 5. The PeopleRepository handles deduplication and merging based on phone/email overlap.
 6. Change tokens persist in `source_change_tokens` for incremental sync.
 
-**Legacy Python Collector**: The original `scripts/collectors/collector_contacts.py` is deprecated but remains available for non-macOS environments.
+**Python CLI Collector**: `scripts/collectors/collector_contacts.py` is available for environments without Haven.app.
 
 ### 3.4 People Normalization
 1. All contacts and message participants are normalized into the `people` table.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -13,6 +13,7 @@ class Document(BaseModel):
     external_id: str
     source_type: str
     source_provider: Optional[str] = None
+    source_account_id: Optional[str] = None
     version_number: int = 1
     previous_version_id: Optional[UUID] = None
     is_active_version: bool = True
@@ -25,8 +26,6 @@ class Document(BaseModel):
     canonical_uri: Optional[str] = None
     content_timestamp: datetime
     content_timestamp_type: str
-    content_created_at: Optional[datetime] = None
-    content_modified_at: Optional[datetime] = None
     people: List[Dict[str, Any]] = Field(default_factory=list)
     thread_id: Optional[UUID] = None
     parent_doc_id: Optional[UUID] = None
@@ -54,6 +53,7 @@ class Thread(BaseModel):
     external_id: str
     source_type: str
     source_provider: Optional[str] = None
+    source_account_id: Optional[str] = None
     title: Optional[str] = None
     participants: List[Dict[str, Any]] = Field(default_factory=list)
     thread_type: Optional[str] = None
@@ -66,37 +66,10 @@ class Thread(BaseModel):
     updated_at: datetime
 
 
-class File(BaseModel):
-    file_id: UUID
-    content_sha256: str
-    object_key: str
-    storage_backend: str
-    filename: Optional[str] = None
-    mime_type: Optional[str] = None
-    size_bytes: Optional[int] = None
-    enrichment_status: str
-    enrichment: Optional[Dict[str, Any]] = None
-    first_seen_at: datetime
-    last_enriched_at: Optional[datetime] = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class DocumentFile(BaseModel):
-    doc_id: UUID
-    file_id: UUID
-    role: str
-    attachment_index: Optional[int] = None
-    filename: Optional[str] = None
-    caption: Optional[str] = None
-    created_at: datetime
-
-
 class Chunk(BaseModel):
     chunk_id: UUID
     text: str
     text_sha256: str
-    ordinal: int
     source_ref: Optional[Dict[str, Any]] = None
     embedding_status: str
     embedding_model: Optional[str] = None
@@ -136,3 +109,19 @@ class CrmRelationship(BaseModel):
     edge_features: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
+
+class Person(BaseModel):
+    person_id: UUID
+    display_name: str
+    given_name: Optional[str] = None
+    family_name: Optional[str] = None
+    organization: Optional[str] = None
+    nicknames: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+    photo_hash: Optional[str] = None
+
+class InferenceContext(BaseModel):
+    document: Document
+    thread_messages: Optional[List[Tuple[Document, str]]] = None
+    sender: Optional[str] = None
+    enrichment_entities: Optional[List[Dict[str, Any]]] = None

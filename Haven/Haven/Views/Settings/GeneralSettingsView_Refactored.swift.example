@@ -1,0 +1,273 @@
+//
+//  GeneralSettingsView_Refactored.swift.example
+//  Haven
+//
+//  EXAMPLE: Refactored GeneralSettingsView using SettingsViewModel
+//  This eliminates race conditions by using a single source of truth
+//
+
+import SwiftUI
+
+/// Refactored GeneralSettingsView using ViewModel pattern
+/// NO race conditions - direct binding to ViewModel's @Published properties
+struct GeneralSettingsView_Refactored: View {
+    @ObservedObject var viewModel: SettingsViewModel
+    @State private var showAuthSecret: Bool = false
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                gatewayConfigurationSection
+                loggingConfigurationSection
+                selfIdentifierSection
+                
+                if let error = viewModel.errorMessage {
+                    Text(error)
+                        .foregroundColor(.red)
+                        .padding()
+                }
+            }
+            .padding()
+        }
+        // NO .onAppear, NO .onChange, NO .task(id:) needed!
+        // ViewModel handles all state management
+    }
+    
+    // MARK: - Gateway Configuration
+    
+    @ViewBuilder
+    private var gatewayConfigurationSection: some View {
+        GroupBox("Gateway Configuration") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Base URL:")
+                        .frame(width: 120, alignment: .trailing)
+                    TextField("", text: gatewayBaseUrlBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+                
+                HStack {
+                    Text("Ingest Path:")
+                        .frame(width: 120, alignment: .trailing)
+                    TextField("", text: gatewayIngestPathBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+                
+                HStack {
+                    Text("Ingest File Path:")
+                        .frame(width: 120, alignment: .trailing)
+                    TextField("", text: gatewayIngestFilePathBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+                
+                HStack {
+                    Text("Auth Header:")
+                        .frame(width: 120, alignment: .trailing)
+                    TextField("", text: authHeaderBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+                
+                HStack {
+                    Text("Auth Secret:")
+                        .frame(width: 120, alignment: .trailing)
+                    if showAuthSecret {
+                        TextField("", text: authSecretBinding)
+                            .textFieldStyle(.roundedBorder)
+                    } else {
+                        SecureField("", text: authSecretBinding)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    Button(showAuthSecret ? "Hide" : "Show") {
+                        showAuthSecret.toggle()
+                    }
+                }
+            }
+            .padding()
+        }
+    }
+    
+    // MARK: - Logging Configuration
+    
+    @ViewBuilder
+    private var loggingConfigurationSection: some View {
+        GroupBox("Logging Configuration") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Level:")
+                        .frame(width: 120, alignment: .trailing)
+                    Picker("", selection: logLevelBinding) {
+                        Text("debug").tag("debug")
+                        Text("info").tag("info")
+                        Text("warning").tag("warning")
+                        Text("error").tag("error")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                
+                HStack {
+                    Text("Format:")
+                        .frame(width: 120, alignment: .trailing)
+                    Picker("", selection: logFormatBinding) {
+                        Text("json").tag("json")
+                        Text("text").tag("text")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                
+                HStack {
+                    Text("App Log Path:")
+                        .frame(width: 120, alignment: .trailing)
+                    TextField("", text: logAppPathBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+                
+                HStack {
+                    Text("Access Log Path:")
+                        .frame(width: 120, alignment: .trailing)
+                    TextField("", text: logAccessPathBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+            .padding()
+        }
+    }
+    
+    // MARK: - Self Identifier
+    
+    @ViewBuilder
+    private var selfIdentifierSection: some View {
+        GroupBox("Self Identification") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Phone number or email address to identify yourself in messages")
+                    .foregroundColor(.secondary)
+                    .font(.caption)
+                
+                HStack {
+                    Text("Identifier:")
+                        .frame(width: 120, alignment: .trailing)
+                    TextField("e.g., +15551234567 or email@example.com", text: selfIdentifierBinding)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+            .padding()
+        }
+    }
+    
+    // MARK: - Bindings (Direct to ViewModel)
+    
+    // These bindings directly update the ViewModel's config
+    // No manual syncing needed - SwiftUI handles it automatically
+    
+    private var gatewayBaseUrlBinding: Binding<String> {
+        Binding(
+            get: { viewModel.systemConfig?.gateway.baseUrl ?? "http://localhost:8085" },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.gateway.baseUrl = newValue
+                }
+            }
+        )
+    }
+    
+    private var gatewayIngestPathBinding: Binding<String> {
+        Binding(
+            get: { viewModel.systemConfig?.gateway.ingestPath ?? "/v1/ingest" },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.gateway.ingestPath = newValue
+                }
+            }
+        )
+    }
+    
+    private var gatewayIngestFilePathBinding: Binding<String> {
+        Binding(
+            get: { viewModel.systemConfig?.gateway.ingestFilePath ?? "/v1/ingest/file" },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.gateway.ingestFilePath = newValue
+                }
+            }
+        )
+    }
+    
+    private var authHeaderBinding: Binding<String> {
+        Binding(
+            get: { viewModel.systemConfig?.service.auth.header ?? "X-Haven-Key" },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.service.auth.header = newValue
+                }
+            }
+        )
+    }
+    
+    private var authSecretBinding: Binding<String> {
+        Binding(
+            get: { viewModel.systemConfig?.service.auth.secret ?? "changeme" },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.service.auth.secret = newValue
+                }
+            }
+        )
+    }
+    
+    private var logLevelBinding: Binding<String> {
+        Binding(
+            get: { viewModel.systemConfig?.logging.level ?? "info" },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.logging.level = newValue
+                }
+            }
+        )
+    }
+    
+    private var logFormatBinding: Binding<String> {
+        Binding(
+            get: { viewModel.systemConfig?.logging.format ?? "json" },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.logging.format = newValue
+                }
+            }
+        )
+    }
+    
+    private var logAppPathBinding: Binding<String> {
+        Binding(
+            get: { viewModel.systemConfig?.logging.paths.app ?? "~/.haven/hostagent.log" },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.logging.paths.app = newValue
+                }
+            }
+        )
+    }
+    
+    private var logAccessPathBinding: Binding<String> {
+        Binding(
+            get: { viewModel.systemConfig?.logging.paths.access ?? "~/.haven/hostagent_access.log" },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.logging.paths.access = newValue
+                }
+            }
+        )
+    }
+    
+    private var selfIdentifierBinding: Binding<String> {
+        Binding(
+            get: { viewModel.systemConfig?.selfIdentifier ?? "" },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.selfIdentifier = newValue.isEmpty ? nil : newValue
+                }
+            }
+        )
+    }
+}
+

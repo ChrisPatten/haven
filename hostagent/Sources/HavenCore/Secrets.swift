@@ -46,6 +46,10 @@ public struct KeychainSecretResolver: SecretResolving {
         guard status != errSecItemNotFound else {
             throw SecretResolverError.itemNotFound(secretRef)
         }
+        // Check for user interaction required (password prompt needed)
+        if status == errSecInteractionNotAllowed || status == errSecAuthFailed {
+            throw SecretResolverError.keychainError(status)
+        }
         guard status == errSecSuccess else {
             throw SecretResolverError.keychainError(status)
         }

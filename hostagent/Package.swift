@@ -7,13 +7,37 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(
-            name: "hostagent",
-            targets: ["HostAgent"]
-        ),
         .library(
             name: "HavenCore",
             targets: ["HavenCore"]
+        ),
+        .library(
+            name: "CollectorHandlers",
+            targets: ["CollectorHandlers"]
+        ),
+        .library(
+            name: "HostAgentEmail",
+            targets: ["HostAgentEmail"]
+        ),
+        .library(
+            name: "OCR",
+            targets: ["OCR"]
+        ),
+        .library(
+            name: "Entity",
+            targets: ["Entity"]
+        ),
+        .library(
+            name: "FSWatch",
+            targets: ["FSWatch"]
+        ),
+        .library(
+            name: "Face",
+            targets: ["Face"]
+        ),
+        .library(
+            name: "Caption",
+            targets: ["Caption"]
         ),
         .plugin(
             name: "GenerateBuildInfo",
@@ -21,14 +45,10 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.62.0"),
-        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.6"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.3"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         .package(url: "https://github.com/ChrisPatten/mailcore2.git", branch: "master"),
-        .package(url: "https://github.com/apple/swift-openapi-generator", from: "1.3.0"),
-        .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.0.0"),
         .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.6.0"),
         .package(url: "https://github.com/steipete/Demark.git", from: "1.0.0"),
         .package(url: "https://github.com/Kitura/swift-html-entities.git", from: "3.0.0")
@@ -39,7 +59,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Yams", package: "Yams"),
                 .product(name: "Logging", package: "swift-log"),
-                .product(name: "Crypto", package: "swift-crypto")
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "SwiftSoup", package: "SwiftSoup"),
+                .product(name: "Demark", package: "Demark"),
+                .product(name: "HTMLEntities", package: "swift-html-entities")
             ],
             path: "Sources/HavenCore",
             plugins: ["GenerateBuildInfo"]
@@ -61,6 +84,16 @@ let package = Package(
             path: "Sources/Face"
         ),
         .target(
+            name: "Caption",
+            dependencies: ["HavenCore"],
+            path: "Sources/Caption"
+        ),
+        .executableTarget(
+            name: "CaptionComparison",
+            dependencies: ["Caption", "HavenCore", .product(name: "Yams", package: "Yams")],
+            path: "Sources/CaptionComparison"
+        ),
+        .target(
             name: "Email",
             dependencies: ["HavenCore", "OCR", .product(name: "SwiftSoup", package: "SwiftSoup"), .product(name: "Demark", package: "Demark"), .product(name: "HTMLEntities", package: "swift-html-entities")],
             path: "Sources/Email"
@@ -79,7 +112,7 @@ let package = Package(
             path: "Sources/FSWatch"
         ),
         .target(
-            name: "HostHTTP",
+            name: "CollectorHandlers",
             dependencies: [
                 "HavenCore",
                 "HostAgentEmail",
@@ -87,47 +120,33 @@ let package = Package(
                 "OCR",
                 "Entity",
                 "Face",
+                "Caption",
                 "Email",
-                "FSWatch",
-                .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio"),
-                .product(name: "NIOFoundationCompat", package: "swift-nio"),
-                .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime")
+                "FSWatch"
             ],
-            path: "Sources/HostHTTP",
-            exclude: ["Handlers/EmailLocalHandler.swift", "Handlers/EmailLocalHandler.swift.removed"],
-            resources: [
-                .process("API/openapi.yaml")
-            ],
-            plugins: [.plugin(name: "OpenAPIGenerator", package: "swift-openapi-generator")]
+            path: "Sources/CollectorHandlers"
         ),
         .plugin(
             name: "GenerateBuildInfo",
             capability: .buildTool()
         ),
-        .executableTarget(
-            name: "HostAgent",
-            dependencies: [
-                "HavenCore",
-                "HostHTTP",
-                "HostAgentEmail",
-                .product(name: "ArgumentParser", package: "swift-argument-parser")
-            ],
-            path: "Sources/HostAgent",
-            exclude: ["Collectors", "Submission"]
-        ),
         .target(
             name: "HostAgentEmail",
             dependencies: [
                 "HavenCore",
-                "Email"
+                "Email",
+                "OCR",
+                "Entity",
+                "Face",
+                "Caption"
             ],
             path: "Sources/HostAgent",
-            exclude: ["main.swift"],
             sources: [
                 "Collectors",
-                "Submission"
+                "Submission",
+                "Enrichment",
+                "DocumentTypes.swift",
+                "EnrichmentOrchestrator.swift"
             ]
         ),
         .testTarget(
@@ -153,12 +172,6 @@ let package = Package(
             resources: [.copy("Fixtures")]
         ),
         .testTarget(
-            name: "HostHTTPTests",
-            dependencies: ["HostHTTP", "HostAgentEmail", "HavenCore"],
-            path: "Tests/HostHTTPTests",
-            resources: [.copy("Fixtures")]
-        ),
-        .testTarget(
             name: "SubmissionTests",
             dependencies: ["HostAgentEmail", "Email", "HavenCore"],
             path: "Tests/SubmissionTests"
@@ -176,7 +189,7 @@ let package = Package(
         ),
         .testTarget(
             name: "IMessagesTests",
-            dependencies: ["HostHTTP", "HostAgentEmail", "HavenCore"],
+            dependencies: ["CollectorHandlers", "HostAgentEmail", "HavenCore"],
             path: "Tests/IMessagesTests",
             resources: [.copy("Fixtures")]
         )

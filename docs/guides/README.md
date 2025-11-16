@@ -69,30 +69,18 @@ python scripts/collectors/collector_imessage.py --no-images --once
 ```
 
 ### Local Files Collector
-The HostAgent exposes `/v1/collectors/localfs:run` for native filesystem ingestion. Monitor a directory for supported documents (`.txt`, `.md`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.heic`) and upload through the gateway file endpoint without leaving macOS.
 
-```bash
-export HOSTAGENT_TOKEN="changeme"
-curl -X POST http://localhost:7090/v1/collectors/localfs:run \
-  -H "x-auth: ${HOSTAGENT_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "collector_options": {
-          "watch_dir": "~/HavenInbox",
-          "move_to": "~/.haven/localfs/processed",
-          "tags": ["personal"],
-          "include": ["*.txt","*.md","*.pdf","*.png","*.jpg","*.jpeg","*.heic"]
-        },
-        "limit": 100
-      }'
-```
+**Using Haven.app (Recommended):**
+1. Launch Haven.app
+2. Open Collectors window (`⌘2`)
+3. Select "Local Files" collector
+4. Configure watch directory and options in Settings (`⌘,`)
+5. Click "Run" to start collection
 
-- `collector_options.include` / `collector_options.exclude` accept glob patterns.
-- Set `collector_options.delete_after` to remove files after successful ingestion; `move_to` relocates them instead.
-- `collector_options.dry_run` logs matches without uploading; `collector_options.one_shot` processes the current backlog and exits.
-- State is persisted at `collector_options.state_file` (defaults to `~/.haven/localfs_collector_state.json`).
+See the [Local Files Collector](collectors/localfs.md) for detailed usage and configuration.
 
-Legacy Python CLI (`scripts/collectors/collector_localfs.py`) remains available for environments where the HostAgent cannot run.
+**Using CLI (Alternative):**
+Python CLI (`scripts/collectors/collector_localfs.py`) is available for environments without Haven.app. See the [Local Files Collector](collectors/localfs.md) documentation for CLI usage.
 
 ### Contacts Collector (macOS)
 ```bash
@@ -139,25 +127,11 @@ The backfill script:
 - Updates documents via the gateway PATCH endpoint
 - Automatically triggers re-embedding with the new enriched content
 
-See `AGENTS.md` for detailed backfill usage and prerequisites.
+See the [iMessage Collector](collectors/imessage.md) for detailed backfill usage and prerequisites.
 
-## Configuration Reference
-- `AUTH_TOKEN` – bearer token enforced on gateway routes (optional in development).
-- `CATALOG_TOKEN` – optional shared secret forwarded by the gateway for catalog ingest/status calls.
-- `CATALOG_BASE_URL` – internal URL the gateway uses to reach the catalog (defaults to `http://catalog:8081`).
-- `DATABASE_URL` – Postgres DSN; each service overrides this for Docker networking.
-- `EMBEDDING_MODEL` – embedding identifier (`BAAI/bge-m3`).
-- `QDRANT_URL`, `QDRANT_COLLECTION` – vector store configuration.
-- `OLLAMA_ENABLED`, `OLLAMA_API_URL`, `OLLAMA_VISION_MODEL` – configure optional vision captioning for image enrichment (shared module defaults: `llava:7b`).
-- `OLLAMA_BASE_URL` – base URL the embedding service uses when calling the embedding provider.
-- `OLLAMA_CAPTION_PROMPT`, `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_MAX_RETRIES` – fine-tune Ollama caption requests.
-- `IMDESC_CLI_PATH`, `IMDESC_TIMEOUT_SECONDS` – configure the native macOS Vision OCR helper.
-- `IMAGE_PLACEHOLDER_TEXT`, `IMAGE_MISSING_PLACEHOLDER_TEXT` – customize placeholder text when images are disabled or missing.
-- `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `MINIO_SECURE` – gateway object storage target for raw file attachments.
-- `LOCALFS_MAX_FILE_MB`, `LOCALFS_REQUEST_TIMEOUT` – local filesystem collector guardrails for file size and HTTP timeout.
-- `WORKER_POLL_INTERVAL`, `WORKER_BATCH_SIZE` – embedding service tuning knobs.
-- `COLLECTOR_POLL_INTERVAL`, `COLLECTOR_BATCH_SIZE` – collector scheduling controls for incremental sync.
-- `GATEWAY_URL` – used by the local filesystem collector and backfill utilities to reach the gateway API.
+## Configuration
+
+See the [Configuration Reference](../reference/configuration.md) for complete environment variable documentation.
 
 ### Using a .env file
 

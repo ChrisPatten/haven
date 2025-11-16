@@ -11,6 +11,14 @@
 - Updated functional guide with people search and relationship workflows.
 - Enhanced architecture overview to include people normalization in data flow.
 
+## 2025-01-XX — Documentation reorganization
+- Removed references to AGENTS.md and HostAgent HTTP API documentation
+- Created comprehensive configuration reference documentation
+- Reorganized collector documentation into dedicated guides
+- Updated terminology to use "Haven.app" consistently
+- Removed HostAgent HTTP API references (collectors now run directly in Haven.app)
+- Updated mkdocs.yml with new documentation structure
+
 ## 2025-10-21 — Documentation consolidation (haven-50)
 - Promoted legacy documentation (`README.md`, `AGENTS.md`, `documentation/*`) into the MkDocs site.
 - Rewrote architecture, operations, and HostAgent landing pages with production-ready guidance.

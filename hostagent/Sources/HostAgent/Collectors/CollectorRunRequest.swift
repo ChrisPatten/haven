@@ -24,6 +24,11 @@ public struct CollectorRunRequest: Codable {
             case since
             case until
         }
+        
+        public init(since: Date? = nil, until: Date? = nil) {
+            self.since = since
+            self.until = until
+        }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -43,69 +48,54 @@ public struct CollectorRunRequest: Codable {
         }
     }
 
-    public struct CollectorOptions: Codable {
-        public let vcf_directory: String?
-        public let watchDir: String?
-        public let include: [String]?
-        public let exclude: [String]?
-        public let tags: [String]?
-        public let moveTo: String?
-        public let deleteAfter: Bool?
-        public let dryRun: Bool?
-        public let oneShot: Bool?
-        public let stateFile: String?
-        public let maxFileBytes: Int?
-        public let requestTimeout: Double?
-        public let followSymlinks: Bool?
+    public struct FiltersConfig: Codable {
+        public let combinationMode: String?
+        public let defaultAction: String?
+        public let inline: [AnyCodable]?
+        public let files: [String]?
+        public let environmentVariable: String?
 
         enum CodingKeys: String, CodingKey {
-            case vcf_directory = "vcf_directory"
-            case watchDir = "watch_dir"
-            case include
-            case exclude
-            case tags
-            case moveTo = "move_to"
-            case deleteAfter = "delete_after"
-            case dryRun = "dry_run"
-            case oneShot = "one_shot"
-            case stateFile = "state_file"
-            case maxFileBytes = "max_file_bytes"
-            case requestTimeout = "request_timeout"
-            case followSymlinks = "follow_symlinks"
+            case combinationMode = "combination_mode"
+            case defaultAction = "default_action"
+            case inline
+            case files
+            case environmentVariable = "environment_variable"
+        }
+        
+        public init(combinationMode: String? = nil, defaultAction: String? = nil, inline: [AnyCodable]? = nil, files: [String]? = nil, environmentVariable: String? = nil) {
+            self.combinationMode = combinationMode
+            self.defaultAction = defaultAction
+            self.inline = inline
+            self.files = files
+            self.environmentVariable = environmentVariable
+        }
+    }
+
+    public struct RedactionOverride: Codable {
+        // Dynamic structure to allow arbitrary PII type overrides
+        public let raw: [String: Bool]
+
+        public init(raw: [String: Bool] = [:]) {
+            self.raw = raw
         }
 
         public init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            self.vcf_directory = try container.decodeIfPresent(String.self, forKey: .vcf_directory)
-            self.watchDir = try container.decodeIfPresent(String.self, forKey: .watchDir)
-            self.include = try container.decodeIfPresent([String].self, forKey: .include)
-            self.exclude = try container.decodeIfPresent([String].self, forKey: .exclude)
-            self.tags = try container.decodeIfPresent([String].self, forKey: .tags)
-            self.moveTo = try container.decodeIfPresent(String.self, forKey: .moveTo)
-            self.deleteAfter = try container.decodeIfPresent(Bool.self, forKey: .deleteAfter)
-            self.dryRun = try container.decodeIfPresent(Bool.self, forKey: .dryRun)
-            self.oneShot = try container.decodeIfPresent(Bool.self, forKey: .oneShot)
-            self.stateFile = try container.decodeIfPresent(String.self, forKey: .stateFile)
-            self.maxFileBytes = try container.decodeIfPresent(Int.self, forKey: .maxFileBytes)
-            self.requestTimeout = try container.decodeIfPresent(Double.self, forKey: .requestTimeout)
-            self.followSymlinks = try container.decodeIfPresent(Bool.self, forKey: .followSymlinks)
+            let container = try decoder.container(keyedBy: DynamicKey.self)
+            var result: [String: Bool] = [:]
+            for key in container.allKeys {
+                if let value = try container.decodeIfPresent(Bool.self, forKey: key) {
+                    result[key.stringValue] = value
+                }
+            }
+            self.raw = result
         }
 
         public func encode(to encoder: Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeIfPresent(vcf_directory, forKey: .vcf_directory)
-            try container.encodeIfPresent(watchDir, forKey: .watchDir)
-            try container.encodeIfPresent(include, forKey: .include)
-            try container.encodeIfPresent(exclude, forKey: .exclude)
-            try container.encodeIfPresent(tags, forKey: .tags)
-            try container.encodeIfPresent(moveTo, forKey: .moveTo)
-            try container.encodeIfPresent(deleteAfter, forKey: .deleteAfter)
-            try container.encodeIfPresent(dryRun, forKey: .dryRun)
-            try container.encodeIfPresent(oneShot, forKey: .oneShot)
-            try container.encodeIfPresent(stateFile, forKey: .stateFile)
-            try container.encodeIfPresent(maxFileBytes, forKey: .maxFileBytes)
-            try container.encodeIfPresent(requestTimeout, forKey: .requestTimeout)
-            try container.encodeIfPresent(followSymlinks, forKey: .followSymlinks)
+            var container = encoder.container(keyedBy: DynamicKey.self)
+            for (key, value) in raw {
+                try container.encode(value, forKey: DynamicKey(stringValue: key)!)
+            }
         }
     }
 
@@ -115,10 +105,13 @@ public struct CollectorRunRequest: Codable {
     /// concurrency is clamped to 1..12 when present
     public let concurrency: Int?
     public let dateRange: DateRange?
-    public let timeWindow: Int?
+    public let timeWindow: String?  // ISO-8601 duration, e.g., "PT24H"
     public let batch: Bool?
     public let batchSize: Int?
-    public let collectorOptions: CollectorOptions?
+    public let redactionOverride: RedactionOverride?
+    public let filters: FiltersConfig?
+    public let scope: AnyCodable?  // Collector-specific scope object
+    public let force: Bool?  // Force re-ingestion by modifying idempotency keys
 
     enum CodingKeys: String, CodingKey {
         case mode
@@ -129,7 +122,10 @@ public struct CollectorRunRequest: Codable {
         case timeWindow = "time_window"
         case batch
         case batchSize = "batch_size"
-        case collectorOptions = "collector_options"
+        case redactionOverride = "redaction_override"
+        case filters
+        case scope
+        case force
     }
 
     // Helper dynamic key type to detect unknown fields at top level
@@ -144,10 +140,8 @@ public struct CollectorRunRequest: Codable {
         // Detect unknown keys at top-level
         let container = try decoder.container(keyedBy: DynamicKey.self)
         let providedKeys = Set(container.allKeys.map { $0.stringValue })
-    // Allow a top-level `collector_options` object so collector-specific
-    // options can be provided without failing strict validation. Individual
-    // collectors may parse and apply options from this object.
-    let allowedKeys: Set<String> = ["mode", "limit", "order", "concurrency", "date_range", "time_window", "batch", "batch_size", "collector_options"]
+    // Allow new fields
+    let allowedKeys: Set<String> = ["mode", "limit", "order", "concurrency", "date_range", "time_window", "batch", "batch_size", "redaction_override", "filters", "scope", "force"]
         let unknown = providedKeys.subtracting(allowedKeys)
         if !unknown.isEmpty {
             throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Unknown keys: \(unknown)"))
@@ -188,7 +182,7 @@ public struct CollectorRunRequest: Codable {
             self.dateRange = nil
         }
 
-        self.timeWindow = try keyed.decodeIfPresent(Int.self, forKey: .timeWindow)
+        self.timeWindow = try keyed.decodeIfPresent(String.self, forKey: .timeWindow)
 
         self.batch = try keyed.decodeIfPresent(Bool.self, forKey: .batch)
 
@@ -205,7 +199,39 @@ public struct CollectorRunRequest: Codable {
             self.batchSize = nil
         }
 
-        self.collectorOptions = try keyed.decodeIfPresent(CollectorOptions.self, forKey: .collectorOptions)
+        self.redactionOverride = try keyed.decodeIfPresent(RedactionOverride.self, forKey: .redactionOverride)
+        self.filters = try keyed.decodeIfPresent(FiltersConfig.self, forKey: .filters)
+        self.scope = try keyed.decodeIfPresent(AnyCodable.self, forKey: .scope)
+        self.force = try keyed.decodeIfPresent(Bool.self, forKey: .force)
+    }
+    
+    // Public memberwise initializer for programmatic creation
+    public init(
+        mode: Mode? = nil,
+        limit: Int? = nil,
+        order: Order? = nil,
+        concurrency: Int? = nil,
+        dateRange: DateRange? = nil,
+        timeWindow: String? = nil,
+        batch: Bool? = nil,
+        batchSize: Int? = nil,
+        redactionOverride: RedactionOverride? = nil,
+        filters: FiltersConfig? = nil,
+        scope: AnyCodable? = nil,
+        force: Bool? = nil
+    ) {
+        self.mode = mode
+        self.limit = limit
+        self.order = order
+        self.concurrency = concurrency
+        self.dateRange = dateRange
+        self.timeWindow = timeWindow
+        self.batch = batch
+        self.batchSize = batchSize
+        self.redactionOverride = redactionOverride
+        self.filters = filters
+        self.scope = scope
+        self.force = force
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -218,7 +244,10 @@ public struct CollectorRunRequest: Codable {
         try container.encodeIfPresent(timeWindow, forKey: .timeWindow)
         try container.encodeIfPresent(batch, forKey: .batch)
         try container.encodeIfPresent(batchSize, forKey: .batchSize)
-        try container.encodeIfPresent(collectorOptions, forKey: .collectorOptions)
+        try container.encodeIfPresent(redactionOverride, forKey: .redactionOverride)
+        try container.encodeIfPresent(filters, forKey: .filters)
+        try container.encodeIfPresent(scope, forKey: .scope)
+        try container.encodeIfPresent(force, forKey: .force)
     }
 
     // ISO8601 parsing helper used by nested types
@@ -228,5 +257,167 @@ public struct CollectorRunRequest: Codable {
         if let d = formatter.date(from: s) { return d }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: s)
+    }
+    
+    // MARK: - Scope Helpers
+    
+    /// Extract iMessage-specific scope fields
+    public func getIMessageScope() -> IMessageScopeFields {
+        guard let scopeData = scope else { return IMessageScopeFields() }
+        let dict = scopeData.value as? [String: Any] ?? [:]
+        return IMessageScopeFields(
+            includeChats: dict["include_chats"] as? [String],
+            excludeChats: dict["exclude_chats"] as? [String],
+            includeAttachments: dict["include_attachments"] as? Bool ?? true,
+            useOcrOnAttachments: dict["use_ocr_on_attachments"] as? Bool ?? false,
+            extractEntities: dict["extract_entities"] as? Bool ?? false
+        )
+    }
+    
+    /// Extract IMAP-specific scope fields
+    public func getImapScope() -> ImapScopeFields {
+        guard let scopeData = scope else { return ImapScopeFields() }
+        let dict = scopeData.value as? [String: Any] ?? [:]
+        let connDict = dict["connection"] as? [String: Any] ?? [:]
+        return ImapScopeFields(
+            connectionHost: connDict["host"] as? String,
+            connectionPort: connDict["port"] as? Int,
+            connectionTls: connDict["tls"] as? Bool,
+            connectionUsername: connDict["username"] as? String,
+            connectionSecretRef: connDict["secret_ref"] as? String,
+            folders: dict["folders"] as? [String]
+        )
+    }
+    
+    /// Extract LocalFS-specific scope fields
+    public func getLocalfsScope() -> LocalfsScopeFields {
+        guard let scopeData = scope else { return LocalfsScopeFields() }
+        let dict = scopeData.value as? [String: Any] ?? [:]
+        return LocalfsScopeFields(
+            paths: dict["paths"] as? [String],
+            includeGlobs: dict["include_globs"] as? [String],
+            excludeGlobs: dict["exclude_globs"] as? [String]
+        )
+    }
+    
+    // MARK: - Scope Field Types
+    
+    public struct IMessageScopeFields {
+        public let includeChats: [String]?
+        public let excludeChats: [String]?
+        public let includeAttachments: Bool
+        public let useOcrOnAttachments: Bool
+        public let extractEntities: Bool
+        
+        public init(includeChats: [String]? = nil, excludeChats: [String]? = nil,
+                   includeAttachments: Bool = true, useOcrOnAttachments: Bool = false,
+                   extractEntities: Bool = false) {
+            self.includeChats = includeChats
+            self.excludeChats = excludeChats
+            self.includeAttachments = includeAttachments
+            self.useOcrOnAttachments = useOcrOnAttachments
+            self.extractEntities = extractEntities
+        }
+    }
+    
+    public struct ImapScopeFields {
+        public let connectionHost: String?
+        public let connectionPort: Int?
+        public let connectionTls: Bool?
+        public let connectionUsername: String?
+        public let connectionSecretRef: String?
+        public let folders: [String]?
+        
+        public init(connectionHost: String? = nil, connectionPort: Int? = nil,
+                   connectionTls: Bool? = nil, connectionUsername: String? = nil,
+                   connectionSecretRef: String? = nil, folders: [String]? = nil) {
+            self.connectionHost = connectionHost
+            self.connectionPort = connectionPort
+            self.connectionTls = connectionTls
+            self.connectionUsername = connectionUsername
+            self.connectionSecretRef = connectionSecretRef
+            self.folders = folders
+        }
+    }
+    
+    public struct LocalfsScopeFields {
+        public let paths: [String]?
+        public let includeGlobs: [String]?
+        public let excludeGlobs: [String]?
+        
+        public init(paths: [String]? = nil, includeGlobs: [String]? = nil, excludeGlobs: [String]? = nil) {
+            self.paths = paths
+            self.includeGlobs = includeGlobs
+            self.excludeGlobs = excludeGlobs
+        }
+    }
+}
+
+// Helper struct to encode/decode arbitrary JSON objects
+public struct AnyCodable: Codable {
+    public let value: Any
+    
+    public init(_ value: Any) {
+        self.value = value
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        
+        if let bool = try? container.decode(Bool.self) {
+            self.value = bool
+        } else if let int = try? container.decode(Int.self) {
+            self.value = int
+        } else if let double = try? container.decode(Double.self) {
+            self.value = double
+        } else if let string = try? container.decode(String.self) {
+            self.value = string
+        } else if let array = try? container.decode([AnyCodable].self) {
+            self.value = array.map { $0.value }
+        } else if let dict = try? container.decode([String: AnyCodable].self) {
+            var result: [String: Any] = [:]
+            for (key, value) in dict {
+                result[key] = value.value
+            }
+            self.value = result
+        } else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Cannot decode AnyCodable")
+        }
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        
+        if let bool = value as? Bool {
+            try container.encode(bool)
+        } else if let int = value as? Int {
+            try container.encode(int)
+        } else if let double = value as? Double {
+            try container.encode(double)
+        } else if let string = value as? String {
+            try container.encode(string)
+        } else if let array = value as? [Any] {
+            var aryContainer = encoder.unkeyedContainer()
+            for item in array {
+                try aryContainer.encode(AnyCodable(item))
+            }
+        } else if let dict = value as? [String: Any] {
+            var dictContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+            for (key, value) in dict {
+                let codingKey = DynamicCodingKey(stringValue: key)!
+                try dictContainer.encode(AnyCodable(value), forKey: codingKey)
+            }
+        } else {
+            throw EncodingError.invalidValue(value, EncodingError.Context(codingPath: encoder.codingPath, debugDescription: "Cannot encode AnyCodable"))
+        }
+    }
+    
+    private struct DynamicCodingKey: CodingKey {
+        var stringValue: String
+        init?(stringValue: String) {
+            self.stringValue = stringValue
+        }
+        var intValue: Int? { return nil }
+        init?(intValue: Int) { return nil }
     }
 }

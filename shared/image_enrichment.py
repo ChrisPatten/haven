@@ -187,21 +187,42 @@ def request_ollama_caption(image_path: Path, ocr_text: str = "") -> Optional[str
         suffix=image_path.suffix.lower()
     )
 
-    # Convert image to PNG format if PIL is available (Ollama doesn't support HEIC/HEIF)
+    # Downscale and convert image to PNG format if PIL is available (Ollama doesn't support HEIC/HEIF)
+    # Downscale to max 1024px on longest side to reduce payload size and improve performance
     if Image is not None:
         try:
+            original_bytes_size = len(image_bytes)
             img = Image.open(io.BytesIO(image_bytes))
+            original_size = img.size
+            max_dimension = 1024
+            
+            # Downscale if image is larger than max_dimension
+            if max(img.size) > max_dimension:
+                scale = max_dimension / max(img.size)
+                new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                logger.debug(
+                    "ollama_image_downscaled",
+                    original_size=original_size,
+                    new_size=new_size,
+                    scale=f"{scale:.2f}"
+                )
+            
             # Convert to RGB if needed (e.g., RGBA or CMYK)
             if img.mode not in ('RGB', 'L'):
                 img = img.convert('RGB')
             # Re-encode as PNG
             buf = io.BytesIO()
-            img.save(buf, format='PNG')
+            img.save(buf, format='PNG', optimize=True)
             image_bytes = buf.getvalue()
+            final_bytes_size = len(image_bytes)
+            compression_ratio = final_bytes_size / original_bytes_size if original_bytes_size > 0 else 0.0
             logger.debug(
                 "ollama_image_converted",
                 original_format=image_path.suffix,
-                size_bytes=len(image_bytes)
+                original_bytes=original_bytes_size,
+                final_bytes=final_bytes_size,
+                compression_ratio=f"{compression_ratio:.2f}"
             )
         except Exception as exc:
             logger.warning(

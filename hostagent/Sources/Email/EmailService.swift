@@ -274,7 +274,10 @@ public actor EmailService {
         message.headers = headers
         
         // Extract standard fields
-        message.subject = headers["subject"]
+        // Decode RFC 2047 encoded headers (Subject, etc.)
+        if let subjectHeader = headers["subject"] {
+            message.subject = MIMEDecoder.decodeHeader(subjectHeader)
+        }
         message.messageId = headers["message-id"]
         message.inReplyTo = headers["in-reply-to"]
         message.listUnsubscribe = headers["list-unsubscribe"]

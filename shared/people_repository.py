@@ -33,6 +33,15 @@ logger = get_logger("people.repository")
 
 @dataclass(slots=True)
 class ContactValue:
+    """Represents a contact value (email or phone) with metadata.
+    
+    Attributes:
+        value: Normalized/canonical value string.
+        value_raw: Original raw value before normalization, if different from value.
+        label: Label for the value (e.g., "home", "work", "mobile").
+        priority: Priority ranking (lower numbers = higher priority).
+        verified: Whether the value has been verified.
+    """
     value: str
     value_raw: str | None = None
     label: str | None = None
@@ -42,6 +51,16 @@ class ContactValue:
 
 @dataclass(slots=True)
 class ContactAddress:
+    """Represents a postal address for a contact.
+    
+    Attributes:
+        label: Label for the address (e.g., "home", "work").
+        street: Street address line.
+        city: City name.
+        region: State, province, or region.
+        postal_code: Postal or ZIP code.
+        country: Country name or code.
+    """
     label: str | None = None
     street: str | None = None
     city: str | None = None
@@ -52,12 +71,37 @@ class ContactAddress:
 
 @dataclass(slots=True)
 class ContactUrl:
+    """Represents a URL associated with a contact.
+    
+    Attributes:
+        label: Label for the URL (e.g., "homepage", "blog").
+        url: The URL string.
+    """
     label: str | None = None
     url: str | None = None
 
 
 @dataclass(slots=True)
 class PersonIngestRecord:
+    """Represents a person record to be ingested into the system.
+    
+    Attributes:
+        external_id: Unique identifier from the source system.
+        display_name: Full display name for the person.
+        given_name: First/given name.
+        family_name: Last/family name.
+        organization: Organization name if applicable.
+        nicknames: Sequence of nickname strings.
+        notes: Additional notes or comments.
+        photo_hash: Hash of the person's photo for deduplication.
+        emails: Sequence of email addresses with metadata.
+        phones: Sequence of phone numbers with metadata.
+        addresses: Sequence of postal addresses.
+        urls: Sequence of URLs associated with the person.
+        change_token: Token representing the version/change state from source.
+        version: Version number for optimistic locking.
+        deleted: Whether this record represents a deletion.
+    """
     external_id: str
     display_name: str
     given_name: str | None = None
@@ -77,6 +121,15 @@ class PersonIngestRecord:
 
 @dataclass(slots=True)
 class UpsertStats:
+    """Statistics for a batch upsert operation.
+    
+    Attributes:
+        accepted: Total number of records accepted for processing.
+        upserts: Number of records successfully upserted.
+        deletes: Number of records marked as deleted.
+        conflicts: Number of identifier conflicts encountered.
+        skipped: Number of records skipped due to errors or conditions.
+    """
     accepted: int = 0
     upserts: int = 0
     deletes: int = 0
@@ -84,6 +137,11 @@ class UpsertStats:
     skipped: int = 0
 
     def as_dict(self) -> dict[str, int]:
+        """Convert statistics to a dictionary.
+        
+        Returns:
+            Dictionary mapping statistic names to their integer values.
+        """
         return {
             "accepted": self.accepted,
             "upserts": self.upserts,
@@ -94,11 +152,36 @@ class UpsertStats:
 
 
 class PeopleRepository:
+    """Repository for managing person records and their relationships.
+    
+    Handles upsert operations, identifier resolution, merging, and conflict
+    resolution for person records from various sources.
+    """
+    
     def __init__(self, conn: Connection, *, default_region: str | None = None) -> None:
+        """Initialize the repository.
+        
+        Args:
+            conn: Database connection.
+            default_region: Default region code for phone number normalization.
+        """
         self.conn = conn
         self.default_region = default_region
 
     def upsert_batch(self, source: str, batch: Sequence[PersonIngestRecord]) -> UpsertStats:
+        """Upsert a batch of person records from a source.
+        
+        Processes each person record with per-record savepoints to ensure
+        partial failures don't abort the entire batch. Handles person
+        resolution, upserts, deletions, and identifier conflicts.
+        
+        Args:
+            source: Source system identifier (e.g., "contacts", "imessage").
+            batch: Sequence of PersonIngestRecord objects to process.
+            
+        Returns:
+            UpsertStats object with statistics about the operation.
+        """
         stats = UpsertStats()
         if not batch:
             return stats
@@ -235,9 +318,20 @@ class PeopleRepository:
         return uuid7()
 
     def _ensure_source_map(self, cur, source: str, external_id: str, person_id: UUID) -> UUID:
-        """Insert or update the people_source_map entry. This must be called
-        after ensuring the people row with person_id exists so the foreign
-        key constraint is satisfied."""
+        """Insert or update the people_source_map entry.
+        
+        This must be called after ensuring the people row with person_id exists
+        so the foreign key constraint is satisfied.
+        
+        Args:
+            cur: Database cursor.
+            source: Source system identifier.
+            external_id: External ID from source system.
+            person_id: UUID of the person record.
+            
+        Returns:
+            UUID of the person_id that was assigned.
+        """
         cur.execute(
             """
             INSERT INTO people_source_map (source, external_id, person_id)
@@ -251,6 +345,22 @@ class PeopleRepository:
         return assigned[0]
 
     def _upsert_person(self, cur, source: str, person_id: UUID, person: PersonIngestRecord) -> bool:
+        """Upsert a person record in the people table.
+        
+        Inserts a new person or updates an existing one based on version
+        comparison. Only updates if the incoming version is greater than or
+        equal to the existing version.
+        
+        Args:
+            cur: Database cursor.
+            source: Source system identifier.
+            person_id: UUID of the person record.
+            person: PersonIngestRecord with data to upsert.
+            
+        Returns:
+            True if the record was inserted or updated, False if skipped due
+            to version check.
+        """
         cur.execute(
             """
             INSERT INTO people (
@@ -289,6 +399,15 @@ class PeopleRepository:
         return bool(row)
 
     def _delete_children(self, cur, person_id: UUID) -> None:
+        """Delete all child records for a person.
+        
+        Removes all identifiers, addresses, and URLs associated with the
+        person. Used when a person record is marked as deleted.
+        
+        Args:
+            cur: Database cursor.
+            person_id: UUID of the person whose children should be deleted.
+        """
         cur.execute("DELETE FROM person_identifiers WHERE person_id = %s", (person_id,))
         cur.execute("DELETE FROM person_addresses WHERE person_id = %s", (person_id,))
         cur.execute("DELETE FROM person_urls WHERE person_id = %s", (person_id,))
@@ -301,10 +420,24 @@ class PeopleRepository:
         source: str,
         stats: UpsertStats,
     ) -> None:
-        # NOTE: We do NOT delete existing children here. When multiple source contacts
-        # merge to the same person_id (via identifier-based resolution), we want to
-        # accumulate all identifiers from all sources, not replace them.
-        # The only time we delete children is when person.deleted=True (handled separately).
+        """Refresh child records (identifiers, addresses, URLs) for a person.
+        
+        Adds or updates identifiers, addresses, and URLs from the person record.
+        Does NOT delete existing children - accumulates data from multiple sources.
+        Handles identifier conflicts by appending to existing owners.
+        
+        Note: We do NOT delete existing children here. When multiple source
+        contacts merge to the same person_id (via identifier-based resolution),
+        we want to accumulate all identifiers from all sources, not replace them.
+        The only time we delete children is when person.deleted=True (handled separately).
+        
+        Args:
+            cur: Database cursor.
+            person_id: UUID of the person record.
+            person: PersonIngestRecord with child data to refresh.
+            source: Source system identifier.
+            stats: UpsertStats object to update with conflict counts.
+        """
         
         identifiers = self._collect_identifiers(person)
 
@@ -395,6 +528,18 @@ class PeopleRepository:
             )
 
     def _collect_identifiers(self, person: PersonIngestRecord) -> List[NormalizedIdentifier]:
+        """Collect and normalize all identifiers from a person record.
+        
+        Extracts phone numbers and email addresses, normalizes them, and
+        returns a list of NormalizedIdentifier objects. Logs but continues
+        on normalization failures.
+        
+        Args:
+            person: PersonIngestRecord to extract identifiers from.
+            
+        Returns:
+            List of NormalizedIdentifier objects from phones and emails.
+        """
         identifiers: List[NormalizedIdentifier] = []
         for item in person.phones:
             try:
@@ -438,6 +583,15 @@ class PeopleRepository:
         return identifiers
 
     def _lookup_identifier_owner(self, cur, identifier: NormalizedIdentifier) -> UUID | None:
+        """Look up the current owner of an identifier.
+        
+        Args:
+            cur: Database cursor.
+            identifier: NormalizedIdentifier to look up.
+            
+        Returns:
+            UUID of the person who owns the identifier, or None if unowned.
+        """
         cur.execute(
             """
             SELECT owner_person_id
@@ -650,6 +804,16 @@ class PeopleRepository:
         existing_person_id: UUID,
         identifier: NormalizedIdentifier,
     ) -> None:
+        """Record an identifier conflict in the conflict log.
+        
+        Args:
+            cur: Database cursor.
+            source: Source system identifier.
+            person: PersonIngestRecord that caused the conflict.
+            incoming_person_id: UUID of the incoming person.
+            existing_person_id: UUID of the existing person who owns the identifier.
+            identifier: NormalizedIdentifier that caused the conflict.
+        """
         cur.execute(
             """
             INSERT INTO people_conflict_log (
@@ -1035,11 +1199,33 @@ class PeopleRepository:
 
 
 class PeopleResolver:
+    """Resolver for finding people by their identifiers.
+    
+    Provides methods to resolve person records from email addresses or
+    phone numbers by looking up normalized identifiers.
+    """
+    
     def __init__(self, conn: Connection, *, default_region: str | None = None) -> None:
+        """Initialize the resolver.
+        
+        Args:
+            conn: Database connection.
+            default_region: Default region code for phone number normalization.
+        """
         self.conn = conn
         self.default_region = default_region
 
     def resolve(self, kind: IdentifierKind, value: str) -> Optional[Dict[str, str]]:
+        """Resolve a single identifier to a person record.
+        
+        Args:
+            kind: Type of identifier (EMAIL or PHONE).
+            value: The identifier value to resolve.
+            
+        Returns:
+            Dictionary with "person_id" and "display_name" keys if found,
+            None if no matching person exists.
+        """
         identifier = normalize_identifier(kind, value, default_region=self.default_region)
         query = """
             SELECT p.person_id, p.display_name
@@ -1060,6 +1246,16 @@ class PeopleResolver:
             }
 
     def resolve_many(self, items: Sequence[tuple[IdentifierKind, str]]) -> Dict[str, Dict[str, str]]:
+        """Resolve multiple identifiers to person records in a single query.
+        
+        Args:
+            items: Sequence of (IdentifierKind, value) tuples to resolve.
+            
+        Returns:
+            Dictionary mapping "kind:value_canonical" keys to dictionaries
+            with "person_id" and "display_name" values. Only includes
+            identifiers that were successfully resolved.
+        """
         results: Dict[str, Dict[str, str]] = {}
         if not items:
             return results

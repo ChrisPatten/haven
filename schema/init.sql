@@ -38,8 +38,6 @@ DROP TYPE IF EXISTS identifier_kind;
 -- Drop unified tables so they can be recreated cleanly
 DROP TABLE IF EXISTS chunk_documents CASCADE;
 DROP TABLE IF EXISTS chunks CASCADE;
-DROP TABLE IF EXISTS document_files CASCADE;
-DROP TABLE IF EXISTS files CASCADE;
 DROP TABLE IF EXISTS documents CASCADE;
 DROP TABLE IF EXISTS threads CASCADE;
 DROP TABLE IF EXISTS ingest_submissions CASCADE;
@@ -51,9 +49,10 @@ DROP TABLE IF EXISTS ingest_submissions CASCADE;
 -- Threads
 CREATE TABLE threads (
     thread_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    external_id TEXT UNIQUE NOT NULL,
+    external_id TEXT NOT NULL,
     source_type TEXT NOT NULL,
     source_provider TEXT,
+    source_account_id TEXT,
     title TEXT,
     participants JSONB NOT NULL DEFAULT '[]'::jsonb,
     thread_type TEXT,
@@ -66,7 +65,8 @@ CREATE TABLE threads (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT threads_valid_source_type CHECK (
         source_type IN ('imessage', 'sms', 'email', 'slack', 'whatsapp', 'signal')
-    )
+    ),
+    CONSTRAINT threads_external_id_unique UNIQUE (source_type, source_provider, source_account_id, external_id)
 );
 
 -- Documents
@@ -75,6 +75,7 @@ CREATE TABLE documents (
     external_id TEXT NOT NULL,
     source_type TEXT NOT NULL,
     source_provider TEXT,
+    source_account_id TEXT,
     version_number INTEGER NOT NULL DEFAULT 1,
     previous_version_id UUID REFERENCES documents(doc_id),
     is_active_version BOOLEAN NOT NULL DEFAULT true,
@@ -87,8 +88,6 @@ CREATE TABLE documents (
     canonical_uri TEXT,
     content_timestamp TIMESTAMPTZ NOT NULL,
     content_timestamp_type TEXT NOT NULL,
-    content_created_at TIMESTAMPTZ,
-    content_modified_at TIMESTAMPTZ,
     people JSONB NOT NULL DEFAULT '[]'::jsonb,
     thread_id UUID REFERENCES threads(thread_id),
     parent_doc_id UUID REFERENCES documents(doc_id),
@@ -109,7 +108,7 @@ CREATE TABLE documents (
     ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT documents_external_id_version_key UNIQUE (external_id, version_number),
+    CONSTRAINT documents_external_id_version_key UNIQUE (source_type, source_provider, source_account_id, external_id, version_number),
     CONSTRAINT documents_valid_timestamp_type CHECK (
         content_timestamp_type IN ('sent', 'received', 'modified', 'created', 'event_start', 'event_end', 'due', 'completed')
     ),
@@ -117,60 +116,32 @@ CREATE TABLE documents (
         status IN ('submitted', 'extracting', 'extracted', 'enriching', 'enriched', 'indexed', 'failed')
     ),
     CONSTRAINT documents_valid_source_type CHECK (
-        source_type IN ('imessage', 'sms', 'email', 'email_local', 'localfs', 'gdrive', 'note', 'reminder', 'calendar_event', 'contact')
+        source_type IN ('imessage', 'sms', 'email', 'email_local', 'localfs', 'gdrive', 'note', 'reminder', 'macos_reminders', 'calendar_event', 'contact')
     ),
     intent JSONB DEFAULT NULL,
-    relevance_score FLOAT DEFAULT NULL
+    relevance_score FLOAT DEFAULT NULL,
+    intent_status TEXT NOT NULL DEFAULT 'pending',
+    intent_processing_started_at TIMESTAMPTZ,
+    intent_processing_completed_at TIMESTAMPTZ,
+    intent_processing_error TEXT,
+    CONSTRAINT documents_valid_intent_status CHECK (
+        intent_status IN ('pending', 'processing', 'processed', 'failed', 'skipped')
+    )
 );
 
 -- Column comments for email collector fields
 COMMENT ON COLUMN documents.intent IS 'JSONB field for email intent classification: bills, receipts, confirmations, appointments, action_requests, notifications, etc.';
 COMMENT ON COLUMN documents.relevance_score IS 'Float score (0.0-1.0) for noise filtering; higher scores indicate more relevant/actionable content';
-
--- Files
-CREATE TABLE files (
-    file_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    content_sha256 TEXT UNIQUE NOT NULL,
-    object_key TEXT NOT NULL,
-    storage_backend TEXT NOT NULL DEFAULT 'minio',
-    filename TEXT,
-    mime_type TEXT,
-    size_bytes BIGINT,
-    enrichment_status TEXT NOT NULL DEFAULT 'pending',
-    enrichment JSONB,
-    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_enriched_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT files_valid_enrichment_status CHECK (
-        enrichment_status IN ('pending', 'processing', 'enriched', 'failed', 'skipped')
-    ),
-    CONSTRAINT files_valid_storage_backend CHECK (
-        storage_backend IN ('minio', 's3', 'local', 'gdrive')
-    )
-);
-
--- Document ↔ File junction
-CREATE TABLE document_files (
-    doc_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
-    file_id UUID NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    attachment_index INTEGER,
-    filename TEXT,
-    caption TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (doc_id, file_id, role),
-    CONSTRAINT document_files_valid_role CHECK (
-        role IN ('attachment', 'extracted_from', 'thumbnail', 'preview', 'related')
-    )
-);
+COMMENT ON COLUMN documents.intent_status IS 'Status of intent processing: pending, processing, processed, failed, skipped';
+COMMENT ON COLUMN documents.intent_processing_started_at IS 'Timestamp when intent processing started';
+COMMENT ON COLUMN documents.intent_processing_completed_at IS 'Timestamp when intent processing completed';
+COMMENT ON COLUMN documents.intent_processing_error IS 'Error message if intent processing failed';
 
 -- Chunks
 CREATE TABLE chunks (
     chunk_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     text TEXT NOT NULL,
     text_sha256 TEXT NOT NULL,
-    ordinal INTEGER NOT NULL,
     source_ref JSONB,
     embedding_status TEXT NOT NULL DEFAULT 'pending',
     embedding_model TEXT,
@@ -408,12 +379,115 @@ COMMENT ON COLUMN crm_relationships.created_at IS 'TIMESTAMPTZ when the relation
 COMMENT ON COLUMN crm_relationships.updated_at IS 'TIMESTAMPTZ of the last update to this relationship.';
 
 -- ============================================================================
+-- INTENTS CAPABILITY TABLES
+-- ============================================================================
+
+-- Intent Signals storage
+CREATE TABLE intent_signals (
+    signal_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    artifact_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    taxonomy_version VARCHAR(50) NOT NULL,
+    parent_thread_id UUID REFERENCES threads(thread_id) ON DELETE SET NULL,
+    
+    -- Signal data (JSONB for flexibility, validated by application)
+    signal_data JSONB NOT NULL,
+    
+    -- Status and feedback
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    user_feedback JSONB,  -- {action, corrected_slots, timestamp, user_id}
+    
+    -- Conflict handling
+    conflict BOOLEAN NOT NULL DEFAULT FALSE,
+    conflicting_fields TEXT[],
+    
+    -- Timestamps
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    
+    CONSTRAINT intent_signals_valid_status CHECK (
+        status IN ('pending', 'confirmed', 'edited', 'rejected', 'snoozed')
+    )
+);
+
+COMMENT ON TABLE intent_signals IS 'Intent signals extracted from documents. Contains structured intent data with slots, evidence, and confidence scores.';
+COMMENT ON COLUMN intent_signals.signal_id IS 'Unique identifier for the intent signal';
+COMMENT ON COLUMN intent_signals.artifact_id IS 'Reference to the document that generated this signal';
+COMMENT ON COLUMN intent_signals.taxonomy_version IS 'Version of the intent taxonomy used for classification';
+COMMENT ON COLUMN intent_signals.parent_thread_id IS 'Reference to parent thread for thread-aware processing';
+COMMENT ON COLUMN intent_signals.signal_data IS 'JSONB containing IntentSignal schema: intents, slots, evidence, confidence, timestamps, provenance';
+COMMENT ON COLUMN intent_signals.status IS 'User feedback status: pending, confirmed, edited, rejected, snoozed';
+COMMENT ON COLUMN intent_signals.user_feedback IS 'JSONB containing user feedback: action, corrected_slots, timestamp, user_id';
+COMMENT ON COLUMN intent_signals.conflict IS 'True if this signal conflicts with another signal in the same thread';
+COMMENT ON COLUMN intent_signals.conflicting_fields IS 'Array of field names that conflict with other signals';
+
+-- Entity cache (TTL configurable)
+CREATE TABLE entity_cache (
+    cache_key VARCHAR(255) PRIMARY KEY,  -- hash(artifact_id + text_hash)
+    artifact_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    entity_set JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+COMMENT ON TABLE entity_cache IS 'TTL-based cache for entity extraction results. Reduces redundant NER processing.';
+COMMENT ON COLUMN entity_cache.cache_key IS 'Hash key combining artifact_id and text_hash for cache lookup';
+COMMENT ON COLUMN entity_cache.artifact_id IS 'Reference to the document whose entities are cached';
+COMMENT ON COLUMN entity_cache.entity_set IS 'JSONB containing EntitySet schema: detected_languages, people, dates, locations, etc.';
+COMMENT ON COLUMN entity_cache.expires_at IS 'Timestamp when cache entry expires (TTL-based cleanup)';
+
+-- Taxonomy versions
+CREATE TABLE intent_taxonomies (
+    version VARCHAR(50) PRIMARY KEY,
+    taxonomy_data JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_by VARCHAR(255),
+    change_notes TEXT
+);
+
+COMMENT ON TABLE intent_taxonomies IS 'Versioned storage for intent taxonomy definitions. Contains intent definitions, slot schemas, and validation rules.';
+COMMENT ON COLUMN intent_taxonomies.version IS 'Version identifier (e.g., "1.0.0")';
+COMMENT ON COLUMN intent_taxonomies.taxonomy_data IS 'JSONB containing IntentTaxonomy schema: version, intents, slot definitions, constraints';
+COMMENT ON COLUMN intent_taxonomies.created_by IS 'User or system that created this taxonomy version';
+COMMENT ON COLUMN intent_taxonomies.change_notes IS 'Description of changes in this taxonomy version';
+
+-- User preferences for intents
+CREATE TABLE intent_user_preferences (
+    user_id VARCHAR(255) PRIMARY KEY,  -- For multi-user support, 'default' for single user
+    preferences JSONB NOT NULL DEFAULT '{}'::jsonb,  -- {intent_name: {automation_level, thresholds}, ...}
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE intent_user_preferences IS 'User-specific preferences for intent automation levels and confidence thresholds';
+COMMENT ON COLUMN intent_user_preferences.user_id IS 'User identifier, or "default" for single-user instances';
+COMMENT ON COLUMN intent_user_preferences.preferences IS 'JSONB containing per-intent preferences: automation_level, confidence_threshold, etc.';
+
+-- Deduplication tracking
+CREATE TABLE intent_deduplication (
+    dedupe_key VARCHAR(255) PRIMARY KEY,  -- hash(thread_id + intent_name + normalized_slots)
+    signal_id UUID NOT NULL REFERENCES intent_signals(signal_id) ON DELETE CASCADE,
+    thread_id UUID REFERENCES threads(thread_id) ON DELETE CASCADE,
+    intent_name VARCHAR(100) NOT NULL,
+    normalized_slots_hash VARCHAR(64) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    window_end_at TIMESTAMPTZ NOT NULL  -- For TTL-based cleanup
+);
+
+COMMENT ON TABLE intent_deduplication IS 'Thread-aware deduplication tracking. Prevents duplicate signals within a time window.';
+COMMENT ON COLUMN intent_deduplication.dedupe_key IS 'Hash key combining thread_id, intent_name, and normalized_slots for duplicate detection';
+COMMENT ON COLUMN intent_deduplication.signal_id IS 'Reference to the intent signal being tracked';
+COMMENT ON COLUMN intent_deduplication.thread_id IS 'Reference to thread for thread-aware deduplication';
+COMMENT ON COLUMN intent_deduplication.intent_name IS 'Name of the intent being deduplicated';
+COMMENT ON COLUMN intent_deduplication.normalized_slots_hash IS 'Hash of normalized slot values for comparison';
+COMMENT ON COLUMN intent_deduplication.window_end_at IS 'Timestamp when deduplication window expires (TTL-based cleanup)';
+
+-- ============================================================================
 -- INDEXES
 -- ============================================================================
 
 -- Documents
 CREATE INDEX IF NOT EXISTS idx_documents_source_type ON documents(source_type);
 CREATE INDEX IF NOT EXISTS idx_documents_external_id ON documents(external_id);
+CREATE INDEX IF NOT EXISTS idx_documents_source_account_id ON documents(source_account_id) WHERE source_account_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_documents_active_version ON documents(is_active_version) WHERE is_active_version = true;
 CREATE INDEX IF NOT EXISTS idx_documents_thread ON documents(thread_id) WHERE thread_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_documents_content_timestamp ON documents(content_timestamp DESC);
@@ -436,6 +510,10 @@ CREATE INDEX IF NOT EXISTS idx_documents_relevance_score ON documents(relevance_
     WHERE relevance_score IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_documents_email_local ON documents(source_type, content_timestamp DESC) 
     WHERE source_type = 'email_local';
+CREATE INDEX IF NOT EXISTS idx_documents_intent_status ON documents(intent_status, created_at) 
+    WHERE intent_status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_documents_intent_processed ON documents(intent_status, intent_processing_completed_at DESC)
+    WHERE intent_status = 'processed';
 
 -- Batches
 CREATE INDEX IF NOT EXISTS idx_ingest_batches_status ON ingest_batches(status);
@@ -446,19 +524,9 @@ CREATE INDEX IF NOT EXISTS idx_ingest_submissions_batch_status ON ingest_submiss
 -- Threads
 CREATE INDEX IF NOT EXISTS idx_threads_external_id ON threads(external_id);
 CREATE INDEX IF NOT EXISTS idx_threads_source_type ON threads(source_type);
+CREATE INDEX IF NOT EXISTS idx_threads_source_account_id ON threads(source_account_id) WHERE source_account_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_threads_last_message ON threads(last_message_at DESC);
 CREATE INDEX IF NOT EXISTS idx_threads_participants ON threads USING GIN(participants);
-
--- Files
-CREATE INDEX IF NOT EXISTS idx_files_content_sha256 ON files(content_sha256);
-CREATE INDEX IF NOT EXISTS idx_files_enrichment_status ON files(enrichment_status);
-CREATE INDEX IF NOT EXISTS idx_files_mime_type ON files(mime_type);
-CREATE INDEX IF NOT EXISTS idx_files_enrichment ON files USING GIN(enrichment);
-
--- Document ↔ File
-CREATE INDEX IF NOT EXISTS idx_document_files_doc ON document_files(doc_id);
-CREATE INDEX IF NOT EXISTS idx_document_files_file ON document_files(file_id);
-CREATE INDEX IF NOT EXISTS idx_document_files_role ON document_files(role);
 
 -- Chunks
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status);
@@ -535,6 +603,29 @@ CREATE INDEX IF NOT EXISTS idx_crm_relationships_decay_bucket_recent ON crm_rela
 )
 WHERE decay_bucket IN (0, 1, 2);
 
+-- Intent Signals
+CREATE INDEX IF NOT EXISTS idx_intent_signals_artifact ON intent_signals(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_intent_signals_thread ON intent_signals(parent_thread_id) WHERE parent_thread_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_intent_signals_status ON intent_signals(status);
+CREATE INDEX IF NOT EXISTS idx_intent_signals_taxonomy ON intent_signals(taxonomy_version);
+CREATE INDEX IF NOT EXISTS idx_intent_signals_created ON intent_signals(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_intent_signals_data ON intent_signals USING GIN (signal_data);
+
+-- Entity Cache
+CREATE INDEX IF NOT EXISTS idx_entity_cache_expires ON entity_cache(expires_at);
+CREATE INDEX IF NOT EXISTS idx_entity_cache_artifact ON entity_cache(artifact_id);
+
+-- Intent Taxonomies
+CREATE INDEX IF NOT EXISTS idx_intent_taxonomies_created ON intent_taxonomies(created_at DESC);
+
+-- Intent User Preferences
+CREATE INDEX IF NOT EXISTS idx_intent_user_preferences_updated ON intent_user_preferences(updated_at DESC);
+
+-- Intent Deduplication
+CREATE INDEX IF NOT EXISTS idx_intent_dedup_window ON intent_deduplication(window_end_at);
+CREATE INDEX IF NOT EXISTS idx_intent_dedup_thread ON intent_deduplication(thread_id) WHERE thread_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_intent_dedup_signal ON intent_deduplication(signal_id);
+
 -- ============================================================================
 -- FUNCTIONS & TRIGGERS
 -- ============================================================================
@@ -556,12 +647,6 @@ CREATE TRIGGER trg_documents_set_updated
 DROP TRIGGER IF EXISTS trg_threads_set_updated ON threads;
 CREATE TRIGGER trg_threads_set_updated
     BEFORE UPDATE ON threads
-    FOR EACH ROW
-    EXECUTE FUNCTION set_updated_at();
-
-DROP TRIGGER IF EXISTS trg_files_set_updated ON files;
-CREATE TRIGGER trg_files_set_updated
-    BEFORE UPDATE ON files
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
 
@@ -598,6 +683,18 @@ CREATE TRIGGER trg_crm_relationships_set_updated
 DROP TRIGGER IF EXISTS trg_identifier_owner_set_updated ON identifier_owner;
 CREATE TRIGGER trg_identifier_owner_set_updated
     BEFORE UPDATE ON identifier_owner
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_intent_signals_set_updated ON intent_signals;
+CREATE TRIGGER trg_intent_signals_set_updated
+    BEFORE UPDATE ON intent_signals
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_intent_user_preferences_set_updated ON intent_user_preferences;
+CREATE TRIGGER trg_intent_user_preferences_set_updated
+    BEFORE UPDATE ON intent_user_preferences
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
 
@@ -640,22 +737,6 @@ CREATE OR REPLACE VIEW active_documents AS
 SELECT *
 FROM documents
 WHERE is_active_version = true;
-
-CREATE OR REPLACE VIEW documents_with_files AS
-SELECT
-    d.*,
-    df.role AS file_role,
-    df.attachment_index,
-    f.file_id,
-    f.filename AS file_filename,
-    f.mime_type AS file_mime_type,
-    f.size_bytes AS file_size,
-    f.enrichment_status AS file_enrichment_status,
-    f.enrichment AS file_enrichment
-FROM documents d
-JOIN document_files df ON d.doc_id = df.doc_id
-JOIN files f ON df.file_id = f.file_id
-WHERE d.is_active_version = true;
 
 CREATE OR REPLACE VIEW thread_summary AS
 SELECT

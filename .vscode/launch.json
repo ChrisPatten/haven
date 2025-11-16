@@ -1,24 +1,26 @@
 {
     "configurations": [
         {
-            "type": "swift",
+            "type": "lldb",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:haven}/hostagent",
             "name": "Debug hostagent (hostagent)",
             "preLaunchTask": "swift: Build Debug hostagent (hostagent)",
             "target": "hostagent",
-            "configuration": "debug"
+            "configuration": "debug",
+            "program": "${workspaceFolder:haven}/hostagent/.build/debug/hostagent"
         },
         {
-            "type": "swift",
+            "type": "lldb",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:haven}/hostagent",
             "name": "Release hostagent (hostagent)",
             "preLaunchTask": "swift: Build Release hostagent (hostagent)",
             "target": "hostagent",
-            "configuration": "release"
+            "configuration": "release",
+            "program": "${workspaceFolder:haven}/hostagent/.build/release/hostagent"
         },
         {
             "type": "swift",
@@ -37,6 +39,44 @@
             "name": "Release BuildInfoTool (hostagent)",
             "program": "${workspaceFolder:haven}/hostagent/.build/release/BuildInfoTool",
             "preLaunchTask": "swift: Build Release BuildInfoTool (hostagent)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/HavenUI",
+            "name": "Debug HavenUI (HavenUI)",
+            "preLaunchTask": "swift: Build Debug HavenUI (HavenUI)",
+            "target": "HavenUI",
+            "configuration": "debug"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/HavenUI",
+            "name": "Release HavenUI (HavenUI)",
+            "preLaunchTask": "swift: Build Release HavenUI (HavenUI)",
+            "target": "HavenUI",
+            "configuration": "release"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/hostagent",
+            "name": "Debug CaptionComparison (hostagent)",
+            "program": "${workspaceFolder:haven}/hostagent/.build/debug/CaptionComparison",
+            "preLaunchTask": "swift: Build Debug CaptionComparison (hostagent)"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:haven}/hostagent",
+            "name": "Release CaptionComparison (hostagent)",
+            "program": "${workspaceFolder:haven}/hostagent/.build/release/CaptionComparison",
+            "preLaunchTask": "swift: Build Release CaptionComparison (hostagent)"
         }
     ]
 }

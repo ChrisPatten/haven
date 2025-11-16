@@ -12,7 +12,7 @@ public actor GatewayClient {
         self.baseUrl = config.baseUrl
         self.ingestPath = config.ingestPath
         self.authToken = authToken
-        self.timeout = TimeInterval(config.timeout)
+        self.timeout = TimeInterval(config.timeoutMs) / 1000.0
     }
     
     public func ingest(events: [IngestEvent]) async throws {
