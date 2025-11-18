@@ -14,12 +14,18 @@ Supporting datastores include Postgres (primary), Qdrant (vectors), and MinIO (b
 
 ## Data Flow at a Glance
 1. **Collectors emit payloads** — Haven.app (iMessage, Contacts, Reminders, filesystem watchers) or CLI collectors normalise source data and send them to Gateway. Haven.app runs collectors directly via Swift APIs (no HTTP server required).
-2. **Enrichment processing** — Haven.app's `EnrichmentOrchestrator` coordinates enrichment services (OCR, face detection, entity extraction, captioning) before submission. Per-collector enrichment settings control whether enrichment is applied. `ImageExtractor` and `TextExtractor` modules extract content from HTML/rich text.
-3. **Gateway validates and queues** — It computes idempotency keys, attaches metadata, and forwards the document payload to Catalog while staging files in MinIO.
-4. **Catalog persists state** — Documents, threads, files, and chunks are written transactionally. Ingest submissions capture status for retries and audit trails. People are normalized via `PeopleRepository`, identifiers canonicalized, and linked to documents via `document_people`.
-5. **Embedding worker enriches** — Pending chunks are vectorised and written via `/v1/catalog/embeddings`, flipping their status to `embedded`.
-6. **Search exposes results** — Hybrid search queries join Catalog tables with Qdrant vectors, enabling Ask/answer workflows and filtered exploration. People search queries the normalized `people` table.
-7. **Relationship scoring** — Background job computes relationship strength from message history, updating `crm_relationships` table.
+2. **Enrichment processing** — Haven.app's `EnrichmentQueue` manages concurrent enrichment with dual worker pools (normal workers for documents with attachments, dedicated no-attachment worker for text-only documents). `EnrichmentOrchestrator` coordinates enrichment services (OCR, face detection, entity extraction, captioning) before submission. Per-collector enrichment settings control whether enrichment is applied. `ImageExtractor` and `TextExtractor` modules extract content from HTML/rich text.
+3. **Document submission** — `BatchDocumentSubmitter` buffers enriched documents and batches them (default: 200) before submission. Documents are automatically flushed when batch size is reached, with manual `flush()` and `finish()` methods available. Statistics tracking provides real-time submission metrics (submitted count, error count).
+4. **Gateway validates and queues** — It computes idempotency keys, attaches metadata, and forwards the document payload to Catalog while staging files in MinIO.
+5. **Catalog persists state** — Documents, threads, files, and chunks are written transactionally. Ingest submissions capture status for retries and audit trails. People are normalized via `PeopleRepository`, identifiers canonicalized, and linked to documents via `document_people`.
+6. **Embedding worker enriches** — Pending chunks are vectorised and written via `/v1/catalog/embeddings`, flipping their status to `embedded`.
+7. **Search exposes results** — Hybrid search queries join Catalog tables with Qdrant vectors, enabling Ask/answer workflows and filtered exploration. People search queries the normalized `people` table.
+8. **Relationship scoring** — Background job computes relationship strength from message history, updating `crm_relationships` table.
+
+**Progress Tracking:**
+- Collectors provide granular progress metrics: scanned, matched, submitted, skipped, errors, found, queued, enriched
+- Real-time progress updates flow from handlers → controllers → JobManager → UI
+- UI displays detailed progress with processing states and statistics
 
 ## Topology
 
