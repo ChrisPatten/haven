@@ -274,7 +274,8 @@ public actor ConfigManager {
                 baseUrl: "http://localhost:8085",
                 ingestPath: "/v1/ingest",
                 ingestFilePath: "/v1/ingest/file",
-                timeoutMs: 30000
+                timeoutMs: 30000,
+                batchSize: 200
             ),
             logging: SystemLoggingConfig(
                 level: "info",

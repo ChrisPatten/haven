@@ -51,7 +51,16 @@ public actor IMessageHandler {
         // Earliest/latest message timestamps touched during this run (Apple epoch units)
         var earliestMessageTimestamp: Int64?
         var latestMessageTimestamp: Int64?
-        
+        // Granular progress tracking
+        var scanned: Int = 0
+        var matched: Int = 0
+        var submitted: Int = 0
+        var skipped: Int = 0
+        var errors: Int = 0
+        var total: Int? = nil
+        var found: Int = 0
+        var queued: Int = 0
+        var enriched: Int = 0
         var toDict: [String: Any] {
             var dict: [String: Any] = [
                 "messages_processed": messagesProcessed,
@@ -103,6 +112,18 @@ public actor IMessageHandler {
             if let latest = latestMessageTimestamp {
                 dict["latest_touched_message_timestamp"] = formatAppleEpoch(latest)
             }
+            // Include granular progress tracking
+            dict["scanned"] = scanned
+            dict["matched"] = matched
+            dict["submitted"] = submitted
+            dict["skipped"] = skipped
+            dict["errors"] = errors
+            if let total = total {
+                dict["total"] = total
+            }
+            dict["found"] = found
+            dict["queued"] = queued
+            dict["enriched"] = enriched
             return dict
         }
     }
@@ -158,7 +179,7 @@ public actor IMessageHandler {
     /// Replaces HTTP-based handleRun for in-app integration
     public func runCollector(
         request: CollectorRunRequest?,
-        onProgress: ((Int, Int, Int, Int, Int?) -> Void)? = nil
+        onProgress: ((Int, Int, Int, Int, Int?, Int, Int, Int) -> Void)? = nil
     ) async throws -> RunResponse {
         
         // Check if already running
@@ -188,6 +209,14 @@ public actor IMessageHandler {
         lastRunStatus = "running"
         lastRunError = nil
         
+        // Reset submitter stats for new run
+        if let submitter = submitter {
+            await submitter.reset()
+        }
+        
+        // Clear enrichment completions from previous runs
+        enrichmentCompletions.removeAll()
+        
         var stats = CollectorStats(
             messagesProcessed: 0,
             threadsProcessed: 0,
@@ -199,9 +228,10 @@ public actor IMessageHandler {
         )
         
         do {
-            // Create progress callback that reports stats with total
-            let progressCallback: ((Int, Int, Int, Int, Int?) -> Void)? = onProgress != nil ? { scanned, matched, submitted, skipped, total in
-                onProgress?(scanned, matched, submitted, skipped, total)
+            // Create progress callback that reports stats with total and granular states
+            // Signature: (scanned, matched, submitted, skipped, total, found, queued, enriched)
+            let progressCallback: ((Int, Int, Int, Int, Int?, Int, Int, Int) -> Void)? = onProgress != nil ? { scanned, matched, submitted, skipped, total, found, queued, enriched in
+                onProgress?(scanned, matched, submitted, skipped, total, found, queued, enriched)
             } : nil
             
             let result = try await collectMessages(params: params, stats: &stats, onProgress: progressCallback)
@@ -210,10 +240,13 @@ public actor IMessageHandler {
             let successCount = result.submittedCount
             let finalFences = result.fences
             let pendingTimestamps = result.pendingBatchTimestamps
+            let totalCount = result.totalCount
+            let scannedCount = result.scannedCount
+            let skippedCount = result.skippedCount
+            let errorCount = result.errorCount
             
-            // Report final progress (total will be included from collectMessages callback)
-            // Note: This final call may not have total if collectMessages didn't report it, but that's okay
-            onProgress?(stats.messagesProcessed, stats.messagesProcessed, successCount, max(0, stats.messagesProcessed - successCount), nil)
+            // Final progress callback is already called at the end of collectMessages with the latest counts
+            // No need to call it again here - the UI will have the latest state from that callback
             
             let endTime = Date()
             stats.endTime = endTime
@@ -235,16 +268,23 @@ public actor IMessageHandler {
             
             response.finish(status: .ok, finishedAt: endTime)
             response.stats = RunResponse.Stats(
-                scanned: stats.messagesProcessed,
-                matched: stats.messagesProcessed,
+                scanned: scannedCount,
+                matched: scannedCount,
                 submitted: successCount,
-                skipped: max(0, stats.messagesProcessed - successCount),
+                skipped: skippedCount,
                 earliest_touched: earliestTouched.map { RunResponse.iso8601UTC($0) },
                 latest_touched: latestTouched.map { RunResponse.iso8601UTC($0) },
                 batches: 0
             )
             response.warnings = []
+            // Include error messages if there were submission failures
+            // For now, just include a count if errors > 0
+            // TODO: Capture actual error messages during submission for more detailed reporting
+            if errorCount > 0 {
+                response.errors = ["\(errorCount) documents failed to submit"]
+            } else {
             response.errors = []
+            }
             
             // Update state and persist
             isRunning = false
@@ -475,8 +515,8 @@ public actor IMessageHandler {
     private func collectMessages(
         params: CollectorParams,
         stats: inout CollectorStats,
-        onProgress: ((Int, Int, Int, Int, Int?) -> Void)? = nil
-    ) async throws -> (documents: [[String: Any]], submittedCount: Int, fences: [FenceRange], pendingBatchTimestamps: [Date]) {
+        onProgress: ((Int, Int, Int, Int, Int?, Int, Int, Int) -> Void)? = nil
+    ) async throws -> (documents: [[String: Any]], submittedCount: Int, fences: [FenceRange], pendingBatchTimestamps: [Date], totalCount: Int, scannedCount: Int, skippedCount: Int, errorCount: Int) {
         let chatDbPath = params.resolvedChatDbPath
         
         // Log path resolution for debugging
@@ -622,7 +662,25 @@ public actor IMessageHandler {
         // Get total count of messages since latest fence for progress tracking
         // This includes messages in gaps between fences
         // When debug mode is enabled, fences is empty, so this will use params-based counting
-        let totalCount = try countMessagesSinceLatestFence(db: db!, params: params, fences: fences)
+        var totalCount = try countMessagesSinceLatestFence(db: db!, params: params, fences: fences)
+        
+        // Add count of messages in gaps between fences
+        if !gaps.isEmpty {
+            var gapCount = 0
+            for gap in gaps {
+                let gapEarliestEpoch = dateToAppleEpoch(gap.earliest)
+                let gapLatestEpoch = dateToAppleEpoch(gap.latest)
+                let gapMessageCount = try countMessagesInRange(db: db!, lowerBoundEpoch: gapEarliestEpoch, upperBoundEpoch: gapLatestEpoch)
+                gapCount += gapMessageCount
+            }
+            totalCount += gapCount
+            logger.info("Added gap messages to total count", metadata: [
+                "gap_count": String(gaps.count),
+                "gap_messages": String(gapCount),
+                "total_with_gaps": String(totalCount)
+            ])
+        }
+        
         logger.info("Total messages to process", metadata: ["total_count": String(totalCount), "fence_count": String(fences.count), "gap_count": String(gaps.count), "debug_mode": String(ignoreFences)])
 
         // Retrieve candidate message ROWIDs chronologically ordered (respects params.order)
@@ -631,6 +689,25 @@ public actor IMessageHandler {
         let rowIds = try fetchMessageRowIds(db: db!, params: params, fences: fences, gaps: gaps)
         // Track total candidates
         stats.messagesProcessed = rowIds.count
+        
+        // Use actual rowIds count as total for progress tracking (more accurate than query-based count)
+        // This represents the actual number of messages we'll process
+        let actualTotalCount = rowIds.count > 0 ? rowIds.count : (totalCount > 0 ? totalCount : nil)
+        
+        // Initialize granular state tracking variables
+        var foundCount = 0  // Found in initial query (total from rowIds)
+        var queuedCount = 0  // Extracted from chat.db, queued for enrichment
+        var enrichedCount = 0  // Enrichment complete
+        
+        // Set found count to total (all messages found in initial query)
+        foundCount = rowIds.count
+        
+        // Report initial progress with total count immediately so UI can display it
+        // This shows the user how many records will be processed right away
+        onProgress?(0, 0, 0, 0, actualTotalCount, foundCount, queuedCount, enrichedCount)
+        
+        // Also update stats to reflect we've found the messages (for final stats)
+        // Note: scannedCount will be updated as we iterate through messages
 
         // NOTE: Do NOT set earliest/latest here from the scanned result set.
         // earliest/latest should reflect submitted documents only. These will be
@@ -652,6 +729,10 @@ public actor IMessageHandler {
         var submittedCount = 0  // Only count successfully submitted messages toward limit
         var currentBatch: [[String: Any]] = []
         var currentBatchTimestamps: [Date] = []  // Track timestamps for fence updates
+        var successfulSubmissionTimestamps: [Date] = []  // Track timestamps of successfully submitted documents
+        var scannedCount = 0  // Track messages actually scanned (after filtering)
+        var skippedCount = 0  // Track messages skipped (in fences, etc.)
+        var errorCount = 0  // Track actual submission failures (from gateway responses)
         
         // Track last fence save time for periodic updates (every 5 seconds)
         var lastFenceSaveTime: Date? = nil
@@ -670,6 +751,8 @@ public actor IMessageHandler {
 
         // Iterate ordered rows and prepare documents in batches
         for rowId in orderedRowIds {
+            // Increment scanned count for every row we check
+            scannedCount += 1
             // Check if we've hit the overall limit BEFORE processing
             if let lim = params.limit, lim > 0, submittedCount >= lim {
                 logger.info("Reached limit of \(lim) messages, stopping processing")
@@ -677,7 +760,11 @@ public actor IMessageHandler {
             }
             
             // Fetch the message row
-            guard let message = try fetchMessageByRowId(db: db!, rowId: rowId) else { continue }
+            guard let message = try fetchMessageByRowId(db: db!, rowId: rowId) else {
+                skippedCount += 1
+                logger.debug("Failed to fetch message by rowId, skipping", metadata: ["row_id": String(rowId)])
+                continue
+            }
             
             // Use canonical timestamp: message.date (the message's primary timestamp)
             // This is used for all comparisons, fences, and ordering - never use date_read or date_delivered
@@ -688,11 +775,15 @@ public actor IMessageHandler {
             // Skip fence check if debug mode is enabled
             let ignoreFences = config.debug.enabled
             if !ignoreFences && FenceManager.isTimestampInFences(messageDate, fences: fences) {
+                skippedCount += 1
                 logger.debug("Skipping message within fence", metadata: [
                     "row_id": String(rowId),
                     "timestamp": ISO8601DateFormatter().string(from: messageDate),
                     "fence_count": String(fences.count)
                 ])
+                // Report progress even when skipping so UI stays updated
+                // Use actualTotalCount instead of totalCount for accurate progress
+                onProgress?(scannedCount, scannedCount, submittedCount, skippedCount, actualTotalCount, foundCount, queuedCount, enrichedCount)
                 continue
             }
             
@@ -733,6 +824,7 @@ public actor IMessageHandler {
                 if let u = untilEpoch {
                     if message.date > u {
                         // Message is too new (after until), skip and continue to older messages
+                        skippedCount += 1
                         logger.debug("Skipping message after until date", metadata: [
                             "row_id": String(rowId),
                             "message_date": String(message.date),
@@ -754,6 +846,7 @@ public actor IMessageHandler {
                 if let s = sinceEpoch {
                     if message.date < s {
                         // Message is too old (before since), skip and continue to newer messages
+                        skippedCount += 1
                         logger.debug("Skipping message before since date", metadata: [
                             "row_id": String(rowId),
                             "message_date": String(message.date),
@@ -773,6 +866,7 @@ public actor IMessageHandler {
 
             // Check if message is empty (no text, no attributed body, no attachments)
             if isMessageEmpty(message: message) {
+                skippedCount += 1
                 logger.debug("Skipping empty message (unsent/retracted or no content)", metadata: [
                     "message_guid": message.guid,
                     "has_attributed_body": message.attributedBody != nil ? "true" : "false",
@@ -784,7 +878,14 @@ public actor IMessageHandler {
 
             // Fetch thread for message
             let threads = try fetchThreads(db: db!, messageIds: Set([message.chatId]))
-            guard let thread = threads.first(where: { $0.rowId == message.chatId }) else { continue }
+            guard let thread = threads.first(where: { $0.rowId == message.chatId }) else {
+                skippedCount += 1
+                logger.debug("No thread found for message, skipping", metadata: [
+                    "row_id": String(rowId),
+                    "chat_id": String(message.chatId)
+                ])
+                continue
+            }
 
             // Build base document (without enrichment)
             let baseAttachments = message.attachments.map { attachment in
@@ -807,6 +908,12 @@ public actor IMessageHandler {
                 baseDocument: baseDocument
             )
             
+            logger.info("Created CollectorDocument from message", metadata: [
+                "source_id": collectorDocument.externalId,
+                "image_count": String(collectorDocument.images.count),
+                "has_text": !collectorDocument.content.isEmpty
+            ])
+            
             // Check limit before building/submitting document
             if let lim = params.limit, lim > 0, submittedCount >= lim {
                 logger.info("Reached limit of \(lim) messages, stopping processing")
@@ -815,9 +922,18 @@ public actor IMessageHandler {
             
             let documentId = collectorDocument.externalId
             
+            // Document extracted from chat.db - increment queued count
+            queuedCount += 1
+            
             if let queue = self.enrichmentQueue {
                 // Store pending enrichment info before queuing
                 pendingEnrichments[documentId] = (baseDocument, messageDate, collectorDocument)
+                
+                logger.info("Queuing document for enrichment", metadata: [
+                    "document_id": documentId,
+                    "image_count": String(collectorDocument.images.count),
+                    "queue_available": "true"
+                ])
                 
                 // Queue for enrichment with callback
                 let queued = await queue.queueForEnrichment(
@@ -830,18 +946,28 @@ public actor IMessageHandler {
                 }
                 
                 if queued {
-                    logger.debug("Queued document for enrichment", metadata: [
+                    logger.info("Document queued successfully for enrichment", metadata: [
                         "document_id": documentId,
                         "image_count": String(collectorDocument.images.count)
                     ])
                     
-                    processEnrichmentCompletions(
+                    // Process any completed enrichments
+                    let (processedCount, newEnrichedCount) = await processEnrichmentCompletions(
                         pendingEnrichments: &pendingEnrichments,
                         currentBatch: &currentBatch,
                         currentBatchTimestamps: &currentBatchTimestamps,
                         allDocuments: &allDocuments,
-                        stats: &stats
+                        stats: &stats,
+                        submittedCount: &submittedCount,
+                        successfulSubmissionTimestamps: &successfulSubmissionTimestamps
                     )
+                    enrichedCount += newEnrichedCount
+                    
+                    // Sync submitter stats before reporting progress (submitter may have auto-flushed)
+                    await syncSubmitterStats(submittedCount: &submittedCount, errorCount: &errorCount)
+                    
+                    // Report progress after queuing and processing completions
+                    onProgress?(scannedCount, scannedCount, submittedCount, skippedCount, actualTotalCount, foundCount, queuedCount, enrichedCount)
                     continue
                 } else {
                     // Failed to queue, remove from pending and fall back to synchronous enrichment
@@ -859,12 +985,16 @@ public actor IMessageHandler {
                     baseDocument: baseDocument,
                     collectorDocument: collectorDocument
                 )
+                // Synchronous enrichment completed immediately
+                enrichedCount += 1
             } catch {
                 logger.warning("Synchronous enrichment failed, using base document", metadata: [
                     "document_id": documentId,
                     "error": error.localizedDescription
                 ])
                 enrichedDocument = baseDocument
+                // Still count as enriched (using base document)
+                enrichedCount += 1
             }
             
             // Add to batch
@@ -873,14 +1003,32 @@ public actor IMessageHandler {
             allDocuments.append(enrichedDocument)
             stats.documentsCreated += 1
             
+            // Report progress periodically while scanning (every 100 messages or on batch boundaries)
+            // This keeps the UI updated even before batch submission
+            // Use actualTotalCount instead of totalCount for accurate progress
+            if scannedCount % 100 == 0 || currentBatch.count >= batchSize {
+                // Sync submitter stats before reporting progress (submitter may have auto-flushed)
+                await syncSubmitterStats(submittedCount: &submittedCount, errorCount: &errorCount)
+                onProgress?(scannedCount, scannedCount, submittedCount, skippedCount, actualTotalCount, foundCount, queuedCount, enrichedCount)
+            }
+            
             // Process any completed enrichments before checking batch size
-            processEnrichmentCompletions(
+            let (_, newEnriched) = await processEnrichmentCompletions(
                 pendingEnrichments: &pendingEnrichments,
                 currentBatch: &currentBatch,
                 currentBatchTimestamps: &currentBatchTimestamps,
                 allDocuments: &allDocuments,
-                stats: &stats
+                stats: &stats,
+                submittedCount: &submittedCount,
+                successfulSubmissionTimestamps: &successfulSubmissionTimestamps
             )
+            enrichedCount += newEnriched
+            // Report progress after processing enrichments
+            if newEnriched > 0 {
+                // Sync submitter stats before reporting progress (submitter may have auto-flushed)
+                await syncSubmitterStats(submittedCount: &submittedCount, errorCount: &errorCount)
+                onProgress?(scannedCount, scannedCount, submittedCount, skippedCount, actualTotalCount, foundCount, queuedCount, enrichedCount)
+            }
 
             // Process batch when it reaches batch size OR when we've reached the limit
             let shouldFlushBatch: Bool
@@ -917,33 +1065,72 @@ public actor IMessageHandler {
                 logger.info("Processing batch of \(batchToSubmit.count) documents")
                 
                 // Post batch to gateway (URLSession will respect cancellation automatically)
-                // Skip HTTP posting if debug mode is enabled (documents already submitted via submitter)
+                // When a submitter is available, documents are submitted via submitter which flushes automatically when buffer fills
+                // Counting happens at submitter level - get stats from submitter
                 let batchSuccessCount: Int
-                if config.debug.enabled {
-                    // In debug mode, documents are submitted via submitter, so skip HTTP posting
-                    // Count all documents as successful since they were submitted via submitter
-                    batchSuccessCount = batchToSubmit.count
-                    logger.debug("Debug mode: skipping HTTP posting, documents already submitted via submitter", metadata: [
-                        "batch_size": String(batchToSubmit.count)
+                let batchErrorCount: Int
+                if let submitter = submitter {
+                    // When a submitter is available, documents are already submitted via submitter during enrichment
+                    // The submitter flushes documents automatically when its buffer fills (in submit() -> flushIfNeeded())
+                    // Get current stats from submitter to update our counts
+                    let stats = await submitter.getStats()
+                    // Only count the delta since last check - we'll track incrementally
+                    // For now, get stats and use them - the submitter tracks totals
+                    let previousSubmitted = submittedCount
+                    let previousErrors = errorCount
+                    // Update to submitter's totals (submitter tracks all submissions)
+                    submittedCount = stats.submittedCount
+                    errorCount = stats.errorCount
+                    // Calculate delta for this batch
+                    batchSuccessCount = submittedCount - previousSubmitted
+                    batchErrorCount = errorCount - previousErrors
+                    logger.debug("Submitter available: batch contains documents already submitted via submitter", metadata: [
+                        "batch_size": String(batchToSubmit.count),
+                        "submitted_delta": String(batchSuccessCount),
+                        "errors_delta": String(batchErrorCount)
                     ])
                 } else {
-                    batchSuccessCount = try await postDocumentsToGateway(batchToSubmit, batchMode: params.batchMode)
+                    // No submitter available - post via HTTP
+                    let result = try await postDocumentsToGatewayWithErrors(batchToSubmit, batchMode: params.batchMode)
+                    batchSuccessCount = result.successCount
+                    batchErrorCount = result.errorCount
+                    submittedCount += batchSuccessCount
+                    errorCount += batchErrorCount
                 }
                 logger.info("Posted batch to gateway", metadata: [
                     "batch_size": String(batchToSubmit.count),
                     "posted_to_gateway": String(batchSuccessCount),
+                    "errors": String(batchErrorCount),
                     "submission_mode": params.batchMode ? "batch" : "single"
                 ])
                 
-                // Update submitted count (only successful submissions count toward limit)
-                submittedCount += batchSuccessCount
+                // Note: submittedCount and errorCount are already updated above if submitter is available
+                // Sync submitter stats one more time before reporting (submitter may have auto-flushed during processing)
+                await syncSubmitterStats(submittedCount: &submittedCount, errorCount: &errorCount)
                 
-                // Report progress after batch submission
-                onProgress?(stats.messagesProcessed, stats.messagesProcessed, submittedCount, max(0, stats.messagesProcessed - submittedCount), totalCount > 0 ? totalCount : nil)
+                // Report progress after batch submission with actual scanned/skipped/error counts
+                // Use actualTotalCount instead of totalCount for accurate progress
+                onProgress?(scannedCount, scannedCount, submittedCount, skippedCount, actualTotalCount, foundCount, queuedCount, enrichedCount)
                 
                 // Update fences with successfully submitted timestamps
                 // Skip fence updates if debug mode is enabled
-                let successfulTimestamps = Array(timestampsToSubmit.prefix(batchSuccessCount))
+                // When using a submitter, documents may have been submitted asynchronously during enrichment,
+                // so we use accumulated successful timestamps up to the current submitted count.
+                // When not using a submitter, we use batch timestamps.
+                var successfulTimestamps: [Date] = []
+                if let submitter = submitter {
+                    // When using a submitter, use accumulated timestamps from async submissions
+                    // Only use timestamps up to the current submitted count to ensure we don't include
+                    // timestamps for documents that haven't been successfully submitted yet
+                    let countToUse = min(successfulSubmissionTimestamps.count, submittedCount)
+                    successfulTimestamps = Array(successfulSubmissionTimestamps.prefix(countToUse))
+                } else {
+                    // When not using a submitter, use timestamps from the batch that was just submitted
+                    successfulTimestamps = Array(timestampsToSubmit.prefix(batchSuccessCount))
+                    // Track these timestamps for consistency
+                    successfulSubmissionTimestamps.append(contentsOf: successfulTimestamps)
+                }
+                
                 if !ignoreFences && !successfulTimestamps.isEmpty {
                     let minTimestamp = successfulTimestamps.min()!
                     let maxTimestamp = successfulTimestamps.max()!
@@ -1018,17 +1205,32 @@ public actor IMessageHandler {
             
             while !pendingEnrichments.isEmpty {
                 // Process any completions that have arrived
-                processEnrichmentCompletions(
+                let (_, newEnriched) = await processEnrichmentCompletions(
                     pendingEnrichments: &pendingEnrichments,
                     currentBatch: &currentBatch,
                     currentBatchTimestamps: &currentBatchTimestamps,
                     allDocuments: &allDocuments,
-                    stats: &stats
+                    stats: &stats,
+                    submittedCount: &submittedCount,
+                    successfulSubmissionTimestamps: &successfulSubmissionTimestamps
                 )
+                enrichedCount += newEnriched
+                
+                // Sync submitter stats before reporting progress (submitter may have auto-flushed)
+                await syncSubmitterStats(submittedCount: &submittedCount, errorCount: &errorCount)
+                
+                // Report progress periodically while waiting for enrichments
+                if newEnriched > 0 {
+                    onProgress?(scannedCount, scannedCount, submittedCount, skippedCount, actualTotalCount, foundCount, queuedCount, enrichedCount)
+                }
                 
                 // If still pending, wait a bit before checking again
                 if !pendingEnrichments.isEmpty {
                     try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+                    // Sync submitter stats again before reporting (may have flushed during sleep)
+                    await syncSubmitterStats(submittedCount: &submittedCount, errorCount: &errorCount)
+                    // Report progress even if no new enrichments (to show we're still waiting)
+                    onProgress?(scannedCount, scannedCount, submittedCount, skippedCount, actualTotalCount, foundCount, queuedCount, enrichedCount)
                 }
             }
             
@@ -1060,33 +1262,102 @@ public actor IMessageHandler {
             try Task.checkCancellation()
             
             logger.info("Processing final batch of \(finalBatch.count) documents")
-            // Skip HTTP posting if debug mode is enabled (documents already submitted via submitter)
+            
+            // Post batch to gateway or flush submitter
             let batchSuccessCount: Int
-            if config.debug.enabled {
-                // In debug mode, documents are submitted via submitter, so skip HTTP posting
-                // Count all documents as successful since they were submitted via submitter
-                batchSuccessCount = finalBatch.count
-                logger.debug("Debug mode: skipping HTTP posting for final batch, documents already submitted via submitter", metadata: [
-                    "batch_size": String(finalBatch.count)
-                ])
+            let batchErrorCount: Int
+            if let submitter = submitter {
+                // When a submitter is available, ensure submitter flushes all remaining buffered documents
+                // Get final stats from submitter after flushing
+                let previousSubmitted = submittedCount
+                let previousErrors = errorCount
+                do {
+                    let stats = try await submitter.finish()
+                    // Update to final stats from submitter
+                    submittedCount = stats.submittedCount
+                    errorCount = stats.errorCount
+                    // Calculate delta for final batch
+                    batchSuccessCount = submittedCount - previousSubmitted
+                    batchErrorCount = errorCount - previousErrors
+                    logger.info("Submitter flushed all remaining buffered documents", metadata: [
+                        "final_batch_count": String(finalBatch.count),
+                        "submitted_delta": String(batchSuccessCount),
+                        "errors_delta": String(batchErrorCount),
+                        "total_submitted": String(stats.submittedCount),
+                        "total_errors": String(stats.errorCount)
+                    ])
+                } catch {
+                    logger.error("Submitter finish failed", metadata: [
+                        "error": error.localizedDescription,
+                        "final_batch_count": String(finalBatch.count)
+                    ])
+                    // Get stats even if finish failed (some may have been submitted)
+                    let stats = await submitter.getStats()
+                    submittedCount = stats.submittedCount
+                    errorCount = stats.errorCount
+                    batchSuccessCount = submittedCount - previousSubmitted
+                    batchErrorCount = errorCount - previousErrors
+                }
             } else {
-                batchSuccessCount = try await postDocumentsToGateway(finalBatch, batchMode: params.batchMode)
+                // No submitter available - post via HTTP
+                let result = try await postDocumentsToGatewayWithErrors(finalBatch, batchMode: params.batchMode)
+                batchSuccessCount = result.successCount
+                batchErrorCount = result.errorCount
+                submittedCount += batchSuccessCount
+                errorCount += batchErrorCount
             }
             logger.info("Posted final batch to gateway", metadata: [
                 "batch_size": String(finalBatch.count),
                 "posted_to_gateway": String(batchSuccessCount),
+                "errors": String(batchErrorCount),
                 "submission_mode": params.batchMode ? "batch" : "single"
             ])
             
-            // Update submitted count
-            submittedCount += batchSuccessCount
+            // Sync submitter stats one more time before final progress report (may have flushed after finish())
+            await syncSubmitterStats(submittedCount: &submittedCount, errorCount: &errorCount)
             
-            // Report progress after final batch submission
-            onProgress?(stats.messagesProcessed, stats.messagesProcessed, submittedCount, max(0, stats.messagesProcessed - submittedCount), totalCount > 0 ? totalCount : nil)
+            // Report progress after final batch submission with actual scanned/skipped/error counts
+            // Use actualTotalCount instead of totalCount for accurate progress
+            onProgress?(scannedCount, scannedCount, submittedCount, skippedCount, actualTotalCount, foundCount, queuedCount, enrichedCount)
+            
+            // Store final counts in stats for persistence
+            stats.scanned = scannedCount
+            stats.matched = scannedCount
+            stats.submitted = submittedCount
+            stats.skipped = skippedCount
+            stats.errors = errorCount
+            stats.total = actualTotalCount
+            stats.found = foundCount
+            stats.queued = queuedCount
+            stats.enriched = enrichedCount
             
             // Update fences with successfully submitted timestamps
             // Skip fence updates if debug mode is enabled
-            let successfulTimestamps = Array(finalTimestamps.prefix(batchSuccessCount))
+            // When using a submitter, use accumulated successful timestamps from the entire run,
+            // limited to the total submitted count. When not using a submitter, use timestamps from the final batch.
+            var successfulTimestamps: [Date] = []
+            if let submitter = submitter {
+                // When using a submitter, documents were submitted asynchronously during enrichment.
+                // Use accumulated successful timestamps, but only up to the total submitted count
+                // to ensure we don't include timestamps for documents that failed or are still pending.
+                let countToUse = min(successfulSubmissionTimestamps.count, submittedCount)
+                successfulTimestamps = Array(successfulSubmissionTimestamps.prefix(countToUse))
+                // Also add timestamps from final batch if any documents were in the submitter's buffer
+                if batchSuccessCount > 0 && !finalTimestamps.isEmpty {
+                    // The final batch may contain documents that were in the submitter's buffer.
+                    // Add their timestamps (up to the batchSuccessCount) to our tracking.
+                    let finalBatchTimestamps = Array(finalTimestamps.prefix(batchSuccessCount))
+                    successfulSubmissionTimestamps.append(contentsOf: finalBatchTimestamps)
+                    // Recalculate with updated count
+                    let updatedCountToUse = min(successfulSubmissionTimestamps.count, submittedCount)
+                    successfulTimestamps = Array(successfulSubmissionTimestamps.prefix(updatedCountToUse))
+                }
+            } else {
+                // When not using a submitter, use timestamps from the final batch that was just submitted
+                successfulTimestamps = Array(finalTimestamps.prefix(batchSuccessCount))
+                successfulSubmissionTimestamps.append(contentsOf: successfulTimestamps)
+            }
+            
             if !ignoreFences && !successfulTimestamps.isEmpty {
                 let minTimestamp = successfulTimestamps.min()!
                 let maxTimestamp = successfulTimestamps.max()!
@@ -1129,7 +1400,7 @@ public actor IMessageHandler {
         // so they will be processed on the next run. The fence system handles gaps correctly because
         // it only skips messages that are WITHIN fences, not messages between fences.
         let pendingTimestamps = currentBatchTimestamps
-        return (documents: allDocuments, submittedCount: submittedCount, fences: fences, pendingBatchTimestamps: pendingTimestamps)
+        return (documents: allDocuments, submittedCount: submittedCount, fences: fences, pendingBatchTimestamps: pendingTimestamps, totalCount: totalCount, scannedCount: scannedCount, skippedCount: skippedCount, errorCount: errorCount)
     }
     
     private func createChatDbSnapshot(sourcePath: String) throws -> String {
@@ -1470,24 +1741,36 @@ public actor IMessageHandler {
         // BUT: Also include messages in gaps between fences (from cancelled batches)
         var lowerBoundEpoch: Int64? = nil
         let latestFenceTimestamp: Date? = fences.isEmpty ? nil : fences.map { $0.latest }.max()
+        let earliestFenceTimestamp: Date? = fences.isEmpty ? nil : fences.map { $0.earliest }.min()
         
         // Find the oldest gap timestamp (if any) - we need to process gaps too
         let oldestGapEarliest: Date? = gaps.isEmpty ? nil : gaps.map { $0.earliest }.min()
         
         if let since = params.since {
-            // Explicit since takes precedence
-            lowerBoundEpoch = dateToAppleEpoch(since)
-            // If we have a latest fence and since is older, use the max (process from latest fence)
-            if let latestFence = latestFenceTimestamp {
-                let sinceEpoch = dateToAppleEpoch(since)
-                let latestFenceEpoch = dateToAppleEpoch(latestFence)
-                lowerBoundEpoch = max(sinceEpoch, latestFenceEpoch)
-            }
-            // Also consider gaps - if oldest gap is older than since, we need to include it
-            if let oldestGap = oldestGapEarliest {
-                let sinceEpoch = lowerBoundEpoch ?? 0
-                let oldestGapEpoch = dateToAppleEpoch(oldestGap)
-                lowerBoundEpoch = min(sinceEpoch, oldestGapEpoch)  // Use the older one to include gaps
+            // Explicit since provided by user
+            let sinceEpoch = dateToAppleEpoch(since)
+            // If the user is backfilling OLDER than the earliest fence, allow processing up to the fence boundary.
+            if let earliestFence = earliestFenceTimestamp, since < earliestFence {
+                // Backfill mode: process [since, earliestFence]
+                lowerBoundEpoch = sinceEpoch
+                // Upper bound is limited to earliest fence to avoid reprocessing fenced data
+                // (we'll finalize upperBoundEpoch after it's initialized below)
+                // Note: gaps logic is irrelevant for the pre-fence region
+            } else {
+                // Normal behavior when since is within or newer than fenced ranges:
+                // do not go earlier than the latest fence
+                if let latestFence = latestFenceTimestamp {
+                    let latestFenceEpoch = dateToAppleEpoch(latestFence)
+                    lowerBoundEpoch = max(sinceEpoch, latestFenceEpoch)
+                } else {
+                    lowerBoundEpoch = sinceEpoch
+                }
+                // Also consider gaps - if oldest gap is older than our lower bound, include it
+                if let oldestGap = oldestGapEarliest {
+                    let currentLower = lowerBoundEpoch ?? sinceEpoch
+                    let oldestGapEpoch = dateToAppleEpoch(oldestGap)
+                    lowerBoundEpoch = min(currentLower, oldestGapEpoch)  // Include gaps older than the fence
+                }
             }
         } else if let latestFence = latestFenceTimestamp {
             // Default: Use latest fence as lower bound (stop at latest fence)
@@ -1510,7 +1793,16 @@ public actor IMessageHandler {
         }
         
         // Determine upper-bound (until constraint)
-        let upperBoundEpoch: Int64? = params.until != nil ? dateToAppleEpoch(params.until!) : nil
+        var upperBoundEpoch: Int64? = params.until != nil ? dateToAppleEpoch(params.until!) : nil
+        // If we're backfilling prior to the earliest fence, cap the upper bound at the fence boundary.
+        if let since = params.since, let earliestFence = earliestFenceTimestamp, since < earliestFence {
+            let fenceEpoch = dateToAppleEpoch(earliestFence)
+            if let currentUpper = upperBoundEpoch {
+                upperBoundEpoch = min(currentUpper, fenceEpoch)
+            } else {
+                upperBoundEpoch = fenceEpoch
+            }
+        }
 
         // Determine chronological order (ascending = oldest first, descending = newest first)
         let isDescOrder = (params.order?.lowercased() == "desc")
@@ -1649,6 +1941,30 @@ public actor IMessageHandler {
         }
         
         // Execute query and get count
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            let count = sqlite3_column_int(stmt, 0)
+            return Int(count)
+        }
+        
+        return 0
+    }
+    
+    /// Count messages in a specific date range
+    private func countMessagesInRange(db: OpaquePointer, lowerBoundEpoch: Int64, upperBoundEpoch: Int64) throws -> Int {
+        let query = "SELECT COUNT(*) FROM message m WHERE m.date >= ? AND m.date <= ?"
+        
+        var stmt: OpaquePointer?
+        let prepareResult = sqlite3_prepare_v2(db, query, -1, &stmt, nil)
+        guard prepareResult == SQLITE_OK else {
+            let errorMsg = String(cString: sqlite3_errmsg(db))
+            logger.error("Failed to prepare gap message count query", metadata: ["error": errorMsg, "code": String(prepareResult)])
+            throw CollectorError.queryFailed("Failed to prepare gap message count query: \(errorMsg) (code: \(prepareResult))")
+        }
+        defer { sqlite3_finalize(stmt) }
+        
+        sqlite3_bind_int64(stmt, 1, lowerBoundEpoch)
+        sqlite3_bind_int64(stmt, 2, upperBoundEpoch)
+        
         if sqlite3_step(stmt) == SQLITE_ROW {
             let count = sqlite3_column_int(stmt, 0)
             return Int(count)
@@ -2371,14 +2687,21 @@ public actor IMessageHandler {
     ) async throws -> [String: Any]? {
         // First build the base document dictionary
         let baseDocument = try buildDocument(message: message, thread: thread, attachments: attachments, db: db)
+        let sourceId = baseDocument["source_id"] as? String ?? "unknown"
         
         // If enrichment is skipped, return base document
         if skipEnrichment {
+            logger.debug("buildDocumentWithEnrichment: enrichment skipped", metadata: ["source_id": sourceId])
             return baseDocument
         }
         
         // Use new architecture enrichment if orchestrator is available
         if let orchestrator = enrichmentOrchestrator {
+            logger.debug("buildDocumentWithEnrichment: starting enrichment", metadata: [
+                "source_id": sourceId,
+                "attachment_count": String(attachments.count)
+            ])
+            
             // Convert message to CollectorDocument format for enrichment
             let collectorDocument = try convertToCollectorDocument(
                 message: message,
@@ -2386,8 +2709,19 @@ public actor IMessageHandler {
                 baseDocument: baseDocument
             )
             
+            logger.debug("buildDocumentWithEnrichment: CollectorDocument created", metadata: [
+                "source_id": sourceId,
+                "image_count": String(collectorDocument.images.count)
+            ])
+            
             // Enrich using orchestrator
             let enrichedDocument = try await orchestrator.enrich(collectorDocument)
+            
+            logger.debug("buildDocumentWithEnrichment: enrichment completed", metadata: [
+                "source_id": sourceId,
+                "image_enrichments_count": String(enrichedDocument.imageEnrichments.count),
+                "has_document_enrichment": enrichedDocument.documentEnrichment != nil
+            ])
             
             // If submitter is available (e.g., debug mode), submit directly and return nil to skip HTTP posting
             if let submitter = submitter {
@@ -2408,9 +2742,16 @@ public actor IMessageHandler {
             }
             
             // Merge enrichment data into dictionary document for HTTP posting
-            return mergeEnrichmentIntoDocument(baseDocument, enrichedDocument)
+            let mergedDocument = mergeEnrichmentIntoDocument(baseDocument, enrichedDocument)
+            let contentText = (mergedDocument["content"] as? [String: Any])?["data"] as? String ?? ""
+            logger.debug("buildDocumentWithEnrichment: enrichment merged into document", metadata: [
+                "source_id": sourceId,
+                "has_captions": String(contentText.contains("[Image:"))
+            ])
+            return mergedDocument
         }
         
+        logger.debug("buildDocumentWithEnrichment: no orchestrator available", metadata: ["source_id": sourceId])
         // Fallback to base document if no orchestrator
         return baseDocument
     }
@@ -2430,31 +2771,70 @@ public actor IMessageHandler {
         let contentTimestamp = ISO8601DateFormatter().date(from: contentTimestampStr) ?? Date()
         
         // Extract images from attachments (for enrichment)
-        // The filename in AttachmentData is actually the file path (enrichImageAttachment expands it)
+        // Attachments are stored in metadata.attachments in the new schema
         var images: [ImageAttachment] = []
-        if let attachments = baseDocument["attachments"] as? [[String: Any]] {
+        let metadata = baseDocument["metadata"] as? [String: Any] ?? [:]
+        if let attachments = metadata["attachments"] as? [[String: Any]] {
+            logger.info("convertToCollectorDocument: found attachments in metadata", metadata: [
+                "attachment_count": String(attachments.count),
+                "source_id": baseDocument["source_id"] as? String ?? "unknown"
+            ])
             for attachment in attachments {
+                let filename = attachment["source_ref"] as? [String: Any] ?? [:]
+                let path = filename["path"] as? String ?? ""
+                let mimeType = attachment["mime_type"] as? String
+                logger.debug("Processing attachment from metadata", metadata: [
+                    "path": path,
+                    "mime_type": mimeType ?? "nil",
+                    "is_image": String(isImageAttachment(filename: path, mimeType: mimeType))
+                ])
+                
                 // Check if this is an image attachment
-                if isImageAttachment(filename: attachment["filename"] as? String ?? "", mimeType: attachment["mime_type"] as? String) {
-                    // Use filename as path (it's actually the path in iMessage database)
-                    if let filename = attachment["filename"] as? String, !filename.isEmpty {
-                        // Expand tilde in path (same as enrichImageAttachment does)
-                        let expandedPath = NSString(string: filename).expandingTildeInPath
+                if isImageAttachment(filename: path, mimeType: mimeType) {
+                    // Use path from source_ref (it's the file path in iMessage database)
+                    if !path.isEmpty {
+                        // Expand tilde in path
+                        let expandedPath = NSString(string: path).expandingTildeInPath
+                        let fileExists = FileManager.default.fileExists(atPath: expandedPath)
+                        
+                        logger.debug("Image attachment check", metadata: [
+                            "path": path,
+                            "expanded_path": expandedPath,
+                            "file_exists": String(fileExists)
+                        ])
                         
                         // Verify file exists before adding to images
-                        if FileManager.default.fileExists(atPath: expandedPath) {
+                        if fileExists {
                             let imageAttachment = ImageAttachment(
-                                hash: attachment["guid"] as? String ?? UUID().uuidString,
-                                mimeType: attachment["mime_type"] as? String ?? "image/jpeg",
+                                hash: (filename["message_attachment_id"] as? String) ?? UUID().uuidString,
+                                mimeType: mimeType ?? "image/jpeg",
                                 temporaryPath: expandedPath,
                                 temporaryData: nil
                             )
                             images.append(imageAttachment)
+                            logger.info("Added image to enrichment", metadata: [
+                                "path": path,
+                                "hash": imageAttachment.hash
+                            ])
+                        } else {
+                            logger.warning("Image file not found", metadata: [
+                                "path": path,
+                                "expanded_path": expandedPath
+                            ])
                         }
                     }
                 }
             }
+        } else {
+            logger.debug("convertToCollectorDocument: no attachments found in metadata", metadata: [
+                "source_id": baseDocument["source_id"] as? String ?? "unknown"
+            ])
         }
+        
+        logger.debug("convertToCollectorDocument completed", metadata: [
+            "source_id": baseDocument["source_id"] as? String ?? "unknown",
+            "image_count": String(images.count)
+        ])
         
         return CollectorDocument(
             content: content,
@@ -2497,14 +2877,29 @@ public actor IMessageHandler {
         }
     }
     
+    /// Sync submission counts from submitter if available
+    /// The submitter tracks counts internally and may flush automatically, so we need to sync periodically
+    private func syncSubmitterStats(submittedCount: inout Int, errorCount: inout Int) async {
+        if let submitter = submitter {
+            let stats = await submitter.getStats()
+            submittedCount = stats.submittedCount
+            errorCount = stats.errorCount
+        }
+    }
+    
     /// Process completed enrichments and add them to batches
+    /// Returns: (processedCount, enrichedCount) - number of documents processed and newly enriched
     private func processEnrichmentCompletions(
         pendingEnrichments: inout [String: ([String: Any], Date, CollectorDocument)],
         currentBatch: inout [[String: Any]],
         currentBatchTimestamps: inout [Date],
         allDocuments: inout [[String: Any]],
-        stats: inout CollectorStats
-    ) {
+        stats: inout CollectorStats,
+        submittedCount: inout Int,
+        successfulSubmissionTimestamps: inout [Date]
+    ) async -> (Int, Int) {
+        var processedCount = 0
+        var newlyEnriched = 0
         // Find completions that match pending enrichments
         let completedIds = Set(enrichmentCompletions.keys).intersection(Set(pendingEnrichments.keys))
         
@@ -2512,6 +2907,34 @@ public actor IMessageHandler {
             guard let (baseDocument, messageDate, _) = pendingEnrichments[documentId],
                   let completion = enrichmentCompletions[documentId] else {
                 continue
+            }
+            
+            // If submitter is available and enrichment succeeded, submit via submitter
+            // This matches the behavior in buildDocumentWithEnrichment
+            // The submitter tracks counts internally - we'll get stats when flushing/finishing
+            if let submitter = submitter, case .success(let enrichedDocument) = completion {
+                do {
+                    _ = try await submitter.submit(enrichedDocument)
+                    // Track timestamp for successful submission via submitter
+                    // This ensures fence updates include all successfully submitted documents,
+                    // not just those in the final batch flush
+                    successfulSubmissionTimestamps.append(messageDate)
+                    logger.debug("Submitted document via submitter from enrichment queue", metadata: [
+                        "document_id": documentId,
+                        "source_id": enrichedDocument.base.externalId
+                    ])
+                    // Document was submitted via submitter, but we still need to add it to the batch
+                    // for progress tracking and fence updates. The HTTP posting will be skipped
+                    // if documents were already submitted via submitter (handled in postDocumentsToGateway).
+                    // Counts are tracked by the submitter and retrieved via getStats() or finish().
+                } catch {
+                    logger.error("Failed to submit document via submitter from enrichment queue", metadata: [
+                        "document_id": documentId,
+                        "source_id": enrichedDocument.base.externalId,
+                        "error": error.localizedDescription
+                    ])
+                    // Fall through to add to batch for HTTP posting as fallback
+                }
             }
             
             let documentToAppend: [String: Any]
@@ -2532,11 +2955,18 @@ public actor IMessageHandler {
             pendingEnrichments.removeValue(forKey: documentId)
             enrichmentCompletions.removeValue(forKey: documentId)
             
+            processedCount += 1
+            if completion.isSuccess {
+                newlyEnriched += 1
+            }
+            
             logger.debug("Processed completed enrichment", metadata: [
                 "document_id": documentId,
                 "completion_state": completion.isSuccess ? "success" : "failure"
             ])
         }
+        
+        return (processedCount, newlyEnriched)
     }
     
     /// Perform synchronous enrichment when the shared queue is unavailable
@@ -2708,6 +3138,16 @@ public actor IMessageHandler {
                 structuredAttachment["source_ref"] = sourceRef
             }
             
+            // Add id/filename/path for image attachments to support token replacement later
+            if let kind = structuredAttachment["kind"] as? String, kind == "image" {
+                if let path = sourceRef["path"] as? String, !path.isEmpty {
+                    let basename = (path as NSString).lastPathComponent
+                    structuredAttachment["id"] = path   // use canonical file path as id
+                    structuredAttachment["filename"] = basename
+                    structuredAttachment["path"] = path
+                }
+            }
+            
             structuredAttachments.append(structuredAttachment)
         }
         
@@ -2739,6 +3179,56 @@ public actor IMessageHandler {
         // Add attachments to metadata if present
         if !structuredAttachments.isEmpty {
             metadata["attachments"] = structuredAttachments
+        }
+        
+        // Replace inline object replacement characters (U+FFFC) with image tokens {IMG:<id>}
+        // Preserve positional context: one token per inline image occurrence, extras appended at end
+        // Also handle image-only messages (no text) by adding image tokens
+        do {
+            let imageIds: [String] = structuredAttachments.compactMap { att in
+                guard let kind = att["kind"] as? String, kind == "image" else { return nil }
+                return att["id"] as? String
+            }
+            
+            if !imageIds.isEmpty {
+                let objChar = "\u{FFFC}"
+                if messageText.contains(objChar) {
+                    // Replace object replacement chars with image tokens
+                    let parts = messageText.components(separatedBy: objChar)
+                    var rebuilt = ""
+                    let insertCount = min(max(parts.count - 1, 0), imageIds.count)
+                    for i in 0..<parts.count {
+                        rebuilt.append(parts[i])
+                        if i < insertCount {
+                            let token = "{IMG:\(imageIds[i])}"
+                            rebuilt.append(token)
+                        }
+                    }
+                    // If there are more images than object replacement chars, append tokens at end
+                    if imageIds.count > insertCount {
+                        let remaining = imageIds[insertCount...]
+                        let tailTokens = remaining.map { "{IMG:\($0)}" }.joined(separator: "\n")
+                        if !tailTokens.isEmpty {
+                            if rebuilt.isEmpty {
+                                rebuilt = tailTokens
+                            } else {
+                                rebuilt.append("\n")
+                                rebuilt.append(tailTokens)
+                            }
+                        }
+                    }
+                    messageText = rebuilt
+                } else if messageText.isEmpty || messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // Image-only message: add image tokens to ensure document has text content
+                    // This ensures enrichment can add placeholders and gateway won't reject empty text
+                    let imageTokens = imageIds.map { "{IMG:\($0)}" }.joined(separator: "\n")
+                    messageText = imageTokens
+                    logger.debug("Added image tokens to image-only message", metadata: [
+                        "message_guid": message.guid,
+                        "image_count": String(imageIds.count)
+                    ])
+                }
+            }
         }
         
         // Build document
@@ -3570,19 +4060,75 @@ public actor IMessageHandler {
     }
     
     /// Post a batch of documents to the gateway, preferring the batch endpoint when enabled.
+    private struct GatewaySubmissionResult {
+        let successCount: Int
+        let errorCount: Int
+    }
+    
+    private func postDocumentsToGatewayWithErrors(_ documents: [[String: Any]], batchMode: Bool) async throws -> GatewaySubmissionResult {
+        guard !documents.isEmpty else { return GatewaySubmissionResult(successCount: 0, errorCount: 0) }
+        
+        // Use batch endpoint if batch mode is enabled
+        if batchMode {
+            if let batchCount = try await postDocumentsToGatewayBatch(documents) {
+                // Batch endpoint succeeded - gateway accepted all documents
+                // postDocumentsToGatewayBatch returns the count of documents if HTTP request succeeds (200/202/207)
+                // which means all documents were accepted by the gateway
+                return GatewaySubmissionResult(successCount: batchCount, errorCount: 0)
+            } else {
+                // Batch endpoint unavailable - fall through to individual submission
+                // Return result from individual submissions below
+            }
+        }
+        
+        // Fallback to individual submissions
+        var successCount = 0
+        var errorCount = 0
+        
+        for document in documents {
+            do {
+                try await postDocumentToGateway(document)
+                successCount += 1
+            } catch {
+                errorCount += 1
+                logger.warning("Failed to post document to gateway", metadata: [
+                    "error": error.localizedDescription,
+                    "document_id": (document["id"] as? String) ?? "unknown"
+                ])
+            }
+        }
+        
+        return GatewaySubmissionResult(successCount: successCount, errorCount: errorCount)
+    }
+    
     private func postDocumentsToGateway(_ documents: [[String: Any]], batchMode: Bool) async throws -> Int {
         guard !documents.isEmpty else { return 0 }
-
-        if batchMode {
-            if let batchSuccessCount = try await postDocumentsToGatewayBatch(documents) {
-                return batchSuccessCount
-            }
-            logger.debug("Falling back to single-document ingest for batch", metadata: [
+        
+        // If a submitter is available, documents should have been submitted via the submitter
+        // during enrichment. However, documents processed via enrichDocumentSynchronously
+        // may not have been submitted. Check if submitter was used and if documents were actually submitted.
+        // For now, if a submitter exists, we assume documents were submitted via it (they should be
+        // submitted in buildDocumentWithEnrichment). If no submitter exists, we need to post via HTTP.
+        if submitter != nil {
+            // Documents should have been submitted via submitter during enrichment
+            // But to be safe, we'll still post them via HTTP as a fallback
+            // This ensures documents are submitted even if submitter submission failed silently
+            logger.debug("Submitter available, but posting via HTTP as well to ensure submission", metadata: [
                 "batch_size": String(documents.count)
             ])
         }
-
-        return try await postDocumentsToGatewayIndividually(documents)
+        
+        // Actually post documents to gateway
+        if batchMode {
+            if let batchCount = try await postDocumentsToGatewayBatch(documents) {
+                return batchCount
+            } else {
+                // Fallback to individual posting if batch endpoint unavailable
+                return try await postDocumentsToGatewayIndividually(documents)
+            }
+        } else {
+            return try await postDocumentsToGatewayIndividually(documents)
+        }
     }
 
     /// Post documents individually to the legacy ingest endpoint.

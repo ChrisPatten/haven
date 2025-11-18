@@ -25,26 +25,40 @@ public struct JobProgress: Codable {
     public var matched: Int = 0
     public var submitted: Int = 0
     public var skipped: Int = 0
+    public var errors: Int = 0  // Number of errors encountered
     public var total: Int?  // Total number of items to process (for progress calculation)
     public var currentPhase: String?  // e.g., "Scanning messages", "Submitting documents"
     public var phaseProgress: Double?  // 0.0-1.0 for current phase
+    
+    // Granular state tracking for iMessage collector
+    public var found: Int = 0  // Found in initial query
+    public var queued: Int = 0  // Extracted from chat.db, queued for enrichment
+    public var enriched: Int = 0  // Enrichment complete
     
     public init(
         scanned: Int = 0,
         matched: Int = 0,
         submitted: Int = 0,
         skipped: Int = 0,
+        errors: Int = 0,
         total: Int? = nil,
         currentPhase: String? = nil,
-        phaseProgress: Double? = nil
+        phaseProgress: Double? = nil,
+        found: Int = 0,
+        queued: Int = 0,
+        enriched: Int = 0
     ) {
         self.scanned = scanned
         self.matched = matched
         self.submitted = submitted
         self.skipped = skipped
+        self.errors = errors
         self.total = total
         self.currentPhase = currentPhase
         self.phaseProgress = phaseProgress
+        self.found = found
+        self.queued = queued
+        self.enriched = enriched
     }
     
     /// Calculate overall progress as a percentage (0.0-1.0)

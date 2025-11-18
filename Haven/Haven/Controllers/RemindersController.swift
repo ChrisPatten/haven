@@ -40,7 +40,7 @@ public actor RemindersController: CollectorController {
                 config: config.gateway,
                 authToken: config.service.auth.secret
             )
-            docSubmitter = BatchDocumentSubmitter(gatewayClient: submissionClient)
+            docSubmitter = BatchDocumentSubmitter(gatewayClient: submissionClient, batchSize: config.gateway.batchSize)
         }
         self.handler = RemindersHandler(config: config, gatewayClient: gatewayClient, submitter: docSubmitter)
     }

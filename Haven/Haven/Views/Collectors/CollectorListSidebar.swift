@@ -11,6 +11,8 @@ struct CollectorListSidebar: View {
     @Binding var collectors: [CollectorInfo]
     @Binding var selectedCollectorId: String?
     let isCollectorRunning: (String) -> Bool
+    let getJobProgress: (String) -> JobProgress?
+    let getLastRunStats: (String) -> CollectorStateResponse?
     let onRunAll: () -> Void
     let isLoading: Bool
     
@@ -23,6 +25,8 @@ struct CollectorListSidebar: View {
                             CollectorSidebarRow(
                                 collector: collector,
                                 isRunning: isCollectorRunning(collector.id),
+                                jobProgress: getJobProgress(collector.id),
+                                lastRunStats: getLastRunStats(collector.id),
                                 isSelected: selectedCollectorId == collector.id
                             )
                             .tag(collector.id)
@@ -99,6 +103,8 @@ struct CollectorListSidebar: View {
 struct CollectorSidebarRow: View {
     let collector: CollectorInfo
     let isRunning: Bool
+    let jobProgress: JobProgress?
+    let lastRunStats: CollectorStateResponse?
     let isSelected: Bool
     
     var body: some View {
@@ -125,11 +131,32 @@ struct CollectorSidebarRow: View {
                     .fontWeight(.medium)
                     .lineLimit(1)
                 
-                if let lastRunTime = collector.lastRunTime {
-                    Text(relativeTimeString(from: lastRunTime))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                if isRunning, let progress = jobProgress {
+                    // Show progress information when running
+                    HStack(spacing: 4) {
+                        Text(progress.currentPhase ?? "Processing...")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+
+                        if let total = progress.total, total > 0 {
+                            Text("\(progress.submitted)/\(total)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                } else if let lastRunTime = collector.lastRunTime {
+                    HStack(spacing: 4) {
+                        Text(relativeTimeString(from: lastRunTime))
+                        if let stats = lastRunStats, let submitted = getIntValue(from: stats.lastRunStats, key: "submitted"), submitted > 0 {
+                            Text("• \(submitted) submitted")
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 } else {
                     Text("Never run")
                         .font(.caption2)
@@ -175,6 +202,21 @@ struct CollectorSidebarRow: View {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: date, relativeTo: Date())
+    }
+    
+    private func getIntValue(from dict: [String: AnyCodable]?, key: String) -> Int? {
+        guard let dict = dict,
+              let value = dict[key] else {
+            return nil
+        }
+        switch value {
+        case .int(let val):
+            return val
+        case .string(let str):
+            return Int(str)
+        default:
+            return nil
+        }
     }
 }
 

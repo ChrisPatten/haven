@@ -23,9 +23,15 @@ struct CollectorStatusView: View {
                         .font(.headline)
                     
                     if let lastRunTime = collector.lastRunTime {
-                        Text("Last run: \(relativeTimeString(from: lastRunTime))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 4) {
+                            Text("Last run: \(relativeTimeString(from: lastRunTime))")
+                            if let stats = lastRunStats, let submitted = getIntValue(from: stats.lastRunStats, key: "submitted"), submitted > 0 {
+                                Text("• \(submitted) submitted")
+                                    .foregroundStyle(.green)
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     } else {
                         Text("Never run")
                             .font(.caption)

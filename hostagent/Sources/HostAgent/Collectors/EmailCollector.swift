@@ -664,6 +664,24 @@ public actor EmailCollector {
         )
     }
     
+    // Overload to satisfy EmailCollecting protocol without sourceAccountId parameter
+    public func buildDocumentPayload(
+        email: EmailMessage,
+        intent: IntentClassification?,
+        relevance: Double?,
+        sourceType overrideSourceType: String?,
+        sourceIdPrefix: String?
+    ) async throws -> EmailDocumentPayload {
+        return try await buildDocumentPayload(
+            email: email,
+            intent: intent,
+            relevance: relevance,
+            sourceType: overrideSourceType,
+            sourceIdPrefix: sourceIdPrefix,
+            sourceAccountId: nil
+        )
+    }
+    
     public func submitEmailDocument(_ payload: EmailDocumentPayload) async throws -> GatewaySubmissionResponse {
         let textHash: String
         if !payload.metadata.contentHash.isEmpty {

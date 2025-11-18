@@ -10,75 +10,167 @@ public protocol DocumentSubmitter: Sendable {
     
     /// Submit multiple documents (accepts whatever batch size is passed in)
     func submitBatch(_ documents: [EnrichedDocument]) async throws -> [SubmissionResult]
+    
+    /// Flush any buffered documents immediately
+    /// Returns submission statistics (submitted count, error count)
+    func flush() async throws -> SubmissionStats
+    
+    /// Finish: flush remaining buffered documents and finalize
+    /// Returns submission statistics (submitted count, error count)
+    func finish() async throws -> SubmissionStats
+    
+    /// Get current submission statistics without flushing
+    func getStats() async -> SubmissionStats
+    
+    /// Reset submission statistics for a new run
+    func reset() async
 }
 
 /// Batch document submitter that handles batching and retry logic
 public actor BatchDocumentSubmitter: DocumentSubmitter {
     private let gatewayClient: GatewaySubmissionClient
     private let logger = HavenLogger(category: "document-submitter")
+    private let batchSize: Int
+    private var buffer: [EnrichedDocument] = []
+    private var submittedCount: Int = 0
+    private var errorCount: Int = 0
     
-    public init(gatewayClient: GatewaySubmissionClient) {
+    public init(gatewayClient: GatewaySubmissionClient, batchSize: Int = 200) {
         self.gatewayClient = gatewayClient
+        self.batchSize = max(1, batchSize)
     }
     
     public func submit(_ document: EnrichedDocument) async throws -> SubmissionResult {
-        // Single document submission - wrap in array and submit
-        let results = try await submitBatch([document])
-        return results.first ?? SubmissionResult.failure(error: "No result")
+        buffer.append(document)
+        try await flushIfNeeded()
+        // Return a placeholder success; concrete results are logged during flush
+        return SubmissionResult(success: true, statusCode: 202, submission: nil, error: nil, retryable: false)
     }
     
     public func submitBatch(_ documents: [EnrichedDocument]) async throws -> [SubmissionResult] {
         guard !documents.isEmpty else {
             return []
         }
-        
-        // Convert EnrichedDocument to EmailDocumentPayload for submission
-        // Note: This is a temporary conversion layer - in the future, we may want
-        // a more generic payload format that supports all document types
+        buffer.append(contentsOf: documents)
+        try await flushIfNeeded()
+        return documents.map { _ in SubmissionResult(success: true, statusCode: 202, submission: nil, error: nil, retryable: false) }
+    }
+    
+    /// Flush buffered documents in chunks up to batchSize
+    public func flush() async throws -> SubmissionStats {
+        try await flushAllBuffered()
+        let stats = SubmissionStats(submittedCount: submittedCount, errorCount: errorCount)
+        return stats
+    }
+    
+    /// Finish: flush any remaining buffered documents
+    public func finish() async throws -> SubmissionStats {
+        try await flushAllBuffered()
+        let stats = SubmissionStats(submittedCount: submittedCount, errorCount: errorCount)
+        return stats
+    }
+    
+    /// Get current submission statistics without flushing
+    public func getStats() async -> SubmissionStats {
+        return SubmissionStats(submittedCount: submittedCount, errorCount: errorCount)
+    }
+    
+    /// Reset submission statistics for a new run
+    public func reset() async {
+        submittedCount = 0
+        errorCount = 0
+        buffer.removeAll()
+        logger.debug("Reset submitter statistics")
+    }
+    
+    // MARK: - Internal helpers
+    private func flushIfNeeded() async throws {
+        while buffer.count >= batchSize {
+            let chunk = Array(buffer.prefix(batchSize))
+            try await submitChunk(chunk)
+            buffer.removeFirst(min(batchSize, buffer.count))
+        }
+    }
+    
+    private func flushAllBuffered() async throws {
+        while !buffer.isEmpty {
+            let take = min(batchSize, buffer.count)
+            let chunk = Array(buffer.prefix(take))
+            try await submitChunk(chunk)
+            buffer.removeFirst(take)
+        }
+    }
+    
+    private func submitChunk(_ documents: [EnrichedDocument]) async throws {
         var payloads: [EmailDocumentPayload] = []
-        
+        var conversionErrors = 0
         for document in documents {
             do {
                 let payload = try convertToEmailDocumentPayload(document)
                 payloads.append(payload)
             } catch {
+                conversionErrors += 1
+                errorCount += 1
                 logger.error("Failed to convert document to payload", metadata: [
                     "source_type": document.base.sourceType,
                     "source_id": document.base.externalId,
                     "error": error.localizedDescription
                 ])
-                // Continue with other documents even if one fails conversion
             }
         }
-        
         guard !payloads.isEmpty else {
-            return documents.map { _ in
-                SubmissionResult.failure(error: "Failed to convert document to payload")
-            }
+            // All documents failed conversion - count as errors
+            errorCount += documents.count - conversionErrors
+            return
         }
         
-        // Submit batch to gateway
         do {
             if let batchResults = try await gatewayClient.submitDocumentsBatch(payloads: payloads) {
-                // Convert GatewayBatchSubmissionResult to SubmissionResult
-                return batchResults.map { batchResult in
-                    if let submission = batchResult.submission {
-                        return SubmissionResult.success(submission: submission)
+                // Count successful and failed submissions from batch results
+                var chunkSubmitted = 0
+                var chunkErrors = 0
+                var errorDetails: [String: Int] = [:]  // Track error codes
+                
+                for result in batchResults {
+                    if result.submission != nil {
+                        chunkSubmitted += 1
                     } else {
-                        return SubmissionResult.failure(
-                            error: batchResult.errorMessage ?? "Unknown error",
-                            statusCode: batchResult.statusCode,
-                            retryable: batchResult.retryable
-                        )
+                        chunkErrors += 1
+                        // Log error details for debugging
+                        let errorCode = result.errorCode ?? "UNKNOWN"
+                        errorDetails[errorCode, default: 0] += 1
+                        if let errorMessage = result.errorMessage {
+                            logger.debug("document_submission_failed", metadata: [
+                                "error_code": errorCode,
+                                "error_message": errorMessage,
+                                "retryable": String(result.retryable)
+                            ])
+                        }
                     }
                 }
+                submittedCount += chunkSubmitted
+                errorCount += chunkErrors + conversionErrors
+                
+                var logMetadata: [String: String] = [
+                    "batch_size": String(payloads.count),
+                    "posted_to_gateway": String(chunkSubmitted),
+                    "errors": String(chunkErrors)
+                ]
+                
+                // Include error breakdown if there are errors
+                if !errorDetails.isEmpty {
+                    let errorBreakdown = errorDetails.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+                    logMetadata["error_breakdown"] = errorBreakdown
+                }
+                
+                logger.info("gateway_batch_flush", metadata: logMetadata)
             } else {
-                // Batch endpoint unavailable, fall back to individual submissions
-                logger.debug("Gateway batch endpoint unavailable; falling back to single submissions", metadata: [
+                logger.debug("batch_endpoint_unavailable_fallback", metadata: [
                     "request_count": "\(payloads.count)"
                 ])
-                
-                var results: [SubmissionResult] = []
+                // Fallback to individual submissions
+                var chunkSubmitted = 0
+                var chunkErrors = 0
                 for payload in payloads {
                     do {
                         let textHash = payload.metadata.contentHash
@@ -87,22 +179,25 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
                             externalId: payload.sourceId,
                             textHash: textHash
                         )
-                        let submission = try await gatewayClient.submitDocument(payload: payload, idempotencyKey: idempotencyKey)
-                        results.append(SubmissionResult.success(submission: submission))
+                        _ = try await gatewayClient.submitDocument(payload: payload, idempotencyKey: idempotencyKey)
+                        chunkSubmitted += 1
                     } catch {
-                        results.append(SubmissionResult.failure(error: error.localizedDescription))
+                        chunkErrors += 1
+                        logger.error("single_submission_failed", metadata: ["error": error.localizedDescription])
                     }
                 }
-                return results
+                submittedCount += chunkSubmitted
+                errorCount += chunkErrors + conversionErrors
             }
         } catch {
-            logger.error("Batch submission failed", metadata: [
-                "error": error.localizedDescription
+            // Entire batch failed - count all as errors
+            errorCount += payloads.count + conversionErrors
+            logger.error("batch_submission_failed", metadata: [
+                "error": error.localizedDescription,
+                "batch_size": String(payloads.count)
             ])
-            // Return failure for all documents
-            return documents.map { _ in
-                SubmissionResult.failure(error: error.localizedDescription)
-            }
+            // Re-throw the error so callers can handle it
+            throw error
         }
     }
     

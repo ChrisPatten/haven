@@ -86,6 +86,16 @@ class ChunkDocument(BaseModel):
     created_at: datetime
 
 
+class DocumentFile(BaseModel):
+    doc_id: UUID
+    file_id: UUID
+    role: str
+    attachment_index: Optional[int] = None
+    filename: Optional[str] = None
+    caption: Optional[str] = None
+    created_at: datetime
+
+
 class IngestSubmission(BaseModel):
     submission_id: UUID
     idempotency_key: str

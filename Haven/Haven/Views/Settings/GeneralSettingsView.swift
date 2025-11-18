@@ -65,6 +65,14 @@ struct GeneralSettingsView: View {
                 }
                 
                 HStack {
+                    Text("Batch Size:")
+                        .frame(width: 120, alignment: .trailing)
+                    TextField("", value: gatewayBatchSizeBinding, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                }
+                
+                HStack {
                     Text("Auth Header:")
                         .frame(width: 120, alignment: .trailing)
                     TextField("", text: authHeaderBinding)
@@ -218,6 +226,17 @@ struct GeneralSettingsView: View {
             set: { newValue in
                 viewModel.updateSystemConfig { config in
                     config.gateway.timeoutMs = newValue
+                }
+            }
+        )
+    }
+    
+    private var gatewayBatchSizeBinding: Binding<Int> {
+        Binding(
+            get: { viewModel.systemConfig?.gateway.batchSize ?? 200 },
+            set: { newValue in
+                viewModel.updateSystemConfig { config in
+                    config.gateway.batchSize = max(1, newValue)
                 }
             }
         )

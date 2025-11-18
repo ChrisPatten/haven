@@ -108,24 +108,37 @@ public struct SystemGatewayConfig: Codable, Equatable {
     public var ingestPath: String
     public var ingestFilePath: String
     public var timeoutMs: Int
+    public var batchSize: Int
     
     enum CodingKeys: String, CodingKey {
         case baseUrl = "base_url"
         case ingestPath = "ingest_path"
         case ingestFilePath = "ingest_file_path"
         case timeoutMs = "timeout_ms"
+        case batchSize = "batch_size"
     }
     
     public init(
         baseUrl: String = "http://localhost:8085",
         ingestPath: String = "/v1/ingest",
         ingestFilePath: String = "/v1/ingest/file",
-        timeoutMs: Int = 30000
+        timeoutMs: Int = 30000,
+        batchSize: Int = 200
     ) {
         self.baseUrl = baseUrl
         self.ingestPath = ingestPath
         self.ingestFilePath = ingestFilePath
         self.timeoutMs = timeoutMs
+        self.batchSize = max(1, batchSize)
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.baseUrl = try container.decodeIfPresent(String.self, forKey: .baseUrl) ?? "http://localhost:8085"
+        self.ingestPath = try container.decodeIfPresent(String.self, forKey: .ingestPath) ?? "/v1/ingest"
+        self.ingestFilePath = try container.decodeIfPresent(String.self, forKey: .ingestFilePath) ?? "/v1/ingest/file"
+        self.timeoutMs = try container.decodeIfPresent(Int.self, forKey: .timeoutMs) ?? 30000
+        self.batchSize = max(1, (try container.decodeIfPresent(Int.self, forKey: .batchSize) ?? 200))
     }
 }
 

@@ -438,6 +438,7 @@ def build_intent_prompt(request: LLMIntentRequest) -> str:
     """Build the intent classification prompt for LLM providers."""
     
     taxonomy_info = """Available intents:
+- commitment.create: Capture a commitment or promise that the user offered or agreed to. Slots: what (string, required), due_date (datetime, optional), for_whom (person, optional), source_ref (string, required).
 - task.create: Create a new task or to-do item that the user wants to track. Slots: what (string, required), due_date (datetime, optional), assignee (person, optional), source_ref (string, required).
 - schedule.create: Schedule a calendar event, meeting, appointment, block, or anything else that needs to be added to the calendar. Slots: start_dt (datetime, required), end_dt (datetime, optional), location (location, optional), participants (array[person], optional), title (string, optional), source_ref (string, required).
 - reminder.create: Create a reminder or follow-up notification for the user. Slots: what (string, required), remind_at (datetime, optional), person (person, optional), source_ref (string, required)."""
@@ -612,7 +613,7 @@ def run_batch(
     max_threads_per_batch = config.get('max_threads_per_batch', 15)
     user_name = config.get('user_name')  # Display name for the user in prompts
     exclude_thread_ids = set(config.get('exclude_thread_ids', []))  # Convert to set for O(1) lookup
-    allowed_intents = config.get('allowed_intents', ["task.create", "schedule.create", "reminder.create", "contact.update", "gift.occasion"])
+    allowed_intents = config.get('allowed_intents', ["commitment.create", "task.create", "schedule.create", "reminder.create", "contact.update", "gift.occasion"])
     action_lexicon = set(config.get('action_lexicon', ["schedule", "book", "reserve", "remind", "follow up", "confirm", "call", "meet", "pay", "due", "by ", "at ", "tomorrow", "next ", "pickup", "pick up", "drop off"]))
     
     # Initialize metrics
@@ -972,7 +973,7 @@ def main():
         'ollama_url': 'http://localhost:11434',
         'user_name': None,  # Display name for the user in prompts (e.g., 'Chris')
         'exclude_thread_ids': [],  # List of thread IDs to exclude from processing
-        'allowed_intents': ["task.create", "schedule.create", "reminder.create", "contact.update", "gift.occasion"],
+        'allowed_intents': ["commitment.create", "task.create", "schedule.create", "reminder.create", "contact.update", "gift.occasion"],
         'action_lexicon': ["schedule", "book", "reserve", "remind", "follow up", "confirm", "call", "meet", "pay", "due", "by ", "at ", "tomorrow", "next ", "pickup", "pick up", "drop off"]
     }
     
@@ -1035,6 +1036,9 @@ def main():
     if args.config_file and Path(args.config_file).exists():
         with open(args.config_file, 'r') as f:
             file_config = yaml.safe_load(f) or {}
+            # Force action_lexicon values to be strings if present
+            if 'action_lexicon' in file_config and isinstance(file_config['action_lexicon'], list):
+                file_config['action_lexicon'] = [str(item) for item in file_config['action_lexicon']]
             config.update(file_config)
             print(f"Loaded configuration from: {args.config_file}")
             

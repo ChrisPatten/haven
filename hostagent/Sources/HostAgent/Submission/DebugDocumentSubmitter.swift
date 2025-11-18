@@ -8,6 +8,8 @@ public actor DebugDocumentSubmitter: DocumentSubmitter {
     private let fileWriter: DebugFileWriter
     private let logger = HavenLogger(category: "debug-document-submitter")
     private let encoder: JSONEncoder
+    private var submittedCount: Int = 0
+    private var errorCount: Int = 0
     
     public init(outputPath: String) {
         // Create shared debug file writer
@@ -50,6 +52,9 @@ public actor DebugDocumentSubmitter: DocumentSubmitter {
             }
         }
         
+        let conversionErrorCount = documents.count - payloads.count
+        errorCount += conversionErrorCount
+        
         guard !payloads.isEmpty else {
             return documents.map { _ in
                 SubmissionResult.failure(error: "Failed to convert document to payload")
@@ -59,11 +64,13 @@ public actor DebugDocumentSubmitter: DocumentSubmitter {
         // Write each payload as a JSON line (JSONL format) using shared file writer
         do {
             var writtenCount = 0
+            var writeErrors = 0
             for payload in payloads {
                 do {
                     try await fileWriter.writeJSONLine(payload)
                     writtenCount += 1
                 } catch {
+                    writeErrors += 1
                     logger.warning("Failed to write document to debug file", metadata: [
                         "source_id": payload.sourceId,
                         "error": error.localizedDescription
@@ -71,34 +78,67 @@ public actor DebugDocumentSubmitter: DocumentSubmitter {
                 }
             }
             
+            submittedCount += writtenCount
+            errorCount += writeErrors
+            
             logger.info("Wrote \(writtenCount) documents to debug file", metadata: [
                 "written": String(writtenCount),
-                "total": String(payloads.count)
+                "total": String(payloads.count),
+                "errors": String(writeErrors)
             ])
             
-            // Return success results (simulating successful submission)
-            return payloads.map { _ in
-                // Create a mock submission response
-                let mockSubmission = GatewaySubmissionResponse(
-                    submissionId: UUID().uuidString,
-                    docId: UUID().uuidString,
-                    externalId: UUID().uuidString,
-                    status: "accepted",
-                    threadId: nil,
-                    fileIds: [],
-                    duplicate: false,
-                    totalChunks: 0
-                )
-                return SubmissionResult.success(submission: mockSubmission)
+            // Return success results for successfully written documents, failures for errors
+            var results: [SubmissionResult] = []
+            for (index, payload) in payloads.enumerated() {
+                if index < writtenCount {
+                    // Create a mock submission response for successfully written documents
+                    let mockSubmission = GatewaySubmissionResponse(
+                        submissionId: UUID().uuidString,
+                        docId: UUID().uuidString,
+                        externalId: payload.sourceId,
+                        status: "accepted",
+                        threadId: nil,
+                        duplicate: false,
+                        totalChunks: 0
+                    )
+                    results.append(SubmissionResult.success(submission: mockSubmission))
+                } else {
+                    results.append(SubmissionResult.failure(error: "Failed to write to debug file"))
+                }
             }
+            return results
         } catch {
+            // All failed to write
+            errorCount += payloads.count
             logger.error("Failed to write documents to debug file", metadata: [
                 "error": error.localizedDescription
             ])
-            return documents.map { _ in
+            return payloads.map { _ in
                 SubmissionResult.failure(error: "Failed to write to debug file: \(error.localizedDescription)")
             }
         }
+    }
+    
+    public func flush() async throws -> SubmissionStats {
+        // No buffering; nothing to do
+        return SubmissionStats(submittedCount: submittedCount, errorCount: errorCount)
+    }
+    
+    public func finish() async throws -> SubmissionStats {
+        // No buffering; nothing to do
+        return SubmissionStats(submittedCount: submittedCount, errorCount: errorCount)
+    }
+    
+    /// Get current submission statistics without flushing
+    public func getStats() async -> SubmissionStats {
+        return SubmissionStats(submittedCount: submittedCount, errorCount: errorCount)
+    }
+    
+    /// Reset submission statistics for a new run
+    public func reset() async {
+        submittedCount = 0
+        errorCount = 0
+        logger.debug("Reset submitter statistics")
     }
     
     /// Convert EnrichedDocument to EmailDocumentPayload

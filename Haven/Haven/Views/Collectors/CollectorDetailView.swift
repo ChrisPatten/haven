@@ -131,36 +131,160 @@ struct CollectorDetailView: View {
                 .tint(.red)
                 
                 // Progress bar section
-                if let progress = jobProgress, progress.total != nil && progress.total! > 0 {
-                    VStack(alignment: .leading, spacing: 8) {
-                        // Progress bar
-                        ProgressView(value: progress.overallProgress ?? 0.0)
-                            .progressViewStyle(.linear)
+                if let progress = jobProgress {
+                    VStack(alignment: .leading, spacing: 12) {
+                        // Progress bar (only show if we have total)
+                        if let total = progress.total, total > 0 {
+                            ProgressView(value: progress.overallProgress ?? 0.0)
+                                .progressViewStyle(.linear)
+                        }
                         
-                        // Progress text
+                        // Phase text
                         HStack {
-                            Text("Processing messages...")
+                            Text(progress.currentPhase ?? "Processing...")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            
                             Spacer()
+                        }
                             
-                            if let total = progress.total {
-                                Text("\(progress.submitted) / \(total)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                
-                                if let overallProgress = progress.overallProgress {
-                                    Text("(\(Int(overallProgress * 100))%)")
+                        // Statistics section - show all stats prominently
+                        VStack(alignment: .leading, spacing: 8) {
+                            // Total records (from initial query) - always show when available
+                                if let total = progress.total, total > 0 {
+                                HStack {
+                                    Text("Total Records:")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("\(total)")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.primary)
+                                        .monospacedDigit()
+                                }
+                                Divider()
+                            }
+                            
+                            // Granular state tracking (Found, Queued, Enriched, Submitted)
+                            if progress.found > 0 || progress.queued > 0 || progress.enriched > 0 || progress.submitted > 0 {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("Processing States")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.secondary)
+                                    
+                                    HStack(spacing: 16) {
+                                        // Found
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("Found")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                            Text("\(progress.found)")
+                                                .font(.caption)
+                                                .fontWeight(.semibold)
+                                                .foregroundStyle(.blue)
+                                                .monospacedDigit()
+                                        }
+                                        
+                                        // Queued
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("Queued")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                            Text("\(progress.queued)")
+                                                .font(.caption)
+                                                .fontWeight(.semibold)
+                                                .foregroundStyle(.orange)
+                                                .monospacedDigit()
+                                        }
+                                        
+                                        // Enriched
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("Enriched")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                            Text("\(progress.enriched)")
+                                                .font(.caption)
+                                                .fontWeight(.semibold)
+                                                .foregroundStyle(.purple)
+                                                .monospacedDigit()
+                                        }
+                                        
+                                        // Submitted
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("Submitted")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                            Text("\(progress.submitted)")
+                                            .font(.caption)
+                                                .fontWeight(.semibold)
+                                                .foregroundStyle(.green)
+                                                .monospacedDigit()
+                                        }
+                                        
+                                        Spacer()
+                                        
+                                        // Progress percentage (if we have total)
+                                        if let total = progress.total, total > 0, let overallProgress = progress.overallProgress {
+                                            VStack(alignment: .trailing, spacing: 2) {
+                                                Text("Progress")
+                                                    .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                                Text("\(Int(overallProgress * 100))%")
+                                                    .font(.caption)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundStyle(.primary)
+                                                    .monospacedDigit()
+                                            }
+                                        }
+                                    }
+                                }
+                                Divider()
+                            }
+                            
+                            // Additional statistics (errors, skipped)
+                            if progress.errors > 0 || progress.skipped > 0 {
+                                HStack(spacing: 16) {
+                                    // Errors
+                                    if progress.errors > 0 {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("Errors")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                            Text("\(progress.errors)")
+                                            .font(.caption)
+                                                .fontWeight(.semibold)
+                                                .foregroundStyle(.red)
+                                            .monospacedDigit()
+                                    }
+                                    }
+                                    
+                                    // Skipped
+                                    if progress.skipped > 0 {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("Skipped")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                            Text("\(progress.skipped)")
+                                            .font(.caption)
+                                                .fontWeight(.semibold)
+                                                .foregroundStyle(.orange)
+                                            .monospacedDigit()
+                                        }
+                                    }
+                                    
+                                    Spacer()
                                 }
                             }
                         }
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                        .cornerRadius(8)
                     }
                     .padding(.top, 8)
                 } else {
-                    // Fallback progress indicator when total is not available
+                    // Fallback progress indicator when progress is not available
                     HStack(spacing: 8) {
                         ProgressView()
                             .scaleEffect(0.8)
@@ -187,6 +311,151 @@ struct CollectorDetailView: View {
                         .padding(.horizontal, 12)
                         .background(Color.orange.opacity(0.1))
                         .cornerRadius(8)
+                    }
+                    
+                    // Show last run stats when inactive
+                    if let stats = lastRunStats, let progress = jobProgressFromLastRunStats(stats) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Last Run Statistics")
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                            
+                            // Statistics section - same format as active run
+                            VStack(alignment: .leading, spacing: 8) {
+                                // Total records (from initial query) - always show when available
+                                if let total = progress.total, total > 0 {
+                                    HStack {
+                                        Text("Total Records:")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        Text("\(total)")
+                                            .font(.caption)
+                                            .fontWeight(.semibold)
+                                            .foregroundStyle(.primary)
+                                            .monospacedDigit()
+                                    }
+                                    Divider()
+                                }
+                                
+                                // Granular state tracking (Found, Queued, Enriched, Submitted)
+                                if progress.found > 0 || progress.queued > 0 || progress.enriched > 0 || progress.submitted > 0 {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text("Processing States")
+                                            .font(.caption)
+                                            .fontWeight(.semibold)
+                                            .foregroundStyle(.secondary)
+                                        
+                                        HStack(spacing: 16) {
+                                            // Found
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text("Found")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                                Text("\(progress.found)")
+                                                    .font(.caption)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundStyle(.blue)
+                                                    .monospacedDigit()
+                                            }
+                                            
+                                            // Queued
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text("Queued")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                                Text("\(progress.queued)")
+                                                    .font(.caption)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundStyle(.orange)
+                                                    .monospacedDigit()
+                                            }
+                                            
+                                            // Enriched
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text("Enriched")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                                Text("\(progress.enriched)")
+                                                    .font(.caption)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundStyle(.purple)
+                                                    .monospacedDigit()
+                                            }
+                                            
+                                            // Submitted
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text("Submitted")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                                Text("\(progress.submitted)")
+                                                    .font(.caption)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundStyle(.green)
+                                                    .monospacedDigit()
+                                            }
+                                            
+                                            Spacer()
+                                            
+                                            // Progress percentage (if we have total)
+                                            if let total = progress.total, total > 0, let overallProgress = progress.overallProgress {
+                                                VStack(alignment: .trailing, spacing: 2) {
+                                                    Text("Progress")
+                                                        .font(.caption2)
+                                                        .foregroundStyle(.secondary)
+                                                    Text("\(Int(overallProgress * 100))%")
+                                                        .font(.caption)
+                                                        .fontWeight(.semibold)
+                                                        .foregroundStyle(.primary)
+                                                        .monospacedDigit()
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Divider()
+                                }
+                                
+                                // Additional statistics (errors, skipped)
+                                if progress.errors > 0 || progress.skipped > 0 {
+                                    HStack(spacing: 16) {
+                                        // Errors
+                                        if progress.errors > 0 {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text("Errors")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                                Text("\(progress.errors)")
+                                                    .font(.caption)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundStyle(.red)
+                                                    .monospacedDigit()
+                                            }
+                                        }
+                                        
+                                        // Skipped
+                                        if progress.skipped > 0 {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text("Skipped")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                                Text("\(progress.skipped)")
+                                                    .font(.caption)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundStyle(.orange)
+                                                    .monospacedDigit()
+                                            }
+                                        }
+                                        
+                                        Spacer()
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 12)
+                            .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                            .cornerRadius(8)
+                        }
+                        .padding(.bottom, 8)
                     }
                     
                     HStack(spacing: 12) {
@@ -273,6 +542,53 @@ struct CollectorDetailView: View {
             return "No iCloud Drive collector instances configured"
         default:
             return "Collector is disabled"
+        }
+    }
+    
+    /// Convert lastRunStats from CollectorStateResponse to JobProgress for display
+    private func jobProgressFromLastRunStats(_ stats: CollectorStateResponse) -> JobProgress? {
+        guard let statsDict = stats.lastRunStats else { return nil }
+        
+        let scanned = getIntValue(from: statsDict, key: "scanned") ?? 0
+        let matched = getIntValue(from: statsDict, key: "matched") ?? 0
+        let submitted = getIntValue(from: statsDict, key: "submitted") ?? 0
+        let skipped = getIntValue(from: statsDict, key: "skipped") ?? 0
+        let errors = getIntValue(from: statsDict, key: "errors") ?? 0
+        let total = getIntValue(from: statsDict, key: "total") ?? scanned > 0 ? scanned : nil
+        let found = getIntValue(from: statsDict, key: "found") ?? scanned
+        let queued = getIntValue(from: statsDict, key: "queued") ?? 0
+        let enriched = getIntValue(from: statsDict, key: "enriched") ?? 0
+        
+        // Only return progress if we have meaningful data
+        guard submitted > 0 || scanned > 0 || found > 0 else { return nil }
+        
+        return JobProgress(
+            scanned: scanned,
+            matched: matched,
+            submitted: submitted,
+            skipped: skipped,
+            errors: errors,
+            total: total,
+            currentPhase: nil,
+            phaseProgress: nil,
+            found: found,
+            queued: queued,
+            enriched: enriched
+        )
+    }
+    
+    private func getIntValue(from dict: [String: AnyCodable]?, key: String) -> Int? {
+        guard let dict = dict,
+              let value = dict[key] else {
+            return nil
+        }
+        switch value {
+        case .int(let val):
+            return val
+        case .string(let str):
+            return Int(str)
+        default:
+            return nil
         }
     }
 }

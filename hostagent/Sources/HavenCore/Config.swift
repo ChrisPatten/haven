@@ -101,22 +101,26 @@ public struct GatewayConfig: Codable {
     public var ingestPath: String
     public var ingestFilePath: String
     public var timeoutMs: Int
+    public var batchSize: Int
     
     enum CodingKeys: String, CodingKey {
         case baseUrl = "base_url"
         case ingestPath = "ingest_path"
         case ingestFilePath = "ingest_file_path"
         case timeoutMs = "timeout_ms"
+        case batchSize = "batch_size"
     }
     
     public init(baseUrl: String = "http://gateway:8080",
                 ingestPath: String = "/v1/ingest",
                 ingestFilePath: String = "/v1/ingest/file",
-                timeoutMs: Int = 30000) {
+                timeoutMs: Int = 30000,
+                batchSize: Int = 200) {
         self.baseUrl = baseUrl
         self.ingestPath = ingestPath
         self.ingestFilePath = ingestFilePath
         self.timeoutMs = timeoutMs
+        self.batchSize = max(1, batchSize)
     }
     
     public init(from decoder: Decoder) throws {
@@ -137,6 +141,8 @@ public struct GatewayConfig: Codable {
                 self.timeoutMs = 30000
             }
         }
+        // batch size (default 200)
+        self.batchSize = max(1, (try container.decodeIfPresent(Int.self, forKey: .batchSize) ?? 200))
     }
 }
 

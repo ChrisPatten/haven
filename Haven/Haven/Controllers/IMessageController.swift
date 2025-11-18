@@ -51,16 +51,21 @@ public actor IMessageController: CollectorController {
         
         do {
             // Bridge handler's progress callback to JobProgress
-            let handlerProgress: ((Int, Int, Int, Int, Int?) -> Void)? = onProgress != nil ? { scanned, matched, submitted, skipped, total in
+            // Signature: (scanned, matched, submitted, skipped, total, found, queued, enriched)
+            let handlerProgress: ((Int, Int, Int, Int, Int?, Int, Int, Int) -> Void)? = onProgress != nil ? { scanned, matched, submitted, skipped, total, found, queued, enriched in
                 Task { @MainActor in
                     let progress = JobProgress(
                         scanned: scanned,
                         matched: matched,
                         submitted: submitted,
                         skipped: skipped,
+                        errors: 0,  // Errors tracked separately, not calculated here
                         total: total,
                         currentPhase: "Processing messages",
-                        phaseProgress: nil
+                        phaseProgress: nil,
+                        found: found,
+                        queued: queued,
+                        enriched: enriched
                     )
                     onProgress?(progress)
                 }

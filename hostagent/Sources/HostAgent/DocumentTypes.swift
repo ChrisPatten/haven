@@ -145,7 +145,22 @@ public struct SubmissionResult: Sendable {
         self.error = error
         self.retryable = retryable
     }
+}
+
+/// Submission statistics tracked by the submitter
+public struct SubmissionStats: Sendable {
+    public let submittedCount: Int  // Successfully submitted documents
+    public let errorCount: Int      // Documents that failed to submit
     
+    public init(submittedCount: Int, errorCount: Int) {
+        self.submittedCount = submittedCount
+        self.errorCount = errorCount
+    }
+    
+    public static let zero = SubmissionStats(submittedCount: 0, errorCount: 0)
+}
+
+extension SubmissionResult {
     public static func success(submission: GatewaySubmissionResponse) -> SubmissionResult {
         SubmissionResult(success: true, statusCode: 202, submission: submission)
     }
