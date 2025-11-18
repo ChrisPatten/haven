@@ -27,6 +27,8 @@ from __future__ import annotations
 import abc
 import json
 import os
+import random
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Union
 
@@ -106,6 +108,9 @@ class OpenAISettings(LLMSettings):
 
     max_tokens: Optional[int] = None
     """Maximum tokens in response."""
+
+    max_retry_delay: float = 20.0
+    """Maximum delay between retries in seconds."""
 
 
 # ============================================================================
@@ -439,6 +444,105 @@ class OpenAIProvider(LLMProvider):
             api_key_length=len(api_key),
         )
 
+    def _retry_backoff_loop(self, do_request):
+        """Execute a request with exponential backoff and jitter on failures.
+
+        Retries on HTTP 429, 5xx errors, and transient network errors.
+        Honors Retry-After header when present.
+
+        Args:
+            do_request: Callable that makes the HTTP request and returns httpx.Response
+
+        Returns:
+            httpx.Response: The successful response
+
+        Raises:
+            LLMProviderError: If all retry attempts fail
+        """
+        last_error = None
+        jitter_factor = 0.2  # ±20% jitter
+
+        for attempt in range(self.settings.max_retries + 1):
+            try:
+                response = do_request()
+
+                # Check for rate limit or server errors that should be retried
+                if response.status_code == 429 or response.status_code >= 500:
+                    # Parse Retry-After header if present
+                    retry_after = response.headers.get("retry-after")
+                    if retry_after:
+                        try:
+                            # Could be seconds (integer) or HTTP date, but OpenAI typically uses seconds
+                            delay_seconds = min(float(retry_after), self.settings.max_retry_delay)
+                        except ValueError:
+                            delay_seconds = self.settings.retry_delay
+                    else:
+                        # Exponential backoff with jitter
+                        delay_seconds = min(
+                            self.settings.max_retry_delay,
+                            self.settings.retry_delay * (2 ** attempt)
+                        )
+                        # Apply jitter: ±20%
+                        jitter = delay_seconds * jitter_factor
+                        delay_seconds *= (1.0 + random.uniform(-jitter_factor, jitter_factor))
+
+                    if attempt < self.settings.max_retries:
+                        logger.warning(
+                            "OpenAI API retry",
+                            attempt=attempt + 1,
+                            max_retries=self.settings.max_retries,
+                            status_code=response.status_code,
+                            delay_seconds=round(delay_seconds, 2),
+                            retry_after_header=retry_after,
+                        )
+                        time.sleep(delay_seconds)
+                        continue
+                    else:
+                        # Final attempt failed
+                        logger.error(
+                            "OpenAI API failed after all retries",
+                            attempts=self.settings.max_retries + 1,
+                            final_status_code=response.status_code,
+                        )
+
+                # Success or non-retryable error
+                return response
+
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as e:
+                last_error = e
+                if attempt < self.settings.max_retries:
+                    # Exponential backoff with jitter for network errors
+                    delay_seconds = min(
+                        self.settings.max_retry_delay,
+                        self.settings.retry_delay * (2 ** attempt)
+                    )
+                    jitter = delay_seconds * jitter_factor
+                    delay_seconds *= (1.0 + random.uniform(-jitter_factor, jitter_factor))
+
+                    logger.warning(
+                        "OpenAI API network error, retrying",
+                        attempt=attempt + 1,
+                        max_retries=self.settings.max_retries,
+                        error=str(e),
+                        delay_seconds=round(delay_seconds, 2),
+                    )
+                    time.sleep(delay_seconds)
+                    continue
+                else:
+                    logger.error(
+                        "OpenAI API failed after all retries",
+                        attempts=self.settings.max_retries + 1,
+                        final_error=str(e),
+                    )
+                    break
+
+        # All retries exhausted
+        if last_error:
+            raise LLMProviderError(f"OpenAI request failed after {self.settings.max_retries + 1} attempts: {last_error}") from last_error
+        else:
+            # Should not reach here, but just in case
+            raise LLMProviderError(f"OpenAI request failed after {self.settings.max_retries + 1} attempts")
+
     def generate(
         self,
         prompt: str,
@@ -498,11 +602,11 @@ class OpenAIProvider(LLMProvider):
             "Content-Type": "application/json",
         }
 
-        try:
+        def do_request():
             with httpx.Client(timeout=self.settings.timeout) as client:
                 logger.debug("Calling OpenAI API", model=model)
                 response = client.post(url, json=payload, headers=headers)
-                
+
                 # Log error details for debugging
                 if response.status_code >= 400:
                     try:
@@ -520,56 +624,55 @@ class OpenAIProvider(LLMProvider):
                             text=response.text[:500],  # First 500 chars
                             model=model,
                         )
-                
-                response.raise_for_status()
 
-                data = response.json()
-                output_blocks = data.get("output", [])
-                text_fragments: list[str] = []
-                for block in output_blocks:
-                    for content in block.get("content", []):
-                        if content.get("type") == "output_text":
-                            text_fragments.append(content.get("text", ""))
+                return response
 
-                text = "".join(text_fragments).strip()
+        response = self._retry_backoff_loop(do_request)
+        response.raise_for_status()
 
-                logger.debug(
-                    "OpenAI API call succeeded",
-                    model=model,
-                    response_length=len(text),
-                )
+        data = response.json()
+        output_blocks = data.get("output", [])
+        text_fragments: list[str] = []
+        for block in output_blocks:
+            for content in block.get("content", []):
+                if content.get("type") == "output_text":
+                    text_fragments.append(content.get("text", ""))
 
-                usage = data.get("usage", {})
-                input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
-                output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
-                total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+        text = "".join(text_fragments).strip()
 
-                cost = OPENAI_TOKEN_COSTS.get(model, {}).get('input', 0) * input_tokens / 1000000 + OPENAI_TOKEN_COSTS.get(model, {}).get('output', 0) * output_tokens / 1000000
-                
-                logger.debug(
-                    "OpenAI API token usage",
-                    model=model,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    total_tokens=total_tokens,
-                    cost=f"${cost:.6f}",
-                )
-                
-                return LLMResponse(
-                    text=text,
-                    model=model,
-                    provider="openai",
-                    raw_response=data,
-                    usage={
-                        "input": input_tokens,
-                        "output": output_tokens,
-                        "total": total_tokens,
-                    },
-                )
+        logger.debug(
+            "OpenAI API call succeeded",
+            model=model,
+            response_length=len(text),
+        )
 
-        except httpx.HTTPError as e:
-            logger.error("OpenAI API call failed", error=str(e))
-            raise LLMProviderError(f"OpenAI request failed: {e}") from e
+        usage = data.get("usage", {})
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+        total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+
+        cost = OPENAI_TOKEN_COSTS.get(model, {}).get('input', 0) * input_tokens / 1000000 + OPENAI_TOKEN_COSTS.get(model, {}).get('output', 0) * output_tokens / 1000000
+
+        logger.debug(
+            "OpenAI API token usage",
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            cost=f"${cost:.6f}",
+        )
+
+        return LLMResponse(
+            text=text,
+            model=model,
+            provider="openai",
+            raw_response=data,
+            usage={
+                "input": input_tokens,
+                "output": output_tokens,
+                "total": total_tokens,
+            },
+        )
 
     def embed(
         self,
@@ -595,21 +698,19 @@ class OpenAIProvider(LLMProvider):
             "Content-Type": "application/json",
         }
 
-        try:
+        def do_request():
             with httpx.Client(timeout=self.settings.timeout) as client:
                 logger.debug("Calling OpenAI embeddings API", model=model)
-                response = client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
+                return client.post(url, json=payload, headers=headers)
 
-            data = response.json()
-            embedding = data["data"][0]["embedding"]
+        response = self._retry_backoff_loop(do_request)
+        response.raise_for_status()
 
-            logger.debug("OpenAI embeddings succeeded", model=model, vector_dim=len(embedding))
-            return embedding
+        data = response.json()
+        embedding = data["data"][0]["embedding"]
 
-        except httpx.HTTPError as e:
-            logger.error("OpenAI embeddings API call failed", error=str(e))
-            raise LLMProviderError(f"OpenAI embeddings request failed: {e}") from e
+        logger.debug("OpenAI embeddings succeeded", model=model, vector_dim=len(embedding))
+        return embedding
 
     def health_check(self) -> bool:
         """Check if OpenAI API is accessible."""

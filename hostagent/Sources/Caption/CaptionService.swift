@@ -22,6 +22,12 @@ public actor CaptionService {
     private let openaiModel: String
     private let session: URLSession
     private let foundationModel: MLModel?
+
+    // OpenAI retry configuration
+    private let openaiMaxRetries: Int
+    private let openaiBaseDelayMs: Int
+    private let openaiMaxDelayMs: Int
+    private let openaiJitter: Double
     
     public init(method: String = "ollama", timeoutMs: Int = 60000, model: String? = nil, openaiApiKey: String? = nil, openaiModel: String? = nil) {
         self.method = method
@@ -40,7 +46,13 @@ public actor CaptionService {
             self.openaiApiKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]
         }
         self.openaiModel = openaiModel ?? ProcessInfo.processInfo.environment["OPENAI_MODEL"] ?? "gpt-4o"
-        
+
+        // OpenAI retry configuration with environment variable support
+        self.openaiMaxRetries = Int(ProcessInfo.processInfo.environment["OPENAI_MAX_RETRIES"] ?? "") ?? 5
+        self.openaiBaseDelayMs = Int(ProcessInfo.processInfo.environment["OPENAI_RETRY_BASE_DELAY_MS"] ?? "") ?? 500
+        self.openaiMaxDelayMs = Int(ProcessInfo.processInfo.environment["OPENAI_RETRY_MAX_DELAY_MS"] ?? "") ?? 20000
+        self.openaiJitter = Double(ProcessInfo.processInfo.environment["OPENAI_RETRY_JITTER"] ?? "") ?? 0.2
+
         // Create URLSession with timeout configuration
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = TimeInterval(timeoutMs) / 1000.0
@@ -793,90 +805,188 @@ public actor CaptionService {
             "processed_size_bytes": "\(processedImageData.count)"
         ])
         
-        do {
-            let (data, response) = try await session.data(for: request)
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw CaptionServiceError.serviceUnavailable
-            }
-            
-            guard (200...299).contains(httpResponse.statusCode) else {
-                let body = String(data: data, encoding: .utf8) ?? ""
-                logger.debug("OpenAI API returned error", metadata: [
-                    "status": "\(httpResponse.statusCode)",
-                    "body": body.prefix(200).description
-                ])
-                throw CaptionServiceError.generationFailed("HTTP \(httpResponse.statusCode): \(body.prefix(100))")
-            }
-            
-            // Parse response JSON
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                throw CaptionServiceError.generationFailed("Invalid JSON response")
-            }
-            
-            // Extract caption from OpenAI Responses API format
-            // Response structure: {"output": [{"content": [{"type": "output_text", "text": "..."}]}]}
-            var caption: String? = nil
-            
-            if let output = json["output"] as? [[String: Any]] {
-                for block in output {
-                    if let content = block["content"] as? [[String: Any]] {
-                        for item in content {
-                            if let type = item["type"] as? String,
-                               type == "output_text",
-                               let text = item["text"] as? String, !text.isEmpty {
-                                caption = text
+        // Retry loop for OpenAI API calls
+        var lastError: Error?
+        let jitterFactor = self.openaiJitter
+
+        for attempt in 0...(self.openaiMaxRetries) {
+            do {
+                let (data, response) = try await session.data(for: request)
+
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw CaptionServiceError.serviceUnavailable
+                }
+
+                // Check for retryable errors
+                if httpResponse.statusCode == 429 || httpResponse.statusCode >= 500 {
+                    // Parse Retry-After header if present
+                    var delayMs = 0.0
+                    if let retryAfter = httpResponse.allHeaderFields["Retry-After"] as? String {
+                        if let seconds = Double(retryAfter) {
+                            delayMs = min(seconds * 1000.0, Double(self.openaiMaxDelayMs))
+                        }
+                    } else {
+                        // Exponential backoff with jitter
+                        delayMs = min(
+                            Double(self.openaiBaseDelayMs) * pow(2.0, Double(attempt)),
+                            Double(self.openaiMaxDelayMs)
+                        )
+                        // Apply jitter: ±20%
+                        let jitterRange = delayMs * jitterFactor
+                        delayMs *= (1.0 + Double.random(in: -jitterFactor...jitterFactor))
+                    }
+
+                    if attempt < self.openaiMaxRetries {
+                        logger.warning("OpenAI API retry", metadata: [
+                            "attempt": "\(attempt + 1)",
+                            "max_retries": "\(self.openaiMaxRetries)",
+                            "status_code": "\(httpResponse.statusCode)",
+                            "delay_ms": String(format: "%.2f", delayMs),
+                            "retry_after_header": httpResponse.allHeaderFields["Retry-After"] as? String ?? "none"
+                        ])
+
+                        try await Task.sleep(nanoseconds: UInt64(delayMs * 1_000_000)) // Convert ms to nanoseconds
+                        continue
+                    } else {
+                        // Final attempt failed
+                        logger.error("OpenAI API failed after all retries", metadata: [
+                            "attempts": "\(self.openaiMaxRetries + 1)",
+                            "final_status_code": "\(httpResponse.statusCode)"
+                        ])
+                        let body = String(data: data, encoding: .utf8) ?? ""
+                        throw CaptionServiceError.generationFailed("HTTP \(httpResponse.statusCode): \(body.prefix(100))")
+                    }
+                }
+
+                // Success or non-retryable error
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    let body = String(data: data, encoding: .utf8) ?? ""
+                    logger.debug("OpenAI API returned error", metadata: [
+                        "status": "\(httpResponse.statusCode)",
+                        "body": body.prefix(200).description
+                    ])
+                    throw CaptionServiceError.generationFailed("HTTP \(httpResponse.statusCode): \(body.prefix(100))")
+                }
+
+                // Parse response JSON
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw CaptionServiceError.generationFailed("Invalid JSON response")
+                }
+
+                // Extract caption from OpenAI Responses API format
+                // Response structure: {"output": [{"content": [{"type": "output_text", "text": "..."}]}]}
+                var caption: String? = nil
+
+                if let output = json["output"] as? [[String: Any]] {
+                    for block in output {
+                        if let content = block["content"] as? [[String: Any]] {
+                            for item in content {
+                                if let type = item["type"] as? String,
+                                   type == "output_text",
+                                   let text = item["text"] as? String, !text.isEmpty {
+                                    caption = text
+                                    break
+                                }
+                            }
+                            if caption != nil {
                                 break
                             }
                         }
-                        if caption != nil {
-                            break
-                        }
                     }
                 }
-            }
-            
-            // Extract token usage from response
-            let usage = json["usage"] as? [String: Any]
-            let inputTokens = usage?["input_tokens"] as? Int ?? usage?["prompt_tokens"] as? Int ?? 0
-            let outputTokens = usage?["output_tokens"] as? Int ?? usage?["completion_tokens"] as? Int ?? 0
-            
-            if let captionText = caption {
-                // Truncate to reasonable length (200 chars)
-                let truncated = captionText.count > 200 ? String(captionText.prefix(200)) + "…" : captionText
-                logger.info("Caption generated successfully with OpenAI", metadata: [
-                    "caption_length": "\(captionText.count)",
-                    "truncated": captionText.count > 200,
-                    "caption_preview": truncated.prefix(50).description,
-                    "input_tokens": "\(inputTokens)",
-                    "output_tokens": "\(outputTokens)"
+
+                // Extract token usage from response
+                let usage = json["usage"] as? [String: Any]
+                let inputTokens = usage?["input_tokens"] as? Int ?? usage?["prompt_tokens"] as? Int ?? 0
+                let outputTokens = usage?["output_tokens"] as? Int ?? usage?["completion_tokens"] as? Int ?? 0
+
+                if let captionText = caption {
+                    // Truncate to reasonable length (200 chars)
+                    let truncated = captionText.count > 200 ? String(captionText.prefix(200)) + "…" : captionText
+                    logger.info("Caption generated successfully with OpenAI", metadata: [
+                        "caption_length": "\(captionText.count)",
+                        "truncated": captionText.count > 200,
+                        "caption_preview": truncated.prefix(50).description,
+                        "input_tokens": "\(inputTokens)",
+                        "output_tokens": "\(outputTokens)"
+                    ])
+                    return (caption: truncated.trimmingCharacters(in: .whitespacesAndNewlines), tokens: (input: inputTokens, output: outputTokens))
+                }
+
+                logger.warning("OpenAI response missing caption", metadata: [
+                    "response_keys": "\(json.keys.joined(separator: ", "))",
+                    "response_preview": "\(String(describing: json).prefix(200))"
                 ])
-                return (caption: truncated.trimmingCharacters(in: .whitespacesAndNewlines), tokens: (input: inputTokens, output: outputTokens))
+                return nil
+
+            } catch let error as CaptionServiceError {
+                // Business logic errors - don't retry
+                logger.warning("Caption service error", metadata: [
+                    "error": error.localizedDescription
+                ])
+                throw error
+            } catch let error as URLError where error.code == .timedOut || error.code == .cannotConnectToHost || error.code == .networkConnectionLost {
+                lastError = error
+                if attempt < self.openaiMaxRetries {
+                    // Exponential backoff with jitter for network errors
+                    var delayMs = min(
+                        Double(self.openaiBaseDelayMs) * pow(2.0, Double(attempt)),
+                        Double(self.openaiMaxDelayMs)
+                    )
+                    // Apply jitter: ±20%
+                    delayMs *= (1.0 + Double.random(in: -jitterFactor...jitterFactor))
+
+                    logger.warning("OpenAI API network error, retrying", metadata: [
+                        "attempt": "\(attempt + 1)",
+                        "max_retries": "\(self.openaiMaxRetries)",
+                        "error": error.localizedDescription,
+                        "delay_ms": String(format: "%.2f", delayMs)
+                    ])
+
+                    try await Task.sleep(nanoseconds: UInt64(delayMs * 1_000_000)) // Convert ms to nanoseconds
+                    continue
+                } else {
+                    logger.error("OpenAI API failed after all retries", metadata: [
+                        "attempts": "\(self.openaiMaxRetries + 1)",
+                        "final_error": error.localizedDescription
+                    ])
+                    throw CaptionServiceError.generationFailed("Network error after retries: \(error.localizedDescription)")
+                }
+            } catch {
+                lastError = error
+                if attempt < self.openaiMaxRetries {
+                    // Exponential backoff with jitter for other transient errors
+                    var delayMs = min(
+                        Double(self.openaiBaseDelayMs) * pow(2.0, Double(attempt)),
+                        Double(self.openaiMaxDelayMs)
+                    )
+                    // Apply jitter: ±20%
+                    delayMs *= (1.0 + Double.random(in: -jitterFactor...jitterFactor))
+
+                    logger.warning("OpenAI API error, retrying", metadata: [
+                        "attempt": "\(attempt + 1)",
+                        "max_retries": "\(self.openaiMaxRetries)",
+                        "error": error.localizedDescription,
+                        "delay_ms": String(format: "%.2f", delayMs)
+                    ])
+
+                    try await Task.sleep(nanoseconds: UInt64(delayMs * 1_000_000)) // Convert ms to nanoseconds
+                    continue
+                } else {
+                    logger.error("OpenAI API failed after all retries", metadata: [
+                        "attempts": "\(self.openaiMaxRetries + 1)",
+                        "final_error": error.localizedDescription
+                    ])
+                    throw CaptionServiceError.generationFailed("Request failed after retries: \(error.localizedDescription)")
+                }
             }
-            
-            logger.warning("OpenAI response missing caption", metadata: [
-                "response_keys": "\(json.keys.joined(separator: ", "))",
-                "response_preview": "\(String(describing: json).prefix(200))"
-            ])
-            return nil
-            
-        } catch let error as CaptionServiceError {
-            logger.warning("Caption service error", metadata: [
-                "error": error.localizedDescription
-            ])
-            throw error
-        } catch let error as URLError where error.code == .timedOut {
-            logger.warning("Caption generation timed out", metadata: [
-                "timeout_ms": String(timeoutMs)
-            ])
-            throw CaptionServiceError.timeout
-        } catch {
-            logger.error("OpenAI API call failed", metadata: [
-                "error": error.localizedDescription,
-                "error_type": String(describing: type(of: error))
-            ])
-            throw CaptionServiceError.generationFailed(error.localizedDescription)
         }
+
+        // All retries exhausted (should not reach here due to throws above)
+        if let error = lastError {
+            throw CaptionServiceError.generationFailed("Request failed after \(self.openaiMaxRetries + 1) attempts: \(error.localizedDescription)")
+        } else {
+            throw CaptionServiceError.generationFailed("Request failed after \(self.openaiMaxRetries + 1) attempts")
     }
 }
 
@@ -902,5 +1012,6 @@ public enum CaptionServiceError: LocalizedError {
             return "Caption generation failed: \(message)"
         }
     }
+}
 }
 

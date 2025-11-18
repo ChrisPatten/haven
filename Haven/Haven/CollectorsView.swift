@@ -31,6 +31,21 @@ struct CollectorsView: View {
         _viewModel = StateObject(wrappedValue: vm)
     }
     
+    /// Get job progress for a collector - ensures SwiftUI tracks changes to activeJobs
+    private func getJobProgress(for collectorId: String) -> JobProgress? {
+        // Access appState.activeJobs to ensure SwiftUI tracks changes
+        let _ = appState.activeJobs
+        
+        // Look for running or pending jobs for this collector
+        // Handle both base collector IDs and instance-specific IDs (e.g., "email_imap:instance_id")
+        let job = appState.activeJobs.values.first { job in
+            (job.collectorId == collectorId || job.collectorId.hasPrefix("\(collectorId):")) &&
+            (job.status == .running || job.status == .pending)
+        }
+        
+        return job?.progress
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
             NavigationSplitView {
@@ -40,6 +55,12 @@ struct CollectorsView: View {
                     selectedCollectorId: $viewModel.selectedCollectorId,
                     isCollectorRunning: { collectorId in
                         appState.isCollectorRunning(collectorId)
+                    },
+                    getJobProgress: { collectorId in
+                        getJobProgress(for: collectorId)
+                    },
+                    getLastRunStats: { collectorId in
+                        viewModel.collectorStates[collectorId]
                     },
                     onRunAll: {
                         Task {
@@ -53,8 +74,7 @@ struct CollectorsView: View {
                 // Detail panel
                 if let collector = viewModel.getSelectedCollector() {
                     // Get active job progress for this collector
-                    let activeJob = appState.activeJobs.values.first { $0.collectorId == collector.id && $0.status == .running }
-                    let jobProgress = activeJob?.progress
+                    let jobProgress = getJobProgress(for: collector.id)
                     
                     CollectorDetailView(
                         collector: collector,

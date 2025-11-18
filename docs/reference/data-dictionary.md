@@ -839,6 +839,40 @@ Tracks how the document was ingested and processed (diagnostic information).
 
 ---
 
+## Image Token → Slug Flow
+
+Haven uses a token-based approach to preserve positional context for images in text content:
+
+### Token Insertion (Collection Phase)
+
+During document collection, collectors insert `{IMG:<id>}` tokens where images appear in text:
+
+- **iMessage**: Replaces `\u{FFFC}` (object replacement characters) with tokens using file path as id
+- **Embedded images**: Uses MD5 hash of image data as id
+- **File images**: Uses canonical file path as id
+
+### Slug Replacement (Enrichment Phase)
+
+After enrichment, `EnrichmentMerger` replaces tokens with image slugs:
+
+```
+{IMG:abc123} → [Image: <caption> | <filename or hash>]
+```
+
+**Slug Format**:
+- `caption`: Image caption text, or `"No caption"` if captioning failed
+- `filename or hash`: Image filename/path for files, MD5 hash for embedded images
+
+**Example**:
+```
+Input:  "Check this out: {IMG:sunset.jpg}"
+Output: "Check this out: [Image: Beautiful sunset over ocean | sunset.jpg]"
+```
+
+This ensures exactly one slug per image at the correct positional context.
+
+---
+
 ## Enrichment Metadata Structures
 
 ### Document Metadata Enrichment
@@ -857,9 +891,7 @@ Stored in `documents.metadata.enrichment` JSONB field.
         "confidence": 0.95
       }
     ],
-    "captions": [
-      "[Image: photo.jpg | A group of people | Extracted text from OCR]"
-    ],
+    // Image slugs are now embedded directly in text content, not stored separately
     "images": [
       {
         "filename": "photo.jpg",
@@ -890,7 +922,7 @@ Stored in `documents.metadata.enrichment` JSONB field.
 | `enrichment.entities[].start` | integer | Start offset in text |
 | `enrichment.entities[].end` | integer | End offset in text |
 | `enrichment.entities[].confidence` | float | Confidence score (0.0-1.0) |
-| `enrichment.captions` | array | Image caption placeholders in text |
+| `enrichment.captions` | array | **DEPRECATED**: Image slugs now embedded directly in text content |
 | `enrichment.images` | array | Image enrichment metadata |
 | `enrichment.images[].filename` | string | Image filename |
 | `enrichment.images[].caption` | string | Image caption |

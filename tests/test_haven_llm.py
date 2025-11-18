@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -301,6 +302,117 @@ def test_openai_provider_str(openai_provider):
     str_repr = str(openai_provider)
     assert "OpenAIProvider" in str_repr
     assert "gpt-4" in str_repr
+
+
+@patch("httpx.Client.post")
+@patch("time.sleep")
+def test_openai_retry_on_429_then_success(mock_sleep, mock_post, openai_provider):
+    """Test that OpenAI retries on 429 and succeeds on second attempt."""
+    # First call returns 429, second call succeeds
+    mock_429_response = MagicMock()
+    mock_429_response.status_code = 429
+    mock_429_response.headers = {}  # No Retry-After header
+
+    mock_success_response = MagicMock()
+    mock_success_response.status_code = 200
+    mock_success_response.json.return_value = {
+        "output": [
+            {
+                "content": [
+                    {"type": "output_text", "text": "Paris is the capital of France."}
+                ]
+            }
+        ],
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+        },
+    }
+
+    # Mock post to return 429 first, then success
+    mock_post.side_effect = [mock_429_response, mock_success_response]
+
+    response = openai_provider.generate(prompt="What is the capital of France?")
+
+    # Should have made 2 calls (first failed, second succeeded)
+    assert mock_post.call_count == 2
+    # Should have slept once
+    assert mock_sleep.call_count == 1
+    # Should return the successful response
+    assert isinstance(response, LLMResponse)
+    assert response.text == "Paris is the capital of France."
+
+
+@patch("httpx.Client.post")
+@patch("time.sleep")
+def test_openai_retry_with_retry_after_header(mock_sleep, mock_post, openai_provider):
+    """Test that OpenAI respects Retry-After header."""
+    mock_429_response = MagicMock()
+    mock_429_response.status_code = 429
+    mock_429_response.headers = {"retry-after": "2"}  # 2 second delay
+
+    mock_success_response = MagicMock()
+    mock_success_response.status_code = 200
+    mock_success_response.json.return_value = {
+        "output": [
+            {
+                "content": [
+                    {"type": "output_text", "text": "Paris is the capital of France."}
+                ]
+            }
+        ],
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+        },
+    }
+
+    mock_post.side_effect = [mock_429_response, mock_success_response]
+
+    response = openai_provider.generate(prompt="What is the capital of France?")
+
+    # Should have slept with the Retry-After delay (2 seconds)
+    mock_sleep.assert_called_once_with(2.0)
+    assert isinstance(response, LLMResponse)
+
+
+@patch("httpx.Client.post")
+def test_openai_no_retry_on_400_error(mock_post, openai_provider):
+    """Test that OpenAI does not retry on 400 Bad Request."""
+    mock_400_response = MagicMock()
+    mock_400_response.status_code = 400
+    mock_400_response.raise_for_status.side_effect = httpx.HTTPError("400 Bad Request")
+    mock_400_response.headers = {}
+
+    mock_post.return_value = mock_400_response
+
+    with pytest.raises(LLMProviderError):
+        openai_provider.generate(prompt="Test")
+
+    # Should have made only 1 call (no retries for 4xx errors)
+    assert mock_post.call_count == 1
+
+
+@patch("httpx.Client.post")
+@patch("time.sleep")
+def test_openai_retry_exhaustion(mock_sleep, mock_post, openai_provider):
+    """Test that OpenAI fails after exhausting all retries."""
+    # Always return 429
+    mock_response = MagicMock()
+    mock_response.status_code = 429
+    mock_response.headers = {}
+
+    mock_post.return_value = mock_response
+
+    with pytest.raises(LLMProviderError, match="failed after 6 attempts"):
+        openai_provider.generate(prompt="Test")
+
+    # Should have made max_retries + 1 calls (default max_retries=3, so 4 total)
+    assert mock_post.call_count == 4  # 3 retries + 1 initial = 4
+    # Should have slept 3 times
+    assert mock_sleep.call_count == 3
 
 
 # ============================================================================

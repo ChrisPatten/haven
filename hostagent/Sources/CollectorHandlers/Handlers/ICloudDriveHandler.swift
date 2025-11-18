@@ -144,7 +144,6 @@ public actor ICloudDriveHandler {
             externalId: submission.externalId,
             status: submission.status,
             threadId: submission.threadId,
-            fileIds: [],
             duplicate: false,
             totalChunks: 0,
             fileSha256: "",

@@ -40,24 +40,32 @@ The Haven.app is architected with clear separation of concerns across four main 
    - Each handler receives an optional `EnrichmentOrchestrator` and `DocumentSubmitter` for processing and submission
 
 4. **Enrichment & Submission Layer** (`hostagent/Sources/HostAgent/`): Processing and submission
-   - **Enrichment** (`Enrichment/`): `EnrichmentOrchestrator` coordinates enrichment services:
-     - OCR via Vision API (`OCRService`)
-     - Face detection (`FaceService`)
-     - Entity extraction (`EntityService`)
-     - Image captioning (`CaptionService`)
+   - **Enrichment** (`Enrichment/`): 
+     - `EnrichmentOrchestrator` coordinates enrichment services:
+       - OCR via Vision API (`OCRService`)
+       - Face detection (`FaceService`)
+       - Entity extraction (`EntityService`)
+       - Image captioning (`CaptionService`)
+     - `EnrichmentQueue`: FIFO queue with dual worker pools (normal workers + no-attachment worker) for concurrent enrichment processing
    - **Submission** (`Submission/`): Document submission abstraction
-     - `DocumentSubmitter` protocol for submission interface
-     - `BatchDocumentSubmitter`: Batches documents and submits via `GatewaySubmissionClient`
+     - `DocumentSubmitter` protocol for submission interface with buffering, flush, finish, and statistics tracking
+     - `BatchDocumentSubmitter`: Buffers documents, batches them (default: 200), and submits via `GatewaySubmissionClient` with automatic flushing
      - `DebugDocumentSubmitter`: Writes documents to disk for debugging
      - `GatewaySubmissionClient`: HTTP client for Gateway API communication
 
 **Data Flow:**
 1. User triggers collector via UI → Controller → Handler
-2. Handler collects data → EnrichmentOrchestrator (if enabled) → DocumentSubmitter
-3. DocumentSubmitter → Gateway (validate, dedupe, queue)
-4. Gateway → Catalog (persist metadata)
-5. Worker Service → Catalog (vectorize pending chunks, process intents) → Qdrant
-6. Search queries join Postgres + Qdrant
+2. Handler collects data → EnrichmentQueue (if enrichment enabled) → EnrichmentOrchestrator → DocumentSubmitter
+3. EnrichmentQueue uses dual worker pools (normal + no-attachment) for optimal throughput
+4. DocumentSubmitter buffers documents and batches them (default: 200) → Gateway (validate, dedupe, queue)
+5. Gateway → Catalog (persist metadata)
+6. Worker Service → Catalog (vectorize pending chunks, process intents) → Qdrant
+7. Search queries join Postgres + Qdrant
+
+**Progress Tracking:**
+- Collectors track granular progress metrics: scanned, matched, submitted, skipped, errors, found, queued, enriched
+- JobManager monitors collector runs with real-time progress updates
+- UI displays detailed progress with processing states (Found, Queued, Enriched, Submitted)
 
 **Topology:**
 ```

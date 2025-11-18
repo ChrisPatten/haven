@@ -14,11 +14,11 @@
 
 ### Document Instance Creation (Standardized Format):
 - Each document is created as a `CollectorDocument` struct with standardized fields:
-  - `content: String` - Markdown text extracted from source (image placeholders added during enrichment pipeline)
+  - `content: String` - Markdown text extracted from source with `{IMG:<id>}` tokens inserted where images appear
   - `sourceType: String` - document origin ("imessage", "email", "localfs", etc.)
   - `externalId: String` - unique ID within source (e.g. "imessage:1234567890")
   - `metadata: DocumentMetadata` - content hash, MIME type, timestamps (created/modified), additional metadata dict
-  - `images: [ImageAttachment]` - extracted images with temporary data or path refs (files NOT retained, only metadata). If original image was embedded in the message (does not have a file on disk that can be referenced), include the base64 encoded image data here. For embedded images, collectors should create temporary placeholder text in content that will be replaced with enriched placeholders at the end of the enrichment pipeline.
+  - `images: [ImageAttachment]` - extracted images with temporary data or path refs (files NOT retained, only metadata). Collectors insert `{IMG:<id>}` tokens in content where images appear, using deterministic IDs (MD5 for embedded images, file paths for files).
   - `contentType: DocumentContentType` - enum-based type
   - `title: String?`, `canonicalUri: String?` - optional fields
 
@@ -36,13 +36,18 @@
 ### Queue Architecture:
 - `EnrichmentQueue` actor manages concurrent enrichment of documents with attachments
 - **Queue Population**: Collectors fill the queue by calling `queueForEnrichment()` for each document as they traverse data sources
-- Configurable concurrency via `maxConcurrentEnrichments` (default: 1) - determines number of enrichment workers
+- **Dual Worker Pool System**: The queue uses two worker pools for optimal throughput:
+  - **Normal Workers**: Can process any document (with or without attachments). Configurable via `maxNormalEnrichments` (default: 1)
+  - **No-Attachment Worker**: Dedicated worker pool for documents without attachments. Enabled by default (`enableNoAttachmentWorker: true`), processes one document at a time
 - All documents are queued for enrichment
-- Queue maintains: `enrichmentTasks` (document ID → Task), `activeEnrichmentCount`, `waitingQueue` (FIFO buffer when at capacity)
+- Queue maintains: `enrichmentTasks` (document ID → Task), `workerTypes` (document ID → WorkerType), `activeNormalEnrichmentCount`, `activeNoAttachmentEnrichmentCount`, `waitingQueue` (FIFO buffer when at capacity)
 
 ### Queue Operations:
 - `queueForEnrichment(document, documentId, onComplete)` - called by collectors to enqueue documents for enrichment
   - Returns `true` if queued successfully, `false` if already queued
+  - **Worker Assignment Logic**:
+    - Documents with attachments: Only assigned to normal workers
+    - Documents without attachments: Prefer no-attachment worker if available, otherwise use normal worker
   - All documents go through enrichment; image-related steps (OCR, face detection, captioning) are skipped if document has no images
   - NER runs on all documents (if enabled), regardless of image presence
   - NER runs after all other enrichment steps are complete and includes OCR text if available.
@@ -51,9 +56,11 @@
 - `cancelEnrichment(documentId)` / `cancelAll()` - cleanup
 
 ### Enrichment Worker Model:
-- **Worker Creation**: A configurable number of enrichment workers are created when the first collector starts (controlled by `maxConcurrentEnrichments`)
+- **Worker Pool Creation**: Two worker pools are created when the first collector starts:
+  - Normal worker pool: Size controlled by `maxNormalEnrichments` (default: 1)
+  - No-attachment worker pool: Single worker, enabled by default
 - **Worker Lifecycle**: Workers persist across all collectors and are destroyed when the last collector completes (multiple collectors may run simultaneously, all posting documents to the same queue)
-- **Document Claiming**: Workers claim documents from the queue (FIFO order), marking them as active
+- **Document Claiming**: Workers claim documents from the queue (FIFO order), marking them as active and tracking which worker type is processing each document
 - **Enrichment Pipeline**: Each worker executes the enrichment orchestrator pipeline asynchronously on the claimed document
 - **Submission**: On success, worker asynchronously posts the enriched document to the document submitter for collection into batches (worker does not block; continues processing next document immediately)
 - **Error Handling**:
@@ -61,8 +68,9 @@
   - On non-retryable error: send to error log/output (logging system)
 
 ### Key Implementation Detail:
-- `EnrichmentQueue` uses async Task-based concurrency control with `AsyncSemaphore` to limit parallel enrichments
-- Workers operate independently, claiming and processing documents concurrently up to the configured limit
+- `EnrichmentQueue` uses async Task-based concurrency control to limit parallel enrichments
+- Dual worker pools allow better throughput: documents without attachments can be processed in parallel with attachment-heavy documents
+- Workers operate independently, claiming and processing documents concurrently up to the configured limits
 - Completion callbacks allow handlers to track enriched documents without blocking the queue
 - Collector tracks incremental progress as documents are enriched and published; collector is not terminated until all documents have been submitted
 
@@ -102,12 +110,17 @@
 
 ---
 
-## 4. Message Formatting & Image Placeholder Embedding
+## 4. Token → Slug Pipeline
 
-### Image Placeholder Format:
-- `[Image: <filename> | <caption> | <ocr_text>]` - inline text representation. If the image was embedded in the message (does not have a file on disk that can be referenced), this replaces the image data.
-- Applied to document text via `EnrichmentMerger.mergeEnrichmentIntoDocument()` as the final step in the enrichment pipeline (after all enrichment steps including NER are complete).
-- For embedded images: collectors create temporary placeholder text in document content during document creation; these are replaced with enriched placeholders (containing caption and OCR text) at the end of the enrichment pipeline.
+### Image Token → Slug Strategy:
+- **Collection Phase**: Collectors insert `{IMG:<id>}` tokens in document content where images appear
+  - ID format: MD5 hash (lowercase hex) for embedded images, canonical file path for file-based images
+  - Tokens preserve positional context and ensure exactly one placeholder per image
+- **Enrichment Phase**: `EnrichmentMerger` replaces tokens with image slugs after enrichment completes
+- **Slug Format**: `[Image: <caption> | <filename or hash>]`
+  - Caption: Image caption text, or `"No caption"` if captioning failed
+  - Filename/Hash: Image filename for files, MD5 hash for embedded images
+- **Result**: Exactly one slug per image, positioned correctly in text, no duplicate placeholders
 
 ### Enrichment Metadata Structure:
 - Merged into `metadata.enrichment` JSONB field:
@@ -151,18 +164,30 @@
 ## 5. Document Submission & Batching
 
 ### Batch Document Submitter:
-- `BatchDocumentSubmitter` actor collects `EnrichedDocument` instances
-- `submitBatch([EnrichedDocument])` - converts to `EmailDocumentPayload` format (to be renamed to `DocumentPayload`) + submits
+- `BatchDocumentSubmitter` actor collects `EnrichedDocument` instances with internal buffering
+- **Buffering Strategy**: Documents are buffered internally until batch size is reached, then automatically flushed
+- **Configurable Batch Size**: Default 200 documents per batch, configurable via `batchSize` parameter
 - Converts enriched documents to gateway payload via `convertToEmailDocumentPayload()`
 - Handles batch size negotiation: tries batch endpoint; falls back to individual submissions if unavailable
 
+### DocumentSubmitter Protocol:
+- `submit(_ document: EnrichedDocument)` - Submit a single document (buffered, auto-flushes when batch size reached)
+- `submitBatch(_ documents: [EnrichedDocument])` - Submit multiple documents (buffered, auto-flushes when batch size reached)
+- `flush()` - Flush any buffered documents immediately, returns `SubmissionStats` (submitted count, error count)
+- `finish()` - Flush remaining buffered documents and finalize, returns `SubmissionStats`
+- `getStats()` - Get current submission statistics without flushing
+- `reset()` - Reset submission statistics for a new run (clears buffer and counters)
+
 ### Batch Submission Flow:
-1. Collect documents until batch size reached (default: 200, configurable in gateway settings) OR queue is empty and all enrichment pipelines are complete (no timeout; submit final batch when processing is done)
-2. Convert each `EnrichedDocument` → `EmailDocumentPayload` (Swift payload type that represents the gateway API format; to be renamed to `DocumentPayload`)
-3. Serialize `EmailDocumentPayload` to JSON and call `gatewayClient.submitDocumentsBatch(payloads)` (tries `/v1/ingest:batch` endpoint)
-4. On success: return `SubmissionResult.success(submission: GatewaySubmissionResponse)`
-5. On failure: parse error, determine if retryable (HTTP 5xx → retryable), return `SubmissionResult.failure(error, statusCode, retryable)`
-6. Update CollectorStats (per-instance, updated in real-time) with submission results (number of documents submitted, number of documents failed, number of documents retried). CollectorStats drives progress information shown to users (progress bar, count, or percentage).
+1. **Buffering**: Documents are added to internal buffer via `submit()` or `submitBatch()`
+2. **Auto-Flush**: When buffer reaches `batchSize` (default: 200), documents are automatically flushed in chunks
+3. **Conversion**: Convert each `EnrichedDocument` → `EmailDocumentPayload` (Swift payload type that represents the gateway API format; to be renamed to `DocumentPayload`)
+4. **Submission**: Serialize `EmailDocumentPayload` to JSON and call `gatewayClient.submitDocumentsBatch(payloads)` (tries `/v1/ingest:batch` endpoint)
+5. **Statistics Tracking**: Track `submittedCount` and `errorCount` for each batch submission
+6. **On Success**: Update statistics, return `SubmissionResult.success(submission: GatewaySubmissionResponse)`
+7. **On Failure**: Parse error, determine if retryable (HTTP 5xx → retryable), increment `errorCount`, return `SubmissionResult.failure(error, statusCode, retryable)`
+8. **Final Flush**: When collector completes, call `finish()` to flush any remaining buffered documents
+9. **Progress Updates**: Update CollectorStats (per-instance, updated in real-time) with submission results (number of documents submitted, number of documents failed, number of documents retried). CollectorStats drives progress information shown to users (progress bar, count, or percentage).
 
 ### Gateway Payload Structure (`EmailDocumentPayload`):
 - `EmailDocumentPayload` is the Swift representation of the payload submitted to the gateway service
@@ -246,7 +271,9 @@
 - `modules.caption.enabled` - enable Image captioning (OpenAI, Ollama, etc.)
 - `modules.entity.types` - list of entity types to extract
 - `modules.entity.minConfidence` - confidence threshold for entities
-- Concurrency limits for enrichment workers (`maxConcurrentEnrichments`)
+- Enrichment queue concurrency:
+  - `maxNormalEnrichments` - number of normal workers (default: 1)
+  - `enableNoAttachmentWorker` - enable dedicated no-attachment worker pool (default: true)
 - Retry limits for failed enrichments (default: 3)
 - Batch size for document submission (default: 200, configurable in gateway settings under `settings->general`)
 

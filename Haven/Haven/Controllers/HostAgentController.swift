@@ -515,7 +515,7 @@ public class HostAgentController: ObservableObject {
                 config: config.gateway,
                 authToken: config.service.auth.secret
             )
-            return BatchDocumentSubmitter(gatewayClient: gatewaySubmissionClient)
+            return BatchDocumentSubmitter(gatewayClient: gatewaySubmissionClient, batchSize: config.gateway.batchSize)
         }
     }
     
@@ -604,11 +604,12 @@ public class HostAgentController: ObservableObject {
             return queue
         }
         let orchestrator = getSharedEnrichmentOrchestrator(config: config)
-        let workers = max(1, min(config.maxConcurrentEnrichments, 16))
-        let queue = EnrichmentQueue(orchestrator: orchestrator, maxConcurrentEnrichments: workers)
+        let maxNormalEnrichments = max(1, min(config.maxConcurrentEnrichments, 16))
+        let queue = EnrichmentQueue(orchestrator: orchestrator, maxNormalEnrichments: maxNormalEnrichments, enableNoAttachmentWorker: true)
         sharedEnrichmentQueue = queue
         logger.info("Shared enrichment queue initialized", metadata: [
-            "max_concurrent_enrichments": String(workers)
+            "max_normal_enrichments": String(maxNormalEnrichments),
+            "no_attachment_worker_enabled": "true"
         ])
         return queue
     }
@@ -684,18 +685,14 @@ public class HostAgentController: ObservableObject {
         }
         
         // Dispatch job via JobManager - use original ID for tracking, but base ID for collector lookup
+        // Note: JobManager now syncs progress to appState directly, so this callback is mainly for any additional handling
         let job = try await jobManager.dispatchJob(
             collectorId: id,  // Keep original ID for tracking/display
             request: finalRequest,
             collector: collector
         ) { [weak self] progress in
-            // Update app state with progress
-            // Capture jobId as a local variable to avoid potential issues with captured job reference
-            let capturedJobId = job.id
-            Task { @MainActor [weak self] in
-                guard let appState = self?.appState else { return }
-                appState.updateJobProgress(jobId: capturedJobId, progress: progress)
-            }
+            // Progress is already synced to appState by JobManager
+            // This callback can be used for additional progress handling if needed
         }
         
         // Wait for job to complete and get response

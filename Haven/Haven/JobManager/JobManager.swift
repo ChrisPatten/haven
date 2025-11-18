@@ -66,6 +66,10 @@ public class JobManager: ObservableObject {
                     job.status = .running
                     job.startedAt = Date()
                 }
+                // Sync job status update to AppState
+                if let updatedJob = self.activeJobs[jobId] {
+                    self.appState?.activeJobs[jobId] = updatedJob
+                }
                 self.appState?.setCollectorRunning(collectorId, running: true)
             }
             
@@ -78,6 +82,8 @@ public class JobManager: ObservableObject {
                         self.updateJob(jobId: jobId) { job in
                             job.progress = progress
                         }
+                        // Sync progress to AppState
+                        self.appState?.updateJobProgress(jobId: jobId, progress: progress)
                         // Call external progress callback
                         onProgress(progress)
                     }
@@ -97,6 +103,21 @@ public class JobManager: ObservableObject {
                         job.progress.matched = response.stats.matched
                         job.progress.submitted = response.stats.submitted
                         job.progress.skipped = response.stats.skipped
+                        // Update errors from response - extract actual error count from error messages
+                        // Error messages may be formatted as "X documents failed to submit"
+                        var extractedErrorCount = 0
+                        for errorMsg in response.errors {
+                            // Try to extract number from error message (e.g., "4717 documents failed to submit")
+                            if let numberRange = errorMsg.range(of: #"\d+"#, options: .regularExpression) {
+                                if let count = Int(errorMsg[numberRange]) {
+                                    extractedErrorCount += count
+                                }
+                            } else {
+                                // If no number found, count each error message as 1 error
+                                extractedErrorCount += 1
+                            }
+                        }
+                        job.progress.errors = extractedErrorCount
                     }
                 }
                 

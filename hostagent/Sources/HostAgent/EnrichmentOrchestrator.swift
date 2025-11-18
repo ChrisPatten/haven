@@ -130,7 +130,7 @@ public actor DocumentEnrichmentOrchestrator: EnrichmentOrchestrator {
                         ocrConfig: ocrCfg,
                         faceConfig: faceCfg,
                         captionConfig: captionCfg,
-                        logger: logger
+                        logger: self.logger
                     )
                 }
             }

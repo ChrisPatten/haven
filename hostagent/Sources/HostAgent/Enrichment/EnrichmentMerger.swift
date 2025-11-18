@@ -39,7 +39,6 @@ public struct EnrichmentMerger {
         }
         
         // Process image enrichments and merge into metadata.attachments[]
-        var imagePlaceholders: [String] = []
         if !enrichedDocument.imageEnrichments.isEmpty {
             // Get existing attachments array from metadata (new schema format)
             var attachments = (metadata["attachments"] as? [[String: Any]]) ?? []
@@ -65,26 +64,45 @@ public struct EnrichmentMerger {
                     var ocrData: [String: Any] = [
                         "text": ocr.ocrText,
                         "confidence": ocr.recognitionLevel == "accurate" ? 0.95 : 0.85,
-                        "language": ocr.lang ?? "en"
+                        "language": ocr.lang
                     ]
                     
                     // Add regions if available (bounding boxes)
-                    if let boxes = ocr.boxes, !boxes.isEmpty {
-                        var regions: [[String: Any]] = []
-                        for box in boxes {
-                            regions.append([
+                    if let regions = ocr.regions, !regions.isEmpty {
+                        let regionDicts: [[String: Any]] = regions.map { region in
+                            return [
+                                "text": region.text,
+                                "bounding_box": [
+                                    "x": region.boundingBox.x,
+                                    "y": region.boundingBox.y,
+                                    "width": region.boundingBox.width,
+                                    "height": region.boundingBox.height
+                                ] as [String: Any],
+                                "confidence": region.confidence,
+                                "detected_language": region.detectedLanguage ?? ocr.lang
+                            ] as [String: Any]
+                        }
+                        ocrData["regions"] = regionDicts
+                    } else if !ocr.ocrBoxes.isEmpty {
+                        let regionDicts: [[String: Any]] = ocr.ocrBoxes.map { box in
+                            let bbox = box.bbox
+                            let x = bbox.count > 0 ? bbox[0] : 0
+                            let y = bbox.count > 1 ? bbox[1] : 0
+                            let w = bbox.count > 2 ? bbox[2] : 0
+                            let h = bbox.count > 3 ? bbox[3] : 0
+                            return [
                                 "text": box.text,
                                 "bounding_box": [
-                                    "x": box.boundingBox.x,
-                                    "y": box.boundingBox.y,
-                                    "width": box.boundingBox.width,
-                                    "height": box.boundingBox.height
-                                ],
+                                    "x": x,
+                                    "y": y,
+                                    "width": w,
+                                    "height": h
+                                ] as [String: Any],
                                 "confidence": box.confidence ?? 0.9,
-                                "detected_language": ocr.lang ?? "en"
-                            ])
+                                "detected_language": ocr.lang
+                            ] as [String: Any]
                         }
-                        ocrData["regions"] = regions
+                        ocrData["regions"] = regionDicts
                     }
                     
                     attachment["ocr"] = ocrData
@@ -98,7 +116,6 @@ public struct EnrichmentMerger {
                         "confidence": 0.85,
                         "generated_at": ISO8601DateFormatter().string(from: Date())
                     ]
-                    imagePlaceholders.append("[Image: \(filename) | \(captionText)]")
                 }
                 
                 // Build vision data (faces)
@@ -127,21 +144,6 @@ public struct EnrichmentMerger {
                 
                 // Update attachment in array
                 attachments[index] = attachment
-                
-                // Build image placeholder for text
-                var parts: [String] = [filename]
-                if let caption = attachment["caption"] as? [String: Any],
-                   let captionText = caption["text"] as? String {
-                    parts.append(captionText)
-                }
-                if let ocr = attachment["ocr"] as? [String: Any],
-                   let ocrText = ocr["text"] as? String {
-                    parts.append(ocrText)
-                }
-                if parts.count > 1 {
-                let placeholder = "[Image: \(parts.joined(separator: " | "))]"
-                imagePlaceholders.append(placeholder)
-                }
             }
             
             // Update metadata with enriched attachments
@@ -150,11 +152,53 @@ public struct EnrichmentMerger {
             }
         }
         
-        // Update document text to include image placeholders
-        if !imagePlaceholders.isEmpty {
-            if var content = document["content"] as? [String: Any],
-               var text = content["data"] as? String, !text.isEmpty {
-                text = text + "\n" + imagePlaceholders.joined(separator: "\n")
+        // Replace image tokens with slugs in content, ensuring positional context and single occurrence per image
+        if var content = document["content"] as? [String: Any],
+           var text = content["data"] as? String, !text.isEmpty {
+            // Build id → slug map from attachments
+            var idToSlug: [String: String] = [:]
+            if let attachments = (metadata["attachments"] as? [[String: Any]]) {
+                for attachment in attachments {
+                    guard let attachmentId = attachment["id"] as? String else { continue }
+                    
+                    // Determine filename or hash
+                    let filenameOrHash: String = {
+                        if let filename = attachment["filename"] as? String, !filename.isEmpty {
+                            return filename
+                        }
+                        if let path = attachment["path"] as? String, !path.isEmpty {
+                            // Use basename of path
+                            if let last = path.split(separator: "/").last {
+                                return String(last)
+                            }
+                            return path
+                        }
+                        if let hash = attachment["hash"] as? String, !hash.isEmpty {
+                            return hash
+                        }
+                        return "image"
+                    }()
+                    
+                    // Determine caption with fallback
+                    var captionText = "No caption"
+                    if let caption = attachment["caption"] as? [String: Any],
+                       let ctext = caption["text"] as? String, !ctext.isEmpty {
+                        captionText = ctext
+                    }
+                    
+                    let slug = "[Image: \(captionText) | \(filenameOrHash)]"
+                    idToSlug[attachmentId] = slug
+                }
+            }
+            
+            // Perform replacements for all known tokens
+            if !idToSlug.isEmpty {
+                for (attachmentId, slug) in idToSlug {
+                    let token = "{IMG:\(attachmentId)}"
+                    if text.contains(token) {
+                        text = text.replacingOccurrences(of: token, with: slug)
+                    }
+                }
                 content["data"] = text
                 document["content"] = content
             }
