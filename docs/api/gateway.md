@@ -30,6 +30,8 @@ Gateway is the public entry point to Haven. It accepts ingestion payloads, broke
 | `POST /v1/ingest/file` | [Deprecated] Legacy binary upload route (superseded by `metadata.attachments`) |
 | `GET /v1/ingest/{submission_id}` | Track ingestion status and chunk embedding progress |
 | `GET /v1/search` | Perform hybrid lexical/vector search with facets and timeline filters |
+| `POST /v1/search/converse` | Conversational search with LLM-driven query translation and facet inference |
+| `POST /v1/search/facets` | Discover available facets and counts for a query without executing full search |
 | `GET /search/people` | Search for people by name, email, phone number, or organization |
 | `POST /v1/ask` | Run curated search + summarisation with inline citations |
 | `GET /v1/documents/{document_id}` | Retrieve persisted documents; `PATCH` to update text/metadata |
@@ -155,5 +157,22 @@ curl -H "Authorization: Bearer $AUTH_TOKEN" \
 - Finding people mentioned in conversations
 - Verifying contact normalization worked correctly
 - Building relationship intelligence features
+
+### Conversational Search
+
+The conversational search endpoints enable natural language querying with automatic facet inference and context-aware retrieval:
+
+**`POST /v1/search/converse`** - Execute a conversational search query:
+- Translates natural language questions into structured search queries using LLM
+- Automatically infers facet filters (people, source_type, date ranges) from the question
+- Expands iMessage hits with surrounding context messages
+- Returns search results with inferred filters and facet counts for UI refinement
+
+**`POST /v1/search/facets`** - Discover available facets without full search:
+- Returns facet buckets (people, source_type, attachments, threads) with counts
+- Useful for building UI filter chips before executing search
+- Supports conversation context for maintaining filter state across queries
+
+Both endpoints support `conversation_id` for maintaining context across multiple queries, enabling follow-up questions like "narrow to just PDF receipts" that build on prior filters.
 
 _Adapted from `openapi/gateway.yaml`, `scripts/export_openapi.py`, and `documentation/technical_reference.md`._

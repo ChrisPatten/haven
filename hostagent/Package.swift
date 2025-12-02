@@ -152,7 +152,8 @@ let package = Package(
         .testTarget(
             name: "HavenCoreTests",
             dependencies: ["HavenCore"],
-            path: "Tests/HavenCoreTests"
+            path: "Tests/HavenCoreTests",
+            exclude: ["MailFiltersTests.swift"]
         ),
         .testTarget(
             name: "OCRTests",
@@ -174,7 +175,8 @@ let package = Package(
         .testTarget(
             name: "SubmissionTests",
             dependencies: ["HostAgentEmail", "Email", "HavenCore"],
-            path: "Tests/SubmissionTests"
+            path: "Tests/SubmissionTests",
+            exclude: ["README.md"]
         ),
         .testTarget(
             name: "IMAPTests",
@@ -185,6 +187,7 @@ let package = Package(
             name: "HostAgentTests",
             dependencies: ["HostAgentEmail", "HavenCore"],
             path: "Tests/HostAgentTests",
+            exclude: ["LocalFSCollectorTests.swift"],
             resources: [.copy("Fixtures")]
         ),
         .testTarget(

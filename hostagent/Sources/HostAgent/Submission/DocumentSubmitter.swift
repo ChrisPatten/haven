@@ -296,12 +296,43 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
             }
         }
         
-        let metadata = EmailDocumentMetadata(
+        // Try to preserve original metadata structure if available (for iMessage, etc.)
+        // Store it in headers so gateway can extract and use it
+        var enhancedHeaders = headers
+        if let originalMetadataJson = base.metadata.additionalMetadata["original_metadata"],
+           let jsonData = originalMetadataJson.data(using: .utf8),
+           let originalMetadata = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            // Preserve original metadata structure - merge enrichment into it
+            var preservedMetadata = originalMetadata
+            
+            // Merge enrichment data into original metadata if present
+            if let enrichment = mergedMetadataDict["enrichment"] as? [String: Any] {
+                preservedMetadata["enrichment"] = enrichment
+            }
+            
+            // Add image captions if present
+            if !imageCaptions.isEmpty {
+                if var enrichment = preservedMetadata["enrichment"] as? [String: Any] {
+                    enrichment["captions"] = imageCaptions
+                    preservedMetadata["enrichment"] = enrichment
+                } else {
+                    preservedMetadata["enrichment"] = ["captions": imageCaptions]
+                }
+            }
+            
+            // Store the full preserved metadata in headers so gateway can extract it
+            if let preservedMetadataJson = try? JSONSerialization.data(withJSONObject: preservedMetadata, options: []),
+               let preservedMetadataString = String(data: preservedMetadataJson, encoding: .utf8) {
+                enhancedHeaders["_original_metadata"] = preservedMetadataString
+            }
+        }
+        
+        let finalMetadata = EmailDocumentMetadata(
             messageId: nil,  // Would come from collector-specific logic
             subject: base.title,
             snippet: String(base.content.prefix(200)),  // Generate snippet from content
             listUnsubscribe: nil,
-            headers: headers,
+            headers: enhancedHeaders,
             hasAttachments: !base.images.isEmpty,
             attachmentCount: base.images.count,
             contentHash: base.metadata.contentHash,
@@ -335,18 +366,111 @@ public actor BatchDocumentSubmitter: DocumentSubmitter {
             completedAt = formatter.date(from: completedAtStr)
         }
         
+        // Extract thread payload from additionalMetadata if present
+        var threadId: UUID? = nil
+        var threadPayload: EmailThreadPayload? = nil
+        if let threadPayloadJson = base.metadata.additionalMetadata["thread_payload"],
+           let jsonData = threadPayloadJson.data(using: .utf8),
+           let threadDict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            // Convert iMessage thread format to EmailThreadPayload format
+            let externalId = threadDict["external_id"] as? String ?? ""
+            
+            // Generate deterministic UUID from external_id for threadId
+            if !externalId.isEmpty {
+                // Use SHA256 hash of external_id to generate deterministic UUID (same as EmailCollector)
+                let data = Data(externalId.utf8)
+                let digest = SHA256.hash(data: data)
+                var bytes = Array(digest.prefix(16))
+                if bytes.count < 16 {
+                    bytes += Array(repeating: 0, count: 16 - bytes.count)
+                }
+                bytes[6] = (bytes[6] & 0x0F) | 0x50 // Version 5
+                bytes[8] = (bytes[8] & 0x3F) | 0x80 // Variant RFC4122
+                threadId = bytes.withUnsafeBytes { ptr -> UUID in
+                    let rawPtr = ptr.bindMemory(to: UInt8.self)
+                    return UUID(uuid: uuid_t(rawPtr[0], rawPtr[1], rawPtr[2], rawPtr[3],
+                                             rawPtr[4], rawPtr[5], rawPtr[6], rawPtr[7],
+                                             rawPtr[8], rawPtr[9], rawPtr[10], rawPtr[11],
+                                             rawPtr[12], rawPtr[13], rawPtr[14], rawPtr[15]))
+                }
+            }
+            
+            // Convert participants from iMessage format to EmailDocumentPerson format
+            var participants: [EmailDocumentPerson] = []
+            if let participantsArray = threadDict["participants"] as? [[String: Any]] {
+                for participantDict in participantsArray {
+                    let identifier = participantDict["identifier"] as? String ?? ""
+                    let identifierType = participantDict["identifier_type"] as? String ?? "imessage"
+                    participants.append(EmailDocumentPerson(
+                        identifier: identifier,
+                        identifierType: identifierType,
+                        role: participantDict["role"] as? String ?? "participant"
+                    ))
+                }
+            }
+            
+            // Convert metadata from iMessage format (dict) to EmailThreadPayload format (dict of strings)
+            var threadMetadata: [String: String]? = nil
+            if let metadataDict = threadDict["metadata"] as? [String: Any] {
+                threadMetadata = [:]
+                for (key, value) in metadataDict {
+                    threadMetadata?[key] = "\(value)"
+                }
+            }
+            
+            threadPayload = EmailThreadPayload(
+                externalId: externalId,
+                sourceType: threadDict["source_type"] as? String,
+                sourceProvider: threadDict["source_provider"] as? String,
+                sourceAccountId: threadDict["source_account_id"] as? String,
+                title: threadDict["title"] as? String,
+                participants: participants,
+                metadata: threadMetadata
+            )
+        }
+        
+        // Extract people data from additionalMetadata if present
+        var people: [EmailDocumentPerson] = []
+        if let peoplePayloadJson = base.metadata.additionalMetadata["people_payload"],
+           let jsonData = peoplePayloadJson.data(using: .utf8),
+           let peopleArray = try? JSONSerialization.jsonObject(with: jsonData) as? [[String: Any]] {
+            for personDict in peopleArray {
+                let identifier = personDict["identifier"] as? String ?? ""
+                let identifierType = personDict["identifier_type"] as? String
+                let role = personDict["role"] as? String
+                let displayName = personDict["display_name"] as? String
+                
+                // Convert metadata if present
+                var personMetadata: [String: String]? = nil
+                if let metadataDict = personDict["metadata"] as? [String: Any] {
+                    personMetadata = [:]
+                    for (key, value) in metadataDict {
+                        personMetadata?[key] = "\(value)"
+                    }
+                }
+                
+                people.append(EmailDocumentPerson(
+                    identifier: identifier,
+                    identifierType: identifierType,
+                    role: role,
+                    displayName: displayName,
+                    metadata: personMetadata
+                ))
+            }
+        }
+        
         return EmailDocumentPayload(
             sourceType: base.sourceType,
             sourceId: base.externalId,
             title: base.title,
             canonicalUri: base.canonicalUri,
             content: content,
-            metadata: metadata,
+            metadata: finalMetadata,
             contentTimestamp: base.metadata.timestamp,
             contentTimestampType: base.metadata.timestampType ?? "modified",
-            people: [],  // People data would come from collector-specific logic
-            threadId: nil,  // Thread data would come from collector-specific logic
-            thread: nil,
+            people: people,
+            threadId: threadId,
+            thread: threadPayload,
             intent: nil,  // Intent would come from collector-specific logic
             relevanceScore: nil,
             hasDueDate: hasDueDate,

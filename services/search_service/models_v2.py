@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -67,4 +67,107 @@ class SearchChunk(BaseModel):
     text: str
 
 
-__all__ = ["SearchDocument", "SearchPerson", "SearchChunk"]
+# Conversational Search Models (matching OpenAPI spec)
+
+class FacetRange(BaseModel):
+    start: str
+    end: str
+    start_inclusive: bool = True
+    end_inclusive: bool = True
+
+
+class FacetFilter(BaseModel):
+    name: str
+    type: Literal["term", "range", "boolean"]
+    values: List[str] = Field(default_factory=list)
+    range: Optional[FacetRange] = None
+    exclude: bool = False
+
+
+class FacetValue(BaseModel):
+    value: str
+    display_name: str = ""
+    count: int
+    selected: bool = False
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class Facet(BaseModel):
+    name: str
+    display_name: str = ""
+    type: Literal["term", "range", "boolean"]
+    values: List[FacetValue] = Field(default_factory=list)
+    selected_values: List[str] = Field(default_factory=list)
+    range: Optional[FacetRange] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchConverseRequest(BaseModel):
+    question: str = Field(..., min_length=1)
+    conversation_id: Optional[str] = None
+    top_k: int = Field(default=5, ge=1, le=20)
+    facet_filters: List[FacetFilter] = Field(default_factory=list)
+
+
+class SearchConverseResponse(BaseModel):
+    query: str
+    conversation_id: str
+    answer: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    documents: List[Any] = Field(default_factory=list)  # Will be SearchHit from haven.search
+    document_count: int
+    facets: List[Facet] = Field(default_factory=list)
+    inferred_filters: List[FacetFilter] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchFacetsRequest(BaseModel):
+    question: str = Field(..., min_length=1)
+    conversation_id: Optional[str] = None
+    facet_filters: List[FacetFilter] = Field(default_factory=list)
+    facet_limit: int = Field(default=5, ge=1, le=10)
+
+
+class SearchFacetsResponse(BaseModel):
+    query: str
+    conversation_id: str
+    document_count: int
+    facets: List[Facet] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+# Internal models for search planning
+
+class SearchPlan(BaseModel):
+    """Internal model for LLM-generated search plan."""
+    keyword_query: str  # Keywords for lexical search
+    similarity_query: str  # Query for semantic/vector search
+    facet_filters: List[FacetFilter] = Field(default_factory=list)
+    retrieval_strategy: str = "hybrid"  # "lexical", "vector", "hybrid"
+    summarization_intent: str = "summary"  # "summary", "list", "comparison"
+
+
+class ConversationState(BaseModel):
+    """In-memory conversation state."""
+    conversation_id: str
+    latest_filters: List[FacetFilter] = Field(default_factory=list)
+    conversation_metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+__all__ = [
+    "SearchDocument",
+    "SearchPerson",
+    "SearchChunk",
+    "FacetRange",
+    "FacetFilter",
+    "FacetValue",
+    "Facet",
+    "SearchConverseRequest",
+    "SearchConverseResponse",
+    "SearchFacetsRequest",
+    "SearchFacetsResponse",
+    "SearchPlan",
+    "ConversationState",
+]

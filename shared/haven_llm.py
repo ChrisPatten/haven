@@ -38,6 +38,11 @@ from shared.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Feature flag for debug logging of prompts and responses
+_LLM_DEBUG_ENABLED = os.getenv("HAVEN_LLM_DEBUG", "false").lower() in ("true", "1", "yes")
+if _LLM_DEBUG_ENABLED:
+    logger.info("LLM debug logging enabled")
+
 
 # ============================================================================
 # Configuration & Settings
@@ -291,6 +296,18 @@ class OllamaProvider(LLMProvider):
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n{prompt}"
 
+        # Debug logging for prompts (behind feature flag)
+        if _LLM_DEBUG_ENABLED:
+            logger.debug(
+                "Ollama generate prompt",
+                model=model,
+                system_prompt=system_prompt,
+                prompt=prompt,
+                full_prompt=full_prompt,
+                temperature=temperature,
+                format=format,
+            )
+
         payload: Dict[str, Any] = {
             "model": model,
             "prompt": full_prompt,
@@ -317,6 +334,15 @@ class OllamaProvider(LLMProvider):
 
             data = response.json()
             text = data.get("response", "").strip()
+
+            # Debug logging for responses (behind feature flag)
+            if _LLM_DEBUG_ENABLED:
+                logger.debug(
+                    "Ollama generate response",
+                    model=model,
+                    response_text=text,
+                    raw_response=data,
+                )
 
             # Parse JSON if format was json
             if format == "json":
@@ -577,6 +603,18 @@ class OpenAIProvider(LLMProvider):
             }
         )
 
+        # Debug logging for prompts (behind feature flag)
+        if _LLM_DEBUG_ENABLED:
+            logger.debug(
+                "OpenAI generate prompt",
+                model=model,
+                system_prompt=system_prompt,
+                prompt=prompt,
+                inputs=inputs,
+                temperature=temperature,
+                format=format,
+            )
+
         payload: Dict[str, Any] = {
             "model": model,
             "input": inputs,
@@ -639,6 +677,15 @@ class OpenAIProvider(LLMProvider):
                     text_fragments.append(content.get("text", ""))
 
         text = "".join(text_fragments).strip()
+
+        # Debug logging for responses (behind feature flag)
+        if _LLM_DEBUG_ENABLED:
+            logger.debug(
+                "OpenAI generate response",
+                model=model,
+                response_text=text,
+                raw_response=data,
+            )
 
         logger.debug(
             "OpenAI API call succeeded",

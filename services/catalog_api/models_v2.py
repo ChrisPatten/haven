@@ -357,3 +357,24 @@ class IntentStatusResponse(BaseModel):
     intent_processing_started_at: Optional[datetime] = None
     intent_processing_completed_at: Optional[datetime] = None
     intent_processing_error: Optional[str] = None
+
+
+class RollbackRequest(BaseModel):
+    """Request to rollback documents added after a specific date"""
+    cutoff_date: datetime
+    date_field: str = Field(default="created_at", description="Field to use for date comparison: 'created_at', 'ingested_at', or 'content_timestamp'")
+
+    @validator("date_field")
+    def validate_date_field(cls, value: str) -> str:
+        allowed_fields = {"created_at", "ingested_at", "content_timestamp"}
+        if value not in allowed_fields:
+            raise ValueError(f"date_field must be one of: {', '.join(allowed_fields)}")
+        return value
+
+
+class RollbackResponse(BaseModel):
+    """Response for rollback operation statistics"""
+    documents_deleted: int
+    threads_deleted: int
+    chunks_deleted: int
+    submissions_deleted: int

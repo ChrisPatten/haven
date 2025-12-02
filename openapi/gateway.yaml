@@ -353,6 +353,52 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/search/converse:
+    post:
+      summary: Conversational search experience
+      operationId: converse_search_v1_search_converse_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchConverseRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchConverseResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/search/facets:
+    post:
+      summary: Facet suggestions for a conversational context
+      operationId: facets_search_v1_search_facets_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchFacetsRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchFacetsResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/ask:
     post:
       summary: Ask Endpoint
@@ -1190,6 +1236,233 @@ components:
       - query
       - results
       title: SearchResponse
+    SearchConverseRequest:
+      properties:
+        question:
+          type: string
+          minLength: 1
+          title: Question
+        conversation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Conversation Id
+        top_k:
+          type: integer
+          title: Top K
+          minimum: 1
+          maximum: 20
+          default: 5
+        facet_filters:
+          items:
+            $ref: '#/components/schemas/FacetFilter'
+          type: array
+          title: Facet Filters
+      required:
+      - question
+      type: object
+      title: SearchConverseRequest
+    SearchConverseResponse:
+      properties:
+        query:
+          type: string
+          title: Query
+        conversation_id:
+          type: string
+          title: Conversation Id
+        answer:
+          type: string
+          title: Answer
+        confidence:
+          type: number
+          format: float
+          title: Confidence
+          minimum: 0
+          maximum: 1
+        documents:
+          items:
+            $ref: '#/components/schemas/SearchHit'
+          type: array
+          title: Documents
+        document_count:
+          type: integer
+          title: Document Count
+        facets:
+          items:
+            $ref: '#/components/schemas/Facet'
+          type: array
+          title: Facets
+        inferred_filters:
+          items:
+            $ref: '#/components/schemas/FacetFilter'
+          type: array
+          title: Inferred Filters
+        metadata:
+          type: object
+          title: Metadata
+      required:
+      - query
+      - conversation_id
+      - answer
+      - documents
+      - facets
+      type: object
+      title: SearchConverseResponse
+    SearchFacetsRequest:
+      properties:
+        question:
+          type: string
+          minLength: 1
+          title: Question
+        conversation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Conversation Id
+        facet_filters:
+          items:
+            $ref: '#/components/schemas/FacetFilter'
+          type: array
+          title: Facet Filters
+        facet_limit:
+          type: integer
+          title: Facet Limit
+          minimum: 1
+          maximum: 10
+          default: 5
+      required:
+      - question
+      type: object
+      title: SearchFacetsRequest
+    SearchFacetsResponse:
+      properties:
+        query:
+          type: string
+          title: Query
+        conversation_id:
+          type: string
+          title: Conversation Id
+        document_count:
+          type: integer
+          title: Document Count
+        facets:
+          items:
+            $ref: '#/components/schemas/Facet'
+          type: array
+          title: Facets
+        metadata:
+          type: object
+          title: Metadata
+      required:
+      - query
+      - conversation_id
+      - facets
+      type: object
+      title: SearchFacetsResponse
+    FacetFilter:
+      properties:
+        name:
+          type: string
+          title: Name
+        type:
+          type: string
+          enum:
+          - term
+          - range
+          - boolean
+          title: Type
+        values:
+          items:
+            type: string
+          type: array
+          title: Values
+        range:
+          $ref: '#/components/schemas/FacetRange'
+        exclude:
+          type: boolean
+          title: Exclude
+          default: false
+      required:
+      - name
+      - type
+      type: object
+      title: FacetFilter
+    FacetRange:
+      properties:
+        start:
+          type: string
+          title: Start
+        end:
+          type: string
+          title: End
+        start_inclusive:
+          type: boolean
+          title: Start Inclusive
+          default: true
+        end_inclusive:
+          type: boolean
+          title: End Inclusive
+          default: true
+      type: object
+      title: FacetRange
+    Facet:
+      properties:
+        name:
+          type: string
+          title: Name
+        display_name:
+          type: string
+          title: Display Name
+        type:
+          type: string
+          enum:
+          - term
+          - range
+          - boolean
+          title: Type
+        values:
+          items:
+            $ref: '#/components/schemas/FacetValue'
+          type: array
+          title: Values
+        selected_values:
+          items:
+            type: string
+          type: array
+          title: Selected Values
+        range:
+          $ref: '#/components/schemas/FacetRange'
+        metadata:
+          type: object
+          title: Metadata
+      required:
+      - name
+      - type
+      type: object
+      title: Facet
+    FacetValue:
+      properties:
+        value:
+          type: string
+          title: Value
+        display_name:
+          type: string
+          title: Display Name
+        count:
+          type: integer
+          title: Count
+        selected:
+          type: boolean
+          title: Selected
+          default: false
+        metadata:
+          type: object
+          title: Metadata
+      required:
+      - value
+      - count
+      type: object
+      title: FacetValue
     ThreadPayloadModel:
       properties:
         external_id:

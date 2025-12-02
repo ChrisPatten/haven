@@ -391,17 +391,17 @@ def get_batch_thread_documents(as_of: datetime, lookback_minutes: int = 60) -> L
     with get_connection() as conn:
         with conn.cursor() as cur:
             query = """
-            WITH recent_threads AS (
-                SELECT DISTINCT thread_id
-                FROM documents
-                WHERE content_timestamp <= %s
-                    AND content_timestamp > %s
-                    AND is_active_version = true
-                    AND thread_id IS NOT NULL
+            WITH recent_docs AS (
+                SELECT DISTINCT 
+                    COALESCE(d.thread_id::text, d.external_id) as thread_key
+                FROM documents d
+                WHERE d.content_timestamp <= %s
+                    AND d.content_timestamp > %s
+                    AND d.is_active_version = true
             )
             SELECT 
                 d.doc_id,
-                t.external_id,
+                COALESCE(t.external_id, d.external_id) as external_id,
                 d.content_timestamp,
                 d.ingested_at,
                 d.text,
@@ -409,11 +409,11 @@ def get_batch_thread_documents(as_of: datetime, lookback_minutes: int = 60) -> L
                 d.metadata,
                 d.source_type
             FROM documents d
-            JOIN recent_threads rt ON d.thread_id = rt.thread_id
-            JOIN threads t ON d.thread_id = t.thread_id
+            JOIN recent_docs rd ON COALESCE(d.thread_id::text, d.external_id) = rd.thread_key
+            LEFT JOIN threads t ON d.thread_id = t.thread_id
             WHERE d.is_active_version = true
                 AND d.content_timestamp <= %s
-            ORDER BY t.external_id, d.content_timestamp ASC
+            ORDER BY COALESCE(t.external_id, d.external_id), d.content_timestamp ASC
             """
             
             cur.execute(query, (as_of, lookback_cutoff, as_of))

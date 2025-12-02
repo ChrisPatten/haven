@@ -1846,6 +1846,15 @@ pending → processing → embedded
 - Marks chunks as `embedded`
 - Triggers document status update to `indexed`
 
+**Endpoint**: `DELETE /v1/catalog/documents/rollback`
+- Deletes documents added after a specified date (configurable date field: `created_at`, `ingested_at`, or `content_timestamp`)
+- Physically deletes documents (not soft delete) to allow re-ingestion
+- Deletes `ingest_submissions` records for deleted documents (enables re-ingestion with same idempotency_key)
+- Cleans up orphaned chunks (chunks with no `chunk_documents` references)
+- Cleans up orphaned threads (threads with no remaining documents)
+- Returns statistics: `documents_deleted`, `threads_deleted`, `chunks_deleted`, `submissions_deleted`
+- **Use case**: Rollback documents with bad metadata, then re-run collector to re-ingest with correct metadata
+
 ### Gateway API
 
 **Endpoint**: `POST /v1/ingest`

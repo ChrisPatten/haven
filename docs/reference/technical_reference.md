@@ -84,6 +84,7 @@ Versioning: `PATCH /v1/catalog/documents/{doc_id}/version` clones document state
 | `GET /v1/catalog/documents/{doc_id}/status` | Per-document chunk counts and status |
 | `POST /v1/catalog/embeddings` | Accepts embedding vectors, updates chunk + document workflow status |
 | `DELETE /v1/catalog/documents/{doc_id}` | Soft delete: removes file links, chunk associations, sets `is_active_version=false` |
+| `DELETE /v1/catalog/documents/rollback` | Rollback: deletes documents added after a specified date, cleans up orphaned threads/chunks, and deletes ingest_submissions to allow re-ingestion |
 | `GET /v1/context/general` | Thread/document summary derived from unified schema |
 | `GET /v1/healthz` | Health probe |
 
@@ -96,6 +97,15 @@ Logging binds `doc_id`, `external_id`, `source_type`, `version_number` for trace
 * **Ranking:** Recency boost (`content_timestamp`), attachment boost, source weighting (email > imessage > sms > others).
 * **Metadata:** Each `SearchHit` includes facets (`source_type`, `has_attachments`, `person`), timeline (UTC ISO), people array, and thread ID.
 * **Vector Search:** Uses Qdrant `Filter` with payload fields; fallback to lexical only when vector text absent.
+
+### Conversational Search
+
+The search service includes conversational search capabilities via `POST /v1/search/converse` and `POST /v1/search/facets`:
+
+* **Search Planner** (`services/search_service/search_planner.py`): Uses LLM to translate natural language questions into structured search queries with inferred facet filters (people, source_type, date ranges). Supports conversation context and prior filter state.
+* **Context Expander** (`services/search_service/context_expander.py`): Expands iMessage search hits with surrounding messages from the same thread (default: 8 hours lookback, 2 hours lookahead, max 10 messages per hit).
+* **Facet Aggregator** (`services/search_service/facet_aggregator.py`): Aggregates facet counts from search results (people, source_type, attachments, threads) with selected state tracking for UI filter chips.
+* **Conversation Store** (`services/search_service/conversation_store.py`): In-memory store for conversation state with TTL cleanup (default: 24 hours). Maintains filter state across multiple queries for follow-up questions.
 
 ## 7. Embedding Worker
 

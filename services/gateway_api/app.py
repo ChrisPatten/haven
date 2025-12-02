@@ -1095,6 +1095,20 @@ def _prepare_ingest_document_payload(
 
     # Metadata is already fully formed from Haven.app, including enrichment_entities if present
     metadata = dict(payload.metadata)  # Copy to avoid mutating original
+    
+    # If original metadata is preserved in headers (for iMessage, etc.), extract and use it
+    if isinstance(metadata, dict) and "headers" in metadata:
+        headers = metadata.get("headers", {})
+        if isinstance(headers, dict) and "_original_metadata" in headers:
+            import json
+            try:
+                original_metadata = json.loads(headers["_original_metadata"])
+                if isinstance(original_metadata, dict):
+                    # Use the original metadata structure instead of email-style metadata
+                    metadata = original_metadata
+            except (json.JSONDecodeError, TypeError):
+                # If parsing fails, continue with existing metadata
+                pass
 
     catalog_payload: Dict[str, Any] = {
         "idempotency_key": idempotency_key,
@@ -2991,6 +3005,56 @@ async def ask_endpoint(
         for hit in ordered_docs
     ]
     return AskResponse(query=payload.query, answer=answer, citations=citations)
+
+
+@app.post("/v1/search/converse")
+async def converse_search(
+    payload: Dict[str, Any],
+    _: None = Depends(require_token),
+) -> Dict[str, Any]:
+    """Proxy conversational search requests to search service."""
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if settings.search_token:
+        headers["Authorization"] = f"Bearer {settings.search_token}"
+
+    async with httpx.AsyncClient(
+        base_url=settings.search_url, timeout=settings.search_timeout
+    ) as client:
+        response = await client.post("/v1/search/converse", json=payload, headers=headers)
+
+    if response.status_code >= 400:
+        try:
+            detail: Any = response.json()
+        except ValueError:
+            detail = response.text
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    return response.json()
+
+
+@app.post("/v1/search/facets")
+async def facets_search(
+    payload: Dict[str, Any],
+    _: None = Depends(require_token),
+) -> Dict[str, Any]:
+    """Proxy facet discovery requests to search service."""
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if settings.search_token:
+        headers["Authorization"] = f"Bearer {settings.search_token}"
+
+    async with httpx.AsyncClient(
+        base_url=settings.search_url, timeout=settings.search_timeout
+    ) as client:
+        response = await client.post("/v1/search/facets", json=payload, headers=headers)
+
+    if response.status_code >= 400:
+        try:
+            detail: Any = response.json()
+        except ValueError:
+            detail = response.text
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    return response.json()
 
 
 def convert_hit(hit: SearchServiceHit) -> SearchHit:

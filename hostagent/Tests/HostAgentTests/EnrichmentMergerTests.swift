@@ -1,5 +1,5 @@
 import XCTest
-import HostAgent
+import HostAgentEmail
 import HavenCore
 
 final class EnrichmentMergerTests: XCTestCase {
@@ -20,7 +20,26 @@ final class EnrichmentMergerTests: XCTestCase {
             ]
         ]
         
+        // Create a dummy base document for EnrichedDocument
+        let dummyBase = CollectorDocument(
+            content: "",
+            sourceType: "test",
+            externalId: "test-1",
+            metadata: DocumentMetadata(
+                contentHash: "test",
+                mimeType: "text/plain",
+                timestamp: Date(),
+                timestampType: "modified",
+                createdAt: Date(),
+                modifiedAt: Date()
+            ),
+            images: [],
+            contentType: .email,
+            title: "",
+            canonicalUri: nil
+        )
         let enrichedDocument = EnrichedDocument(
+            base: dummyBase,
             documentEnrichment: nil,
             imageEnrichments: []
         )
@@ -50,7 +69,26 @@ final class EnrichmentMergerTests: XCTestCase {
             ]
         ]
         
+        // Create a dummy base document for EnrichedDocument
+        let dummyBase = CollectorDocument(
+            content: "",
+            sourceType: "test",
+            externalId: "test-1",
+            metadata: DocumentMetadata(
+                contentHash: "test",
+                mimeType: "text/plain",
+                timestamp: Date(),
+                timestampType: "modified",
+                createdAt: Date(),
+                modifiedAt: Date()
+            ),
+            images: [],
+            contentType: .email,
+            title: "",
+            canonicalUri: nil
+        )
         let enrichedDocument = EnrichedDocument(
+            base: dummyBase,
             documentEnrichment: nil,
             imageEnrichments: []
         )
@@ -81,7 +119,26 @@ final class EnrichmentMergerTests: XCTestCase {
             ]
         ]
         
+        // Create a dummy base document for EnrichedDocument
+        let dummyBase = CollectorDocument(
+            content: "",
+            sourceType: "test",
+            externalId: "test-1",
+            metadata: DocumentMetadata(
+                contentHash: "test",
+                mimeType: "text/plain",
+                timestamp: Date(),
+                timestampType: "modified",
+                createdAt: Date(),
+                modifiedAt: Date()
+            ),
+            images: [],
+            contentType: .email,
+            title: "",
+            canonicalUri: nil
+        )
         let enrichedDocument = EnrichedDocument(
+            base: dummyBase,
             documentEnrichment: nil,
             imageEnrichments: []
         )
@@ -117,7 +174,26 @@ final class EnrichmentMergerTests: XCTestCase {
             ]
         ]
         
+        // Create a dummy base document for EnrichedDocument
+        let dummyBase = CollectorDocument(
+            content: "",
+            sourceType: "test",
+            externalId: "test-1",
+            metadata: DocumentMetadata(
+                contentHash: "test",
+                mimeType: "text/plain",
+                timestamp: Date(),
+                timestampType: "modified",
+                createdAt: Date(),
+                modifiedAt: Date()
+            ),
+            images: [],
+            contentType: .email,
+            title: "",
+            canonicalUri: nil
+        )
         let enrichedDocument = EnrichedDocument(
+            base: dummyBase,
             documentEnrichment: nil,
             imageEnrichments: []
         )
@@ -140,7 +216,26 @@ final class EnrichmentMergerTests: XCTestCase {
             "metadata": [:]
         ]
         
+        // Create a dummy base document for EnrichedDocument
+        let dummyBase = CollectorDocument(
+            content: "",
+            sourceType: "test",
+            externalId: "test-1",
+            metadata: DocumentMetadata(
+                contentHash: "test",
+                mimeType: "text/plain",
+                timestamp: Date(),
+                timestampType: "modified",
+                createdAt: Date(),
+                modifiedAt: Date()
+            ),
+            images: [],
+            contentType: .email,
+            title: "",
+            canonicalUri: nil
+        )
         let enrichedDocument = EnrichedDocument(
+            base: dummyBase,
             documentEnrichment: nil,
             imageEnrichments: []
         )

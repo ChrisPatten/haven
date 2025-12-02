@@ -235,7 +235,7 @@ final class EmailCollectorTests: XCTestCase {
             baseUrl: "http://gateway.test",
             ingestPath: "/v1/ingest",
             ingestFilePath: "/v1/ingest/file",
-            timeout: 5
+            timeoutMs: 5000
         )
     }
     

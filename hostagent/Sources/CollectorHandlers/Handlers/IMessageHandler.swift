@@ -2836,6 +2836,44 @@ public actor IMessageHandler {
             "image_count": String(images.count)
         ])
         
+        // Store thread payload, people, and original metadata in additionalMetadata so they can be extracted later
+        var additionalMetadata: [String: String] = [:]
+        
+        // Store thread payload
+        if let threadDict = baseDocument["thread"] as? [String: Any] {
+            // JSON-encode the thread dictionary to store in additionalMetadata
+            if let jsonData = try? JSONSerialization.data(withJSONObject: threadDict, options: []),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                additionalMetadata["thread_payload"] = jsonString
+                logger.debug("Stored thread payload in additionalMetadata", metadata: [
+                    "source_id": baseDocument["source_id"] as? String ?? "unknown"
+                ])
+            }
+        }
+        
+        // Store people array
+        if let peopleArray = baseDocument["people"] as? [[String: Any]] {
+            if let jsonData = try? JSONSerialization.data(withJSONObject: peopleArray, options: []),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                additionalMetadata["people_payload"] = jsonString
+                logger.debug("Stored people payload in additionalMetadata", metadata: [
+                    "source_id": baseDocument["source_id"] as? String ?? "unknown",
+                    "people_count": String(peopleArray.count)
+                ])
+            }
+        }
+        
+        // Store original metadata structure (to preserve iMessage-specific metadata)
+        if let originalMetadata = baseDocument["metadata"] as? [String: Any] {
+            if let jsonData = try? JSONSerialization.data(withJSONObject: originalMetadata, options: []),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                additionalMetadata["original_metadata"] = jsonString
+                logger.debug("Stored original metadata in additionalMetadata", metadata: [
+                    "source_id": baseDocument["source_id"] as? String ?? "unknown"
+                ])
+            }
+        }
+        
         return CollectorDocument(
             content: content,
             sourceType: "imessage",
@@ -2846,7 +2884,8 @@ public actor IMessageHandler {
                 timestamp: contentTimestamp,
                 timestampType: baseDocument["content_timestamp_type"] as? String ?? "received",
                 createdAt: contentTimestamp,
-                modifiedAt: contentTimestamp
+                modifiedAt: contentTimestamp,
+                additionalMetadata: additionalMetadata
             ),
             images: images,
             contentType: .imessage,

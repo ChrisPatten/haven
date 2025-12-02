@@ -157,19 +157,39 @@ class HybridSearchService:
         search_filter = qm.Filter(must=must_conditions) if must_conditions else None
 
         try:
-            response = self._client.search(
-                collection_name=self._settings.qdrant_collection,
-                query_vector=vector.tolist(),
-                limit=limit,
-                with_payload=True,
-                query_filter=search_filter,
-            )
+            # Use query_points API (qdrant-client 1.7+)
+            # Try with plain vector first (for collections without named vectors)
+            try:
+                response = self._client.query_points(
+                    collection_name=self._settings.qdrant_collection,
+                    query=vector.tolist(),
+                    limit=limit,
+                    with_payload=True,
+                    query_filter=search_filter,
+                )
+            except (TypeError, ValueError) as e:
+                # Fallback: try with NamedVector if collection uses named vectors
+                if "query" in str(e).lower() or "vector" in str(e).lower():
+                    response = self._client.query_points(
+                        collection_name=self._settings.qdrant_collection,
+                        query=qm.NamedVector(
+                            name="text",
+                            vector=vector.tolist(),
+                        ),
+                        limit=limit,
+                        with_payload=True,
+                        query_filter=search_filter,
+                    )
+                else:
+                    raise
         except Exception as exc:  # pragma: no cover - network failures are tolerated
             logger.warning("vector_search_failed", error=str(exc))
             return {}
 
         scores: Dict[str, Dict[str, Any]] = {}
-        for point in response:
+        # query_points returns a QueryResponse with .points attribute
+        points = response.points if hasattr(response, 'points') else response
+        for point in points:
             payload = point.payload or {}
             chunk_id = payload.get("chunk_id") or payload.get("id")
             document_id = payload.get("document_id") or payload.get("doc_id")

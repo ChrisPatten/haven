@@ -56,6 +56,8 @@ from services.catalog_api.models_v2 import (
     IntentSignalFeedbackRequest,
     IntentSignalResponse,
     IntentStatusResponse,
+    RollbackRequest,
+    RollbackResponse,
     ThreadPayload,
     PersonPayload as DocumentPersonPayload,
     PersonIngestResponse,
@@ -2233,4 +2235,107 @@ def get_document_intent_status(
         intent_processing_started_at=doc_row["intent_processing_started_at"],
         intent_processing_completed_at=doc_row["intent_processing_completed_at"],
         intent_processing_error=doc_row["intent_processing_error"],
+    )
+
+
+@app.delete(
+    "/v1/catalog/documents/rollback",
+    response_model=RollbackResponse,
+    status_code=status.HTTP_200_OK,
+)
+def rollback_documents(
+    payload: RollbackRequest,
+    _token: None = Depends(verify_token),
+) -> RollbackResponse:
+    """Delete documents added after a specific date and clean up orphaned threads/chunks.
+    
+    This endpoint allows re-ingestion of documents with the same idempotency_key by
+    deleting both the documents and their ingest_submissions records.
+    """
+    cutoff_date = _ensure_utc(payload.cutoff_date)
+    date_field = payload.date_field
+    
+    # Map date_field to column name (validated by Pydantic, but double-check for safety)
+    date_field_map = {
+        "created_at": "created_at",
+        "ingested_at": "ingested_at",
+        "content_timestamp": "content_timestamp",
+    }
+    
+    if date_field not in date_field_map:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid date_field: {date_field}. Must be one of: created_at, ingested_at, content_timestamp",
+        )
+    
+    column_name = date_field_map[date_field]
+    
+    with get_connection(autocommit=False) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            # Delete documents matching criteria and get their IDs
+            # Using parameterized query with column name from validated map
+            cur.execute(
+                f"""
+                DELETE FROM documents
+                WHERE {column_name} > %s
+                RETURNING doc_id, thread_id
+                """,
+                (cutoff_date,),
+            )
+            deleted_docs = cur.fetchall()
+            doc_ids = [row["doc_id"] for row in deleted_docs]
+            documents_deleted = len(doc_ids)
+            
+            # Delete ingest_submissions records for deleted documents
+            # This allows re-ingestion with the same idempotency_key
+            submissions_deleted = 0
+            if doc_ids:
+                cur.execute(
+                    """
+                    DELETE FROM ingest_submissions
+                    WHERE result_doc_id = ANY(%s)
+                    """,
+                    (doc_ids,),
+                )
+                submissions_deleted = cur.rowcount or 0
+            
+            # Delete orphaned chunks (chunks with no chunk_documents references)
+            cur.execute(
+                """
+                DELETE FROM chunks
+                WHERE chunk_id NOT IN (SELECT DISTINCT chunk_id FROM chunk_documents)
+                """
+            )
+            chunks_deleted = cur.rowcount or 0
+            
+            # Delete orphaned threads (threads with no documents)
+            cur.execute(
+                """
+                DELETE FROM threads
+                WHERE thread_id NOT IN (
+                    SELECT DISTINCT thread_id
+                    FROM documents
+                    WHERE thread_id IS NOT NULL
+                )
+                """
+            )
+            threads_deleted = cur.rowcount or 0
+            
+        conn.commit()
+    
+    logger.info(
+        "rollback_completed",
+        cutoff_date=cutoff_date.isoformat(),
+        date_field=date_field,
+        documents_deleted=documents_deleted,
+        threads_deleted=threads_deleted,
+        chunks_deleted=chunks_deleted,
+        submissions_deleted=submissions_deleted,
+    )
+    
+    return RollbackResponse(
+        documents_deleted=documents_deleted,
+        threads_deleted=threads_deleted,
+        chunks_deleted=chunks_deleted,
+        submissions_deleted=submissions_deleted,
     )
