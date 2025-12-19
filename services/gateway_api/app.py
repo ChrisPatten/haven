@@ -35,12 +35,12 @@ from pydantic import BaseModel, Field, ConfigDict, ValidationError, model_valida
 
 try:  # pragma: no cover - optional dependency for tests
     from psycopg.rows import dict_row
+    from psycopg import Connection
 except ImportError:  # pragma: no cover
+    from typing import Any as _Any
 
-    def dict_row(*_args, **_kwargs):  # type: ignore[misc]
-        raise RuntimeError(
-            "psycopg is required for gateway database access; install haven-platform[common]"
-        )
+    dict_row = None  # type: ignore[assignment]
+    Connection = _Any  # type: ignore[misc,assignment]
 
 
 from haven.search.models import (
@@ -65,10 +65,12 @@ from shared.people_repository import (
     ContactUrl,
     ContactValue,
     PersonIngestRecord,
+    PeopleResolver,
     PeopleRepository,
     get_self_person_id_from_settings,
     store_self_person_id_if_needed,
 )
+from shared.people_normalization import IdentifierKind, normalize_identifier
 
 
 assert_missing_dependencies(["authlib", "redis", "jinja2"], "Gateway API")
@@ -325,7 +327,7 @@ class ContactIngestResponse(BaseModel):
 
 
 def _check_and_set_self_person_id(
-    conn: Connection,
+    conn: Any,
     self_identifier: str,
     records: List[PersonIngestRecord],
     source: str,
@@ -824,7 +826,7 @@ class IngestRequestModel(BaseModel):
 
 
 class BatchIngestRequest(BaseModel):
-    documents: List[IngestRequestModel] = Field(default_factory=list, min_items=1)
+    documents: List[IngestRequestModel] = Field(default_factory=list, min_length=1)
 
 
 class BatchIngestItemResult(BaseModel):
@@ -2000,11 +2002,11 @@ async def ingest_documents_batch(
         )
 
     if prepared_items:
-        request_payload = {"documents": [item.payload for item in prepared_items]}
-        idempotency_keys = [
-            item.payload.get("idempotency_key")
+        request_payload: Dict[str, Any] = {"documents": [item.payload for item in prepared_items]}
+        idempotency_keys: list[str] = [
+            str(key)
             for item in prepared_items
-            if item.payload.get("idempotency_key")
+            if (key := item.payload.get("idempotency_key"))
         ]
         if idempotency_keys:
             request_payload["batch_idempotency_key"] = _derive_batch_idempotency_key(idempotency_keys)
@@ -2344,9 +2346,12 @@ async def ingest_file(
             client.stat_object(settings.minio_bucket, object_key)
             object_exists = True
         except S3Error as exc:
+            status_code = getattr(exc, "status_code", None)
+            if status_code is None:
+                status_code = getattr(exc, "status", None)
             if (
                 exc.code not in {"NoSuchKey", "NoSuchObject", "NoSuchEntity"}
-                and exc.status != 404
+                and status_code != 404
             ):
                 logger.error(
                     "minio_stat_failed",
@@ -2688,7 +2693,6 @@ class DocumentListResponse(BaseModel):
     documents: List[DocumentListItem]
     count: int
 
-
 @app.get("/v1/documents", response_model=DocumentListResponse)
 async def list_documents(
     source_type: Optional[str] = Query(None),
@@ -2745,6 +2749,40 @@ async def list_documents(
             ]
 
     return DocumentListResponse(documents=documents, count=len(documents))
+
+@app.get("/v1/imessages")
+async def get_imessages(
+    from_date: datetime = Query(..., description="ISO 8601 datetime (e.g. 2024-01-01T00:00:00Z)"),
+    max_messages_per_thread: int | None = Query(None, ge=1, description="Maximum number of messages to return per thread (None = no limit)"),
+    _: None = Depends(require_token),
+) -> Any:
+    """Proxy iMessage fetch to Catalog service.
+
+    Gateway handles auth and routing; Catalog owns DB access and response formatting.
+    """
+    headers: Dict[str, str] = {}
+    if settings.catalog_token:
+        headers["Authorization"] = f"Bearer {settings.catalog_token}"
+
+    params: Dict[str, Any] = {"from_date": from_date.isoformat()}
+    if max_messages_per_thread is not None:
+        params["max_messages_per_thread"] = max_messages_per_thread
+
+    async with httpx.AsyncClient(base_url=settings.catalog_base_url, timeout=30.0) as client:
+        response = await client.get(
+            "/v1/imessages",
+            params=params,
+            headers=headers,
+        )
+
+    if response.status_code >= 400:
+        try:
+            detail: Any = response.json()
+        except ValueError:
+            detail = response.text
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    return response.json()
 
 
 @app.get("/search/people", response_model=PeopleSearchResponse)
@@ -2877,13 +2915,13 @@ def search_people(
     for row in rows:
         metadata = row.get("metadata") or {}
         contact_meta = metadata.get("contact") or {}
-        emails = [
-            entry.get("value")
+        emails: List[str] = [
+            str(entry.get("value"))
             for entry in contact_meta.get("emails", [])
             if isinstance(entry, dict) and entry.get("value")
         ]
-        phones = [
-            entry.get("value")
+        phones: List[str] = [
+            str(entry.get("value"))
             for entry in contact_meta.get("phones", [])
             if isinstance(entry, dict) and entry.get("value")
         ]
@@ -3046,6 +3084,68 @@ async def facets_search(
         base_url=settings.search_url, timeout=settings.search_timeout
     ) as client:
         response = await client.post("/v1/search/facets", json=payload, headers=headers)
+
+    if response.status_code >= 400:
+        try:
+            detail: Any = response.json()
+        except ValueError:
+            detail = response.text
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    return response.json()
+
+
+@app.post("/v1/search/query")
+async def query_search(
+    payload: Dict[str, Any],
+    _: None = Depends(require_token),
+) -> Dict[str, Any]:
+    """Proxy search query requests to search service with full SearchRequest support.
+    
+    This endpoint provides full access to hybrid search capabilities including:
+    - Hybrid lexical + vector search
+    - Advanced filtering (source_type, person, thread_id, date ranges, etc.)
+    - Thread context window (automatic conversation context)
+    - Compact format for LLM consumption
+    - Conversation summaries and participant resolution
+    """
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if settings.search_token:
+        headers["Authorization"] = f"Bearer {settings.search_token}"
+
+    async with httpx.AsyncClient(
+        base_url=settings.search_url, timeout=settings.search_timeout
+    ) as client:
+        response = await client.post("/v1/search/query", json=payload, headers=headers)
+
+    if response.status_code >= 400:
+        try:
+            detail: Any = response.json()
+        except ValueError:
+            detail = response.text
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    return response.json()
+
+
+@app.post("/v1/search/similar")
+async def similar_search(
+    payload: Dict[str, Any],
+    _: None = Depends(require_token),
+) -> Dict[str, Any]:
+    """Proxy vector similarity search requests to search service.
+    
+    This endpoint performs vector similarity search using the provided vector query.
+    Requires a vector specification in the request payload.
+    """
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if settings.search_token:
+        headers["Authorization"] = f"Bearer {settings.search_token}"
+
+    async with httpx.AsyncClient(
+        base_url=settings.search_url, timeout=settings.search_timeout
+    ) as client:
+        response = await client.post("/v1/search/similar", json=payload, headers=headers)
 
     if response.status_code >= 400:
         try:

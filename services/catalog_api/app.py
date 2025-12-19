@@ -12,8 +12,8 @@ from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import orjson
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, Query, status
+from pydantic import BaseModel, Field, ConfigDict
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
@@ -35,7 +35,7 @@ from shared.people_repository import (
     PeopleResolver,
     get_self_person_id_from_settings,
 )
-from shared.people_normalization import IdentifierKind
+from shared.people_normalization import IdentifierKind, normalize_identifier
 from shared.context import fetch_context_overview
 from services.catalog_api.models_v2 import (
     DeleteDocumentResponse,
@@ -67,6 +67,46 @@ from services.catalog_api.models_v2 import (
 print("catalog_api.app.py loaded")
 
 logger = get_logger("catalog.api")
+
+
+class IMessageItem(BaseModel):
+    from_: str = Field(alias="from")
+    body: str
+    date: datetime
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class IMessageThread(BaseModel):
+    thread_id: str | None
+    thread_name: str | None
+    participants: List[str] = Field(default_factory=list)
+    messages: List[IMessageItem]
+    has_older_messages: bool = Field(default=False, description="True if older messages were truncated due to max_messages_per_thread limit")
+
+
+def _strip_identifier_prefix(value: str | None) -> str | None:
+    """Strip common single-letter prefixes used in some stored identifiers (e.g. 'E:', 'P:')."""
+    if not value:
+        return None
+    if ":" in value:
+        prefix, rest = value.split(":", 1)
+        if len(prefix) == 1 and rest:
+            return rest
+    return value
+
+
+def _infer_identifier_kind(value: str | None, identifier_type: str | None) -> IdentifierKind | None:
+    if not value:
+        return None
+    ident_type = (identifier_type or "").lower().strip()
+    if ident_type in ("email",):
+        return IdentifierKind.EMAIL
+    if ident_type in ("phone", "imessage", "sms"):
+        return IdentifierKind.PHONE
+    if "@" in value:
+        return IdentifierKind.EMAIL
+    return IdentifierKind.PHONE
 
 
 class CatalogSettings(BaseModel):
@@ -1957,6 +1997,310 @@ def get_context_general() -> ContextGeneralResponse:
         top_threads=top_threads,
         recent_highlights=recent_highlights,
     )
+
+
+@app.get("/v1/imessages", response_model=List[IMessageThread])
+def get_imessages(
+    from_date: datetime = Query(..., description="ISO 8601 datetime (e.g. 2024-01-01T00:00:00Z)"),
+    max_messages_per_thread: int | None = Query(None, ge=1, description="Maximum number of messages to return per thread (None = no limit)"),
+    _token: None = Depends(verify_token),
+) -> List[IMessageThread]:
+    # Normalize datetime: treat naive as UTC; store/query in UTC.
+    if from_date.tzinfo is None:
+        from_date = from_date.replace(tzinfo=UTC)
+    else:
+        from_date = from_date.astimezone(UTC)
+
+    rows: list[dict[str, Any]] = []
+    per_row_sender: list[tuple[str | None, str | None, bool]] = []  # (lookup_key, fallback, is_from_me)
+    resolved: dict[str, dict[str, str]] = {}
+    self_display_name: str | None = None
+
+    with get_connection() as conn:
+        # Resolve self display name (best-effort)
+        try:
+            self_person_id = get_self_person_id_from_settings(conn)
+            if self_person_id:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        "SELECT display_name FROM people WHERE person_id = %s AND deleted = FALSE",
+                        (self_person_id,),
+                    )
+                    r = cur.fetchone()
+                    if r:
+                        self_display_name = r.get("display_name")
+        except Exception:
+            self_display_name = None
+
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT
+                    d.thread_id,
+                    t.title AS thread_name,
+                    t.participants AS thread_participants,
+                    d.content_timestamp,
+                    d.text,
+                    d.people,
+                    d.metadata
+                FROM documents d
+                LEFT JOIN threads t ON d.thread_id = t.thread_id
+                WHERE d.is_active_version = true
+                  AND d.content_timestamp >= %s
+                  AND (
+                        d.source_type = 'imessage'
+                        OR d.metadata->'thread'->>'kind' = 'imessage'
+                      )
+                ORDER BY d.content_timestamp ASC, d.doc_id ASC
+                """,
+                (from_date,),
+            )
+            rows = cur.fetchall()
+
+        if not rows:
+            return []
+
+        # Step 1: collect sender identifiers for batch resolution
+        sender_keys: dict[str, str] = {}  # key(kind:canonical) -> fallback (stripped)
+
+        for row in rows:
+            people_data = row.get("people") or []
+            metadata = row.get("metadata") or {}
+
+            raw_identifier: str | None = None
+            identifier_type: str | None = None
+
+            if isinstance(people_data, list):
+                for person in people_data:
+                    if isinstance(person, dict) and person.get("role") == "sender":
+                        raw_identifier = person.get("identifier")
+                        identifier_type = person.get("identifier_type")
+                        break
+
+            if not raw_identifier and isinstance(metadata, dict):
+                msg = metadata.get("message") or {}
+                if isinstance(msg, dict):
+                    raw_identifier = msg.get("sender") or raw_identifier
+                    identifier_type = msg.get("sender_type") or identifier_type
+
+            stripped = _strip_identifier_prefix(raw_identifier)
+            kind = _infer_identifier_kind(stripped, identifier_type)
+
+            is_from_me = False
+            if isinstance(metadata, dict):
+                msg = metadata.get("message") or {}
+                if isinstance(msg, dict):
+                    is_from_me = bool(msg.get("is_from_me")) or (msg.get("direction") == "sent")
+
+            if stripped and kind is not None:
+                try:
+                    normalized = normalize_identifier(
+                        kind,
+                        stripped,
+                        default_region=settings.contacts_default_region,
+                    )
+                    key = f"{normalized.kind.value}:{normalized.value_canonical}"
+                    sender_keys.setdefault(key, stripped)
+                    per_row_sender.append((key, stripped, is_from_me))
+                except Exception:
+                    per_row_sender.append((None, stripped, is_from_me))
+            else:
+                per_row_sender.append((None, stripped, is_from_me))
+
+        # Step 2: collect participant identifiers for batch resolution
+        participant_keys: dict[str, str] = {}  # key(kind:canonical) -> fallback (stripped)
+        thread_participants_map: dict[str | None, list[dict[str, Any]]] = {}  # thread_id -> list of participant dicts
+        
+        for row in rows:
+            thread_id_val = row.get("thread_id")
+            thread_id: str | None = str(thread_id_val) if thread_id_val else None
+            
+            # Get participants data - handle None from LEFT JOIN and ensure it's a list
+            participants_data = row.get("thread_participants")
+            if participants_data is None:
+                participants_data = []
+            elif not isinstance(participants_data, list):
+                # Handle case where JSONB might be returned as dict or other type
+                # Try to convert if it's a string (shouldn't happen with psycopg, but be defensive)
+                if isinstance(participants_data, str):
+                    try:
+                        import json
+                        participants_data = json.loads(participants_data)
+                        if not isinstance(participants_data, list):
+                            participants_data = []
+                    except Exception:
+                        participants_data = []
+                else:
+                    participants_data = []
+            
+            # Initialize thread in map if needed
+            if thread_id and thread_id not in thread_participants_map:
+                thread_participants_map[thread_id] = []
+            
+            # Process participants if we have a valid thread_id and participants data
+            if thread_id and isinstance(participants_data, list) and len(participants_data) > 0:
+                for participant in participants_data:
+                    if not isinstance(participant, dict):
+                        continue
+                    identifier = participant.get("identifier")
+                    identifier_type = participant.get("identifier_type")
+                    
+                    if identifier:
+                        # Deduplicate participants per thread by identifier
+                        existing = any(
+                            p.get("identifier") == identifier 
+                            for p in thread_participants_map[thread_id]
+                        )
+                        if not existing:
+                            thread_participants_map[thread_id].append({
+                                "identifier": identifier,
+                                "identifier_type": identifier_type,
+                            })
+                            
+                            stripped = _strip_identifier_prefix(identifier)
+                            kind = _infer_identifier_kind(stripped, identifier_type)
+                            
+                            if stripped and kind is not None:
+                                try:
+                                    normalized = normalize_identifier(
+                                        kind,
+                                        stripped,
+                                        default_region=settings.contacts_default_region,
+                                    )
+                                    key = f"{normalized.kind.value}:{normalized.value_canonical}"
+                                    participant_keys.setdefault(key, stripped)
+                                except Exception:
+                                    pass
+
+        # Step 3: resolve senders and participants in one query
+        resolver = PeopleResolver(conn, default_region=settings.contacts_default_region)
+        resolved: dict[str, dict[str, str]] = {}
+        
+        if sender_keys:
+            try:
+                items: list[tuple[IdentifierKind, str]] = []
+                for key, fallback in sender_keys.items():
+                    kind_str, _canonical = key.split(":", 1)
+                    kind = IdentifierKind.EMAIL if kind_str == "email" else IdentifierKind.PHONE
+                    items.append((kind, fallback))
+                resolved.update(resolver.resolve_many(items))
+            except Exception:
+                pass
+        
+        if participant_keys:
+            try:
+                items: list[tuple[IdentifierKind, str]] = []
+                for key, fallback in participant_keys.items():
+                    kind_str, _canonical = key.split(":", 1)
+                    kind = IdentifierKind.EMAIL if kind_str == "email" else IdentifierKind.PHONE
+                    items.append((kind, fallback))
+                resolved.update(resolver.resolve_many(items))
+            except Exception:
+                pass
+
+    # Step 4: resolve participant names
+    thread_participant_names: dict[str | None, list[str]] = {}
+    for thread_id, participants_list in thread_participants_map.items():
+        if not thread_id:
+            continue
+        participant_names = []
+        for participant in participants_list:
+            identifier = participant.get("identifier")
+            identifier_type = participant.get("identifier_type")
+            if not identifier:
+                continue
+                
+            stripped = _strip_identifier_prefix(identifier)
+            kind = _infer_identifier_kind(stripped, identifier_type)
+            
+            participant_name = stripped or identifier or "Unknown"
+            if stripped and kind is not None:
+                try:
+                    normalized = normalize_identifier(
+                        kind,
+                        stripped,
+                        default_region=settings.contacts_default_region,
+                    )
+                    key = f"{normalized.kind.value}:{normalized.value_canonical}"
+                    if key in resolved:
+                        resolved_name = resolved[key].get("display_name")
+                        if resolved_name:
+                            participant_name = resolved_name
+                except Exception:
+                    pass
+            
+            if participant_name and participant_name not in participant_names:
+                participant_names.append(participant_name)
+        
+        thread_participant_names[thread_id] = sorted(participant_names)
+    
+    # Ensure all threads that appear in rows have a participants entry (even if empty)
+    seen_thread_ids = set()
+    for row in rows:
+        thread_id_val = row.get("thread_id")
+        thread_id: str | None = str(thread_id_val) if thread_id_val else None
+        if thread_id and thread_id not in thread_participant_names and thread_id not in seen_thread_ids:
+            thread_participant_names[thread_id] = []
+            seen_thread_ids.add(thread_id)
+
+    # Step 5: group into threads, apply ordering rules (offline; DB connection closed)
+    threads: dict[str | None, dict[str, Any]] = {}
+
+    for row, (lookup_key, fallback, is_from_me) in zip(rows, per_row_sender):
+        thread_id_val = row.get("thread_id")
+        thread_id: str | None = str(thread_id_val) if thread_id_val else None
+        thread_name: str | None = row.get("thread_name")
+        date: datetime = row["content_timestamp"]
+        body: str = row.get("text") or ""
+
+        sender_name = fallback or "Unknown Sender"
+        if lookup_key and lookup_key in resolved:
+            sender_name = resolved[lookup_key].get("display_name") or sender_name
+
+        if is_from_me and self_display_name:
+            sender_name = self_display_name
+
+        bucket = threads.get(thread_id)
+        if bucket is None:
+            # Get participants for this thread (default to empty list)
+            participants_list = thread_participant_names.get(thread_id, [])
+            bucket = {
+                "thread_id": thread_id,
+                "thread_name": thread_name,
+                "participants": participants_list,
+                "messages": [],
+                "first_date": date,
+            }
+            threads[thread_id] = bucket
+        else:
+            if date < bucket["first_date"]:
+                bucket["first_date"] = date
+            if not bucket.get("thread_name") and thread_name:
+                bucket["thread_name"] = thread_name
+
+        bucket["messages"].append(IMessageItem(from_=sender_name, body=body, date=date))
+
+    thread_list: list[dict[str, Any]] = list(threads.values())
+    for t in thread_list:
+        t["messages"].sort(key=lambda m: m.date)
+        # Apply max_messages_per_thread limit if specified (newest messages first)
+        t["has_older_messages"] = False
+        if max_messages_per_thread is not None and len(t["messages"]) > max_messages_per_thread:
+            # Keep the newest messages (last N after sorting ascending)
+            t["has_older_messages"] = True
+            t["messages"] = t["messages"][-max_messages_per_thread:]
+    thread_list.sort(key=lambda t: t["first_date"])
+
+    return [
+        IMessageThread(
+            thread_id=t["thread_id"],
+            thread_name=t["thread_name"],
+            participants=t.get("participants", []),
+            messages=t["messages"],
+            has_older_messages=t.get("has_older_messages", False),
+        )
+        for t in thread_list
+    ]
 
 
 @app.get("/v1/healthz")
