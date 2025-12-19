@@ -127,6 +127,12 @@ class SearchRequest(BaseModel):
     group_by: Grouping | None = None
     page: PageCursor = Field(default_factory=PageCursor)
     include: IncludeSpec = Field(default_factory=IncludeSpec)
+    # Thread context configuration
+    thread_context_window: int = Field(default=2, ge=0, le=10, description="Number of messages before/after to include in conversation context")
+    include_conversation_summary: bool = Field(default=True, description="Include conversation summary statistics")
+    max_conversation_messages: int = Field(default=10, ge=1, le=50, description="Maximum messages to include in conversation context")
+    # Response format configuration
+    compact_format: bool = Field(default=True, description="Use compact token-efficient format (Option 4) for LLM consumption")
 
 
 class SearchHit(BaseModel):

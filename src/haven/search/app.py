@@ -8,7 +8,7 @@ from .config import get_settings
 from .routes import admin, indexes, ingest, search, tools
 
 
-assert_missing_dependencies(["qdrant-client"], "Search Service")
+# Qdrant removed - using Postgres pgvector for vector search
 
 
 def create_app() -> FastAPI:

@@ -24,8 +24,7 @@ services:
       args:
         SERVICE: "search"
     environment:
-      - QDRANT_URL=http://qdrant:6333
-      - QDRANT_COLLECTION=haven_chunks
+      # Qdrant removed - using Postgres pgvector for vector search
       - DB_DSN=postgresql://postgres:postgres@postgres:5432/haven
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-bge-m3}
@@ -33,9 +32,11 @@ services:
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-5-nano}
       - LLM_PROVIDER=${LLM_PROVIDER:-openai}
       - HAVEN_LLM_DEBUG=${HAVEN_LLM_DEBUG:-false}
+    ports:
+      - "127.0.0.1:8080:8080"
     depends_on:
       - postgres
-      - qdrant
+      # Qdrant removed - using Postgres pgvector
 
   gateway:
     build:
@@ -62,7 +63,7 @@ services:
       - catalog
       - minio
     ports:
-      - "127.0.0.1:8085:8080"
+      - "0.0.0.0:8085:8080"
 
   catalog:
     build:

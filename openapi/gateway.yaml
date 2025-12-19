@@ -399,6 +399,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/search/query:
+    post:
+      summary: Full-featured hybrid search query
+      description: |
+        Execute hybrid lexical + vector search with full SearchRequest support.
+        Provides access to advanced features including:
+        - Hybrid lexical + vector search
+        - Advanced filtering (source_type, person, thread_id, date ranges, etc.)
+        - Thread context window (automatic conversation context)
+        - Compact format for LLM consumption (default: true)
+        - Conversation summaries and participant resolution
+        - Image placeholder enhancement
+      operationId: query_search_v1_search_query_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResult'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/search/similar:
+    post:
+      summary: Vector similarity search
+      description: |
+        Perform vector similarity search using a provided vector query.
+        Requires a vector specification in the request payload.
+      operationId: similar_search_v1_search_similar_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResult'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/ask:
     post:
       summary: Ask Endpoint
@@ -1359,6 +1417,247 @@ components:
       - facets
       type: object
       title: SearchFacetsResponse
+    SearchRequest:
+      properties:
+        query:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Query
+        must:
+          items:
+            $ref: '#/components/schemas/QueryFilter'
+          type: array
+          title: Must
+          default: []
+        filter:
+          items:
+            $ref: '#/components/schemas/QueryFilter'
+          type: array
+          title: Filter
+          default: []
+        facets:
+          items:
+            type: string
+          type: array
+          title: Facets
+          default: []
+        vector:
+          anyOf:
+          - $ref: '#/components/schemas/SearchVectorQuery'
+          - type: 'null'
+          title: Vector
+        keyword:
+          anyOf:
+          - $ref: '#/components/schemas/SearchKeywordQuery'
+          - type: 'null'
+          title: Keyword
+        rerank:
+          anyOf:
+          - $ref: '#/components/schemas/RerankSpec'
+          - type: 'null'
+          title: Rerank
+        group_by:
+          anyOf:
+          - $ref: '#/components/schemas/Grouping'
+          - type: 'null'
+          title: Group By
+        page:
+          $ref: '#/components/schemas/PageCursor'
+          default:
+            cursor: null
+            size: 20
+        include:
+          $ref: '#/components/schemas/IncludeSpec'
+          default:
+            snippets: true
+            highlights: true
+            explain: false
+        thread_context_window:
+          type: integer
+          title: Thread Context Window
+          default: 2
+          minimum: 0
+          maximum: 10
+          description: Number of messages before/after to include in conversation context
+        include_conversation_summary:
+          type: boolean
+          title: Include Conversation Summary
+          default: true
+          description: Include conversation summary statistics
+        max_conversation_messages:
+          type: integer
+          title: Max Conversation Messages
+          default: 10
+          minimum: 1
+          maximum: 50
+          description: Maximum messages to include in conversation context
+        compact_format:
+          type: boolean
+          title: Compact Format
+          default: true
+          description: Use compact token-efficient format (Option 4) for LLM consumption
+      type: object
+      title: SearchRequest
+    SearchResult:
+      properties:
+        total_estimated:
+          type: integer
+          title: Total Estimated
+        cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+        hits:
+          items:
+            $ref: '#/components/schemas/SearchHit'
+          type: array
+          title: Hits
+        facet_counts:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: integer
+          title: Facet Counts
+          default: {}
+      required:
+      - total_estimated
+      - hits
+      type: object
+      title: SearchResult
+    SearchVectorQuery:
+      properties:
+        text:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Text
+        doc_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Doc Id
+        weight:
+          type: number
+          format: float
+          title: Weight
+          default: 1.0
+      type: object
+      title: SearchVectorQuery
+    SearchKeywordQuery:
+      properties:
+        weight:
+          type: number
+          format: float
+          title: Weight
+          default: 1.0
+        operator:
+          type: string
+          enum:
+          - AND
+          - OR
+          title: Operator
+          default: OR
+      type: object
+      title: SearchKeywordQuery
+    QueryFilter:
+      properties:
+        term:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Term
+        value:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Value
+        range:
+          anyOf:
+          - $ref: '#/components/schemas/RangeFilter'
+          - type: 'null'
+          title: Range
+      type: object
+      title: QueryFilter
+    RangeFilter:
+      properties:
+        field:
+          type: string
+          title: Field
+        gte:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: number
+          - type: 'null'
+          title: Gte
+        lte:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: number
+          - type: 'null'
+          title: Lte
+      required:
+      - field
+      type: object
+      title: RangeFilter
+    Grouping:
+      properties:
+        field:
+          type: string
+          title: Field
+      required:
+      - field
+      type: object
+      title: Grouping
+    PageCursor:
+      properties:
+        cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+        size:
+          type: integer
+          title: Size
+          default: 20
+          minimum: 1
+          maximum: 200
+      type: object
+      title: PageCursor
+    RerankSpec:
+      properties:
+        top_k:
+          type: integer
+          title: Top K
+          default: 50
+          minimum: 1
+          maximum: 200
+        model:
+          type: string
+          title: Model
+          default: cross-encoder/ms-marco
+      type: object
+      title: RerankSpec
+    IncludeSpec:
+      properties:
+        snippets:
+          type: boolean
+          title: Snippets
+          default: true
+        highlights:
+          type: boolean
+          title: Highlights
+          default: true
+        explain:
+          type: boolean
+          title: Explain
+          default: false
+      type: object
+      title: IncludeSpec
     FacetFilter:
       properties:
         name:

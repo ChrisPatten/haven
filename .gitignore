@@ -227,3 +227,5 @@ tests/fixtures/email/*
 
 .tmp/
 documentation/postgres_batch_results.md
+
+.obsidian/
